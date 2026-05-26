@@ -1,5 +1,7 @@
 import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers } from 'cc';
 import { loginAndGetProgress, saveProgress } from './api';
+import { SoundManager } from './SoundManager';
+import { AdManager } from './AdManager';
 
 const { ccclass } = _decorator;
 void Widget;
@@ -89,6 +91,7 @@ interface BoxView {
     body: Graphics;
     lockLabel: Label;
     slots: BoxSlotView[];
+    lastBodyColor: string;
 }
 
 interface TempSlotView {
@@ -98,7 +101,7 @@ interface TempSlotView {
 }
 
 interface ToolView {
-    key: 'add' | 'break' | 'clear';
+    key: 'add' | 'clear';
     node: Node;
     iconLabel: Label;
     badge: Graphics;
@@ -126,30 +129,30 @@ const PLATE_TEMPLATES: PlateTemplate[] = [
 ];
 
 const BOX_COLORS: Record<ScrewColor, Color> = {
-    [ScrewColor.RED]: new Color(209, 82, 102),
-    [ScrewColor.BLUE]: new Color(91, 137, 247),
-    [ScrewColor.YELLOW]: new Color(250, 203, 73),
-    [ScrewColor.PINK]: new Color(248, 127, 169),
-    [ScrewColor.ORANGE]: new Color(245, 150, 68),
-    [ScrewColor.GREEN]: new Color(85, 204, 163),
-    [ScrewColor.PURPLE]: new Color(165, 96, 232),
-    [ScrewColor.CYAN]: new Color(74, 192, 219)
+    [ScrewColor.RED]: new Color(220, 80, 70),
+    [ScrewColor.BLUE]: new Color(70, 110, 200),
+    [ScrewColor.YELLOW]: new Color(240, 190, 50),
+    [ScrewColor.PINK]: new Color(235, 120, 150),
+    [ScrewColor.ORANGE]: new Color(245, 150, 60),
+    [ScrewColor.GREEN]: new Color(100, 190, 120),
+    [ScrewColor.PURPLE]: new Color(155, 85, 195),
+    [ScrewColor.CYAN]: new Color(80, 180, 200)
 };
 
 const FACE_COLORS: Record<PlateTheme, Color> = {
-    yellow: new Color(241, 208, 86, 255),
-    blue: new Color(102, 138, 228, 255)
+    yellow: new Color(200, 170, 100, 255),
+    blue: new Color(180, 150, 110, 255)
 };
 
 const SCREW_FACE_COLORS: Record<ScrewColor, Color> = {
-    red: new Color(166, 75, 92, 255),
-    blue: new Color(102, 138, 228, 255),
-    yellow: new Color(242, 209, 90, 255),
-    pink: new Color(231, 119, 170, 255),
-    orange: new Color(245, 157, 59, 255),
-    green: new Color(85, 189, 167, 255),
-    purple: new Color(134, 88, 213, 255),
-    cyan: new Color(90, 206, 226, 255)
+    red: new Color(200, 60, 50, 255),
+    blue: new Color(55, 90, 180, 255),
+    yellow: new Color(225, 175, 40, 255),
+    pink: new Color(220, 100, 130, 255),
+    orange: new Color(230, 135, 45, 255),
+    green: new Color(80, 170, 100, 255),
+    purple: new Color(135, 70, 175, 255),
+    cyan: new Color(60, 160, 185, 255)
 };
 
 const PAGE_CONTENT_SCALE = 0.9;
@@ -162,6 +165,8 @@ const SUPPORT_MIN_DROP_DISTANCE = 6;
 const SUPPORT_SURFACE_SCAN_STEP = 4;
 const SUPPORT_SURFACE_REFINE_ITERATIONS = 8;
 
+let tutorialShown = false;
+
 @ccclass('GameManager')
 export class GameManager extends Component {
     private rootNode: Node | null = null;
@@ -170,11 +175,12 @@ export class GameManager extends Component {
     private totalScrews = 0;
     private removedScrews = 0;
     private gameOver = false;
+    private loadingNode: Node | null = null;
 
     private boxes: BoxData[] = [];
     private tempHoles: ScrewColor[] = [];
     private plates: PlateData[] = [];
-    private tools = { add: 0, break: 1, clear: 1 };
+    private tools = { add: 0, clear: 1 };
 
     private topAreaNode: Node | null = null;
     private boardAreaNode: Node | null = null;
@@ -204,8 +210,101 @@ export class GameManager extends Component {
 
     async start() {
         this.setupLayout();
+        this.initSound();
+        this.initAd();
+        this.showLoadingOverlay();
+        const loadStart = Date.now();
         this.currentLevel = await loginAndGetProgress();
         this.initGame();
+        const elapsed = (Date.now() - loadStart) / 1000;
+        const delay = Math.max(0, 2.0 - elapsed);
+        this.scheduleOnce(() => {
+            this.hideLoadingOverlay();
+            this.scheduleOnce(() => this.showTutorialIfNeeded(), 0.35);
+        }, delay);
+    }
+
+    private initSound() {
+        const scene = director.getScene();
+        if (!scene) return;
+        const soundNode = new Node('SoundManager');
+        soundNode.addComponent(SoundManager);
+        scene.addChild(soundNode);
+    }
+
+    private initAd() {
+        const scene = director.getScene();
+        if (!scene) return;
+        const adNode = new Node('AdManager');
+        adNode.addComponent(AdManager);
+        scene.addChild(adNode);
+    }
+
+    private showTutorialIfNeeded() {
+        if (this.currentLevel !== 1) return;
+        if (tutorialShown) return;
+
+        tutorialShown = true;
+
+        this.renderModal({
+            title: '🎉 欢迎来到果园',
+            sub: '🍎 点击果子 → 投入同色果篮\n🧺 凑满果篮 → 自动清空继续\n🍃 树枝清空 → 掉落露出新果子\n\n没合适果篮？先放果盘暂存！',
+            button: '知道了！',
+            onConfirm: () => {}
+        });
+    }
+
+    private showLoadingOverlay() {
+        const scene = director.getScene();
+        if (!scene || !this.rootNode) return;
+
+        this.loadingNode = this.createNode('LoadingOverlay', this.rootNode, 0, 0, this.screenWidth, this.screenHeight);
+        this.loadingNode.setSiblingIndex(998);
+
+        const mask = this.createGraphicsNode('Mask', this.loadingNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(225, 240, 210, 255), 0);
+
+        const centerY = 30;
+        const ringSize = 80;
+        const spinner = this.createNode('Spinner', this.loadingNode, 0, centerY, ringSize, ringSize);
+
+        for (let i = 0; i < 8; i++) {
+            const angle = (i / 8) * Math.PI * 2;
+            const dotX = Math.cos(angle) * 26;
+            const dotY = Math.sin(angle) * 26;
+            const dotG = this.createGraphicsNode(`Dot_${i}`, spinner, 14, 14, dotX, dotY);
+            const alpha = 80 + i * 22;
+            const size = 4 + i * 0.4;
+            const dg = dotG.getComponent(Graphics)!;
+            dg.fillColor = new Color(100, 160, 80, alpha);
+            dg.circle(0, 0, size);
+            dg.fill();
+        }
+
+        tween(spinner).by(1.2, { angle: -360 }).repeatForever().start();
+
+        const innerG = this.createGraphicsNode('Inner', spinner, 30, 30, 0, 0);
+        this.drawCircle(innerG.getComponent(Graphics)!, 13, new Color(250, 160, 60, 255), 2, new Color(200, 100, 30, 240));
+
+        const title = this.createLabel(this.loadingNode, '果园大丰收', 0, centerY - 60, 24, new Color(80, 60, 35, 255), true);
+        title.getComponent(Label)!.horizontalAlign = 1;
+
+        const subtitle = this.createLabel(this.loadingNode, '采摘中...', 0, centerY - 90, 14, new Color(130, 100, 70, 255), false);
+        subtitle.getComponent(Label)!.horizontalAlign = 1;
+    }
+
+    private hideLoadingOverlay() {
+        if (!this.loadingNode || !this.loadingNode.isValid) return;
+
+        tween(this.loadingNode)
+            .to(0.25, { scale: new Vec3(0.9, 0.9, 1) })
+            .call(() => {
+                if (this.loadingNode && this.loadingNode.isValid) {
+                    this.loadingNode.destroy();
+                    this.loadingNode = null;
+                }
+            })
+            .start();
     }
 
     private findCanvasNode() {
@@ -303,7 +402,7 @@ export class GameManager extends Component {
         }
 
         const background = this.createGraphicsNode('Background', this.rootNode, this.screenWidth, this.screenHeight, 0, 0);
-        this.drawRoundedRect(background.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(232, 239, 247, 255), 0);
+        this.drawRoundedRect(background.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(235, 245, 225, 255), 0);
 
         const topY = this.screenHeight / 2 - this.topHeight / 2;
         const boardY = -this.screenHeight / 2 + this.bottomHeight + this.boardHeight / 2;
@@ -311,20 +410,20 @@ export class GameManager extends Component {
 
         this.topAreaNode = this.createNode('TopArea', this.rootNode, 0, topY, this.screenWidth, this.topHeight);
         const topBg = this.createGraphicsNode('TopBg', this.topAreaNode, this.screenWidth, this.topHeight, 0, 0);
-        this.drawRoundedRect(topBg.getComponent(Graphics)!, this.screenWidth, this.topHeight, new Color(240, 244, 249, 255), 0);
+        this.drawRoundedRect(topBg.getComponent(Graphics)!, this.screenWidth, this.topHeight, new Color(245, 248, 235, 255), 0);
 
         this.boardAreaNode = this.createNode('BoardArea', this.rootNode, 0, boardY, this.screenWidth, this.boardHeight);
         const boardMask = this.boardAreaNode.addComponent(Mask);
         
         const boardBg = this.createGraphicsNode('BoardBg', this.boardAreaNode, this.screenWidth, this.boardHeight, 0, 0);
-        this.drawRoundedRect(boardBg.getComponent(Graphics)!, this.screenWidth, this.boardHeight, new Color(204, 220, 235, 255), 0);
+        this.drawRoundedRect(boardBg.getComponent(Graphics)!, this.screenWidth, this.boardHeight, new Color(210, 225, 190, 255), 0);
 
         this.boardContentNode = this.createNode('BoardContent', this.boardAreaNode, 0, 0, this.boardWidth, this.boardHeight - 20);
         this.boardEffectNode = this.createNode('BoardEffect', this.boardAreaNode, 0, 0, this.boardWidth, this.boardHeight - 20);
 
         this.bottomAreaNode = this.createNode('BottomArea', this.rootNode, 0, bottomY, this.screenWidth, this.bottomHeight);
         const bottomBg = this.createGraphicsNode('BottomBg', this.bottomAreaNode, this.screenWidth, this.bottomHeight, 0, 0);
-        this.drawRoundedRect(bottomBg.getComponent(Graphics)!, this.screenWidth, this.bottomHeight, new Color(201, 218, 234, 255), 0);
+        this.drawRoundedRect(bottomBg.getComponent(Graphics)!, this.screenWidth, this.bottomHeight, new Color(220, 230, 200, 255), 0);
 
         this.modalLayerNode = this.createNode('ModalLayer', this.rootNode, 0, 0, this.screenWidth, this.screenHeight);
         this.modalLayerNode.setSiblingIndex(999);
@@ -340,23 +439,47 @@ export class GameManager extends Component {
 
         const topInnerY = this.topHeight / 2 - 42 - TOP_CONTENT_OFFSET;
 
-        this.levelBadgeLabel = this.createLabel(this.topAreaNode, '第 1 关', 0, topInnerY + 8, 22, new Color(255, 255, 255, 255), true);
+        this.levelBadgeLabel = this.createLabel(this.topAreaNode, '第 1 关', 0, topInnerY + 8, 22, new Color(80, 55, 30, 255), true);
 
         const badge = this.createGraphicsNode('LevelBadgeBg', this.topAreaNode, 130, 44, 0, topInnerY + 8);
         badge.setSiblingIndex(0);
-        this.drawRoundedRect(badge.getComponent(Graphics)!, 130, 44, new Color(165, 172, 183, 255), 22);
+        this.drawRoundedRect(badge.getComponent(Graphics)!, 130, 44, new Color(130, 160, 90, 255), 22);
         this.progressLabel = null;
     }
 
     private initGame() {
         this.gameOver = false;
+        this.plates = [];
         this.tempHoles = [];
         this.removedScrews = 0;
-        this.tools = { add: 0, break: 1, clear: 1 };
+        this.tools = { add: 0, clear: 1 };
+        this.plateNodes.forEach((node) => {
+            if (node && node.isValid) {
+                this.destroyNodeRecursively(node);
+            }
+        });
+        this.plateNodes.clear();
+        this.fallingPlateNodes.forEach((node) => {
+            if (node && node.isValid) {
+                this.destroyNodeRecursively(node);
+            }
+        });
         this.fallingPlateNodes.clear();
+        if (this.boardContentNode) {
+            this.boardContentNode.removeAllChildren();
+        }
         if (this.boardEffectNode) {
             this.boardEffectNode.removeAllChildren();
         }
+        this.boxViews.forEach((view) => {
+            if (view.node && view.node.isValid) {
+                view.node.destroy();
+            }
+        });
+        this.boxViews = [];
+        this.boxes.forEach((box) => {
+            box.clearScheduled = false;
+        });
         this.boxes = [
             { color: ScrewColor.YELLOW, capacity: 3, screws: [], isNew: false, isSlidingOut: false, clearScheduled: false },
             { color: ScrewColor.BLUE, capacity: 3, screws: [], isNew: false, isSlidingOut: false, clearScheduled: false },
@@ -372,6 +495,12 @@ export class GameManager extends Component {
         this.renderAll();
     }
 
+    private destroyNodeRecursively(node: Node) {
+        if (node.isValid) {
+            node.destroy();
+        }
+    }
+
     private renderAll() {
         this.renderTopUI();
         this.renderBoard();
@@ -384,7 +513,7 @@ export class GameManager extends Component {
         this.normalizeEndgameBoxes();
 
         if (this.titleLabel) {
-            this.titleLabel.string = '放我出去呗';
+            this.titleLabel.string = '果园大丰收';
         }
         if (this.levelBadgeLabel) {
             this.levelBadgeLabel.string = `第 ${this.currentLevel} 关`;
@@ -414,11 +543,15 @@ export class GameManager extends Component {
             boxNode.setPosition(new Vec3(x, 0, 0));
             boxNode.active = true;
             const bodyColor = box.color === 'locked'
-                ? new Color(91, 204, 189, 255)
+                ? new Color(140, 120, 90, 255)
                 : box.color === 'empty'
-                    ? new Color(200, 200, 200, 255) // 修复空盒子颜色不可见问题
+                    ? new Color(180, 170, 150, 255)
                     : this.getBoxColor(box.color);
-            this.drawRoundedRect(view.body, boxWidth, boxHeight, bodyColor, 12, box.color === 'empty' ? 0 : 4, new Color(255, 255, 255, 210));
+            const colorKey = `${box.color}_${box.capacity}`;
+            if (view.lastBodyColor !== colorKey) {
+                this.drawBasketBody(view.body, boxWidth, boxHeight, bodyColor, box.color);
+                view.lastBodyColor = colorKey;
+            }
 
             const isLocked = box.color === 'locked';
             view.lockLabel.node.active = isLocked;
@@ -434,6 +567,10 @@ export class GameManager extends Component {
                 if (slotPos) {
                     slotView.node.setPosition(new Vec3(slotPos.x, slotPos.y, 0));
                 }
+                
+                // 动态绘制孔洞大小
+                const holeRadius = boxCapacity >= 6 ? 10 : 12;
+                this.drawCircle(slotView.hole, holeRadius, new Color(0, 0, 0, 35), 0);
 
                 if (!active) {
                     this.updateScrewHost(slotView.screwHost, screwSize);
@@ -467,7 +604,7 @@ export class GameManager extends Component {
         const containerW = this.screenWidth - 154;
         const containerH = 36;
         if (this.tempBgGraphics) {
-            this.drawRoundedRect(this.tempBgGraphics, containerW, containerH, new Color(228, 233, 240, 255), 15, 2, new Color(255, 255, 255, 180));
+            this.drawRoundedRect(this.tempBgGraphics, containerW, containerH, new Color(215, 225, 190, 255), 15, 2, new Color(180, 195, 160, 180));
         }
 
         this.tempSlotViews.forEach((slotView, index) => {
@@ -481,9 +618,8 @@ export class GameManager extends Component {
         this.ensureToolViews();
 
         const toolList = [
-            { key: 'add' as const, label: '加孔位', icon: '🔍', count: this.tools.add },
-            { key: 'break' as const, label: '熔玻璃', icon: '🔨', count: this.tools.break },
-            { key: 'clear' as const, label: '清空孔位', icon: '🧹', count: this.tools.clear }
+            { key: 'add' as const, label: '加果篮', icon: '🧺', count: this.tools.add },
+            { key: 'clear' as const, label: '清空果盘', icon: '🧹', count: this.tools.clear }
         ];
         toolList.forEach((tool, index) => {
             const view = this.toolViews[index];
@@ -491,8 +627,8 @@ export class GameManager extends Component {
             view.iconLabel.color = (tool.count <= 0 && tool.key !== 'add')
                 ? new Color(200, 200, 200, 255)
                 : new Color(255, 255, 255, 255);
-            const badgeColor = (tool.count <= 0 && tool.key !== 'add') ? new Color(168, 162, 158, 255) : new Color(245, 158, 11, 255);
-            this.drawCircle(view.badge, 13, badgeColor, 3, new Color(255, 238, 196, 255));
+            const badgeColor = (tool.count <= 0 && tool.key !== 'add') ? new Color(160, 150, 130, 255) : new Color(220, 160, 50, 255);
+            this.drawCircle(view.badge, 13, badgeColor, 3, new Color(255, 245, 220, 255));
             view.badgeLabel.string = String(tool.count > 0 ? tool.count : '+');
         });
     }
@@ -508,7 +644,7 @@ export class GameManager extends Component {
         });
     }
 
-    private renderModal(config: { title: string; sub: string; button: string; onConfirm: () => void } | null) {
+    private renderModal(config: { title: string; sub: string; button: string; onConfirm: () => void; height?: number } | null) {
         if (!this.modalLayerNode) return;
         this.modalLayerNode.removeAllChildren();
         if (!config) return;
@@ -516,16 +652,28 @@ export class GameManager extends Component {
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 110), 0);
 
-        const panel = this.createNode('Panel', this.modalLayerNode, 0, 0, this.screenWidth * 0.72, 220);
-        const panelBg = this.createGraphicsNode('PanelBg', panel, this.screenWidth * 0.72, 220, 0, 0);
-        this.drawRoundedRect(panelBg.getComponent(Graphics)!, this.screenWidth * 0.72, 220, new Color(255, 255, 255, 255), 24);
+        const panelH = config.height || 300;
+        const panelW = this.screenWidth * 0.78;
+        const panel = this.createNode('Panel', this.modalLayerNode, 0, 0, panelW, panelH);
+        const panelBg = this.createGraphicsNode('PanelBg', panel, panelW, panelH, 0, 0);
+        this.drawRoundedRect(panelBg.getComponent(Graphics)!, panelW, panelH, new Color(255, 255, 255, 255), 24);
 
-        this.createLabel(panel, config.title, 0, 50, 28, new Color(32, 36, 42, 255), true);
-        this.createLabel(panel, config.sub, 0, 4, 18, new Color(88, 95, 108, 255), true, 28);
+        this.createLabel(panel, config.title, 0, panelH / 2 - 40, 26, new Color(32, 36, 42, 255), true);
 
-        const button = this.createNode('Confirm', panel, 0, -66, 150, 54);
-        const buttonBg = this.createGraphicsNode('BtnBg', button, 150, 54, 0, 0);
-        this.drawRoundedRect(buttonBg.getComponent(Graphics)!, 150, 54, new Color(136, 74, 231, 255), 27);
+        const subH = panelH - 130;
+        const subNode = this.createNode('SubLabel', panel, 0, 0, panelW - 40, subH);
+        const subLabel = subNode.addComponent(Label);
+        subLabel.string = config.sub;
+        subLabel.fontSize = 16;
+        subLabel.lineHeight = 26;
+        subLabel.color = new Color(88, 95, 108, 255);
+        subLabel.horizontalAlign = 1;
+        subLabel.verticalAlign = 1;
+        subLabel.enableWrapText = true;
+
+        const button = this.createNode('Confirm', panel, 0, -panelH / 2 + 40, 150, 50);
+        const buttonBg = this.createGraphicsNode('BtnBg', button, 150, 50, 0, 0);
+        this.drawRoundedRect(buttonBg.getComponent(Graphics)!, 150, 50, new Color(100, 155, 85, 255), 25);
         this.createLabel(button, config.button, 0, 0, 20, new Color(255, 255, 255, 255), true);
         button.on(Node.EventType.TOUCH_END, () => {
             this.renderModal(null);
@@ -586,8 +734,8 @@ export class GameManager extends Component {
             if (Math.random() < barProbability) {
                 const isHorizontal = Math.random() > 0.5;
                 const barTemplate = isHorizontal
-                    ? { type: 'rect' as const, w: 280, h: 70, holes: [{ x: 40, y: 35 }, { x: 140, y: 35 }, { x: 240, y: 35 }] }
-                    : { type: 'rect' as const, w: 70, h: 280, holes: [{ x: 35, y: 40 }, { x: 35, y: 140 }, { x: 35, y: 240 }] };
+                    ? { type: 'rect' as const, w: 320, h: 90, holes: [{ x: 50, y: 45 }, { x: 160, y: 45 }, { x: 270, y: 45 }] }
+                    : { type: 'rect' as const, w: 90, h: 320, holes: [{ x: 45, y: 50 }, { x: 45, y: 160 }, { x: 45, y: 270 }] };
                 availableTemplates = [...availableTemplates, barTemplate];
             }
         }
@@ -860,6 +1008,7 @@ export class GameManager extends Component {
                     title: '暂存孔满了',
                     sub: '孔位已满，重试这一关吧',
                     button: '重试一次',
+                    height: 180,
                     onConfirm: () => {
                         this.initGame();
                     }
@@ -1223,44 +1372,59 @@ export class GameManager extends Component {
         }
     }
 
-    private useTool(type: 'add' | 'break' | 'clear') {
+    private useTool(type: 'add' | 'clear') {
         if (this.gameOver) return;
 
         if (type === 'add') {
             const lockedBox = this.boxes.find((box) => box.color === 'locked');
-            if (!lockedBox) return;
-            this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
+            if (!lockedBox) {
+                this.renderModal({
+                    title: '提示',
+                    sub: '无果篮可解锁',
+                    button: '知道了',
+                    height: 170,
+                    onConfirm: () => {}
+                });
+                return;
+            }
+            this.showAdThen(() => {
+                this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
+            });
             return;
         }
 
-        if (type === 'break') {
-            const visible = this.plates.filter((plate) => !plate.removed && plate.state !== 'falling');
-            if (visible.length === 0) return;
+        if (this.tempHoles.length === 0) {
+            this.renderModal({
+                title: '提示',
+                sub: '果盘中没有果子',
+                button: '知道了',
+                height: 170,
+                onConfirm: () => {}
+            });
+            return;
+        }
+        this.showAdThen(() => {
             this.tryConsumeTool(type, () => {
-                visible.sort((a, b) => b.layer - a.layer);
-                const target = visible[0];
-                this.startPlateFalling(target, true);
+                this.tempHoles = [];
+                this.renderTopUI();
+                this.checkWin();
             });
-            return;
-        }
-
-        const hasPartialBox = this.boxes.some((box) => box.color !== 'locked' && box.color !== 'empty' && box.screws.length > 0 && box.screws.length < box.capacity);
-        if (!hasPartialBox && this.tempHoles.length === 0) return;
-        this.tryConsumeTool(type, () => {
-            this.boxes.forEach((box) => {
-                if (box.color !== 'locked' && box.color !== 'empty' && box.screws.length > 0 && box.screws.length < box.capacity) {
-                    box.screws = [];
-                }
-            });
-            this.tempHoles = [];
-            this.reevaluateBoxColors();
-            this.checkAllBoxesForClear();
-            this.renderTopUI();
-            this.checkWin();
         });
     }
 
-    private tryConsumeTool(type: 'add' | 'break' | 'clear', callback: () => void) {
+    private showAdThen(callback: () => void) {
+        const adManager = AdManager.getInstance();
+        if (!adManager) {
+            callback();
+            return;
+        }
+        adManager.showRewardedAd().then(() => {
+            callback();
+        }).catch(() => {
+        });
+    }
+
+    private tryConsumeTool(type: 'add' | 'clear', callback: () => void) {
         if (this.tools[type] > 0) {
             this.tools[type]--;
         }
@@ -1286,6 +1450,7 @@ export class GameManager extends Component {
             title: '通关成功',
             sub: `太棒了，你已完成第 ${this.currentLevel} 关`,
             button: '下一关',
+            height: 180,
             onConfirm: () => {
                 this.currentLevel++;
                 saveProgress(this.currentLevel);
@@ -1508,22 +1673,22 @@ export class GameManager extends Component {
         const plateNode = this.createNode(`PlateVisual_${plate.id}`, pivotNode, -offsetX, -offsetY, plate.w, plate.h);
 
         const shadow = this.createGraphicsNode('Shadow', plateNode, plate.w + 6, plate.h + 6, 6, -6);
-        this.drawPlateShape(shadow.getComponent(Graphics)!, plate.type, plate.w + 6, plate.h + 6, new Color(162, 176, 190, 105), 24, 0);
+        this.drawPlateShape(shadow.getComponent(Graphics)!, plate.type, plate.w + 6, plate.h + 6, new Color(130, 110, 75, 120), 24, 0);
 
         const face = this.createGraphicsNode('Face', plateNode, plate.w, plate.h, 0, 0);
-        this.drawPlateShape(face.getComponent(Graphics)!, plate.type, plate.w, plate.h, FACE_COLORS[plate.color], 22, 5, new Color(245, 248, 250, 230));
+        this.drawPlateShape(face.getComponent(Graphics)!, plate.type, plate.w, plate.h, FACE_COLORS[plate.color], 22, 5, new Color(225, 210, 180, 200));
 
         plate.screws.filter((screw) => !screw.removed).forEach((screw) => {
             const screwSize = 34;
             const localX = -plate.w / 2 + screw.x;
             const localY = plate.h / 2 - screw.y;
 
-            const screwContainer = this.createNode(`ScrewContainer_${screw.id}`, plateNode, localX, localY, screwSize, screwSize);
+            const fruitContainer = this.createNode(`FruitContainer_${screw.id}`, plateNode, localX, localY, screwSize, screwSize);
 
-            const holeShadow = this.createGraphicsNode('Hole', screwContainer, screwSize, screwSize, 0, 0);
-            this.drawCircle(holeShadow.getComponent(Graphics)!, screwSize / 2, new Color(0, 0, 0, 40), 0);
+            const holeShadow = this.createGraphicsNode('Hole', fruitContainer, screwSize, screwSize, 0, 0);
+            this.drawCircle(holeShadow.getComponent(Graphics)!, screwSize / 2, new Color(80, 60, 30, 60), 0);
 
-            const screwNode = this.createScrewVisual(screwContainer, 0, 0, screwSize, screw.color, true);
+            const screwNode = this.createScrewVisual(fruitContainer, 0, 0, screwSize, screw.color, true);
             if (interactive) {
                 screwNode.on(Node.EventType.TOUCH_END, (e) => {
                     e.propagationStopped = true;
@@ -1558,7 +1723,7 @@ export class GameManager extends Component {
 
     private updateScrewHost(host: Node, diameter: number, color?: ScrewColor) {
         const existing = host.children[0];
-        const expectedName = color ? `ScrewVisual_${color}` : '';
+        const expectedName = color ? `Fruit_${color}` : '';
         if (!color) {
             if (existing) {
                 host.removeAllChildren();
@@ -1585,21 +1750,21 @@ export class GameManager extends Component {
         }
         if (capacity === 5) {
             return [
-                { x: -19, y: 15 },
-                { x: 19, y: 15 },
-                { x: -19, y: -12 },
-                { x: 19, y: -12 },
+                { x: -19, y: 17 },
+                { x: 19, y: 17 },
+                { x: -19, y: -14 },
+                { x: 19, y: -14 },
                 { x: 0, y: 2 }
             ];
         }
         if (capacity === 6) {
             return [
-                { x: -19, y: 15 },
-                { x: 0, y: 15 },
-                { x: 19, y: 15 },
-                { x: -19, y: -12 },
-                { x: 0, y: -12 },
-                { x: 19, y: -12 }
+                { x: -13, y: 24 },
+                { x: -13, y: 2 },
+                { x: -13, y: -20 },
+                { x: 13, y: 24 },
+                { x: 13, y: 2 },
+                { x: 13, y: -20 }
             ];
         }
         return [
@@ -1625,39 +1790,33 @@ export class GameManager extends Component {
             const boxNode = this.createNode(`Box_${index}`, this.boxesContainerNode, x, 0, boxWidth, boxHeight);
 
             const backLayer = this.createGraphicsNode('BackLayer', boxNode, boxWidth + 8, boxHeight + 8, 5, -4);
-            this.drawRoundedRect(backLayer.getComponent(Graphics)!, boxWidth + 8, boxHeight + 8, new Color(198, 208, 220, 170), 12);
+            this.drawRoundedRect(backLayer.getComponent(Graphics)!, boxWidth + 8, boxHeight + 8, new Color(140, 115, 80, 120), 12);
 
             const shadow = this.createGraphicsNode('Shadow', boxNode, boxWidth + 6, boxHeight + 6, 2, -2);
-            this.drawRoundedRect(shadow.getComponent(Graphics)!, boxWidth + 6, boxHeight + 6, new Color(210, 218, 228, 120), 12);
+            this.drawRoundedRect(shadow.getComponent(Graphics)!, boxWidth + 6, boxHeight + 6, new Color(155, 130, 95, 100), 12);
 
             const body = this.createGraphicsNode('Body', boxNode, boxWidth, boxHeight, 0, 0);
             const bodyGraphics = body.getComponent(Graphics)!;
 
-            const lockLabel = this.createLabel(boxNode, '解锁\n盒子', 0, 0, 15, new Color(255, 255, 255, 255), true, 19);
+            const lockLabel = this.createLabel(boxNode, '解锁\n果篮', 0, 0, 15, new Color(255, 255, 255, 255), true, 19);
             lockLabel.node.active = false;
 
             const slots: BoxSlotView[] = allSlotPositions.map((pos, slotIndex) => {
-                const slotSize = 24;
-                const slotNode = this.createNode(`SlotWrap_${slotIndex}`, boxNode, pos.x, pos.y, slotSize, slotSize);
-                const holeNode = this.createGraphicsNode(`Slot_${slotIndex}`, slotNode, slotSize, slotSize, 0, 0);
-                const hole = holeNode.getComponent(Graphics)!;
-                this.drawCircle(hole, 12, new Color(0, 0, 0, 35), 0);
-                const screwHost = this.createNode(`ScrewHost_${slotIndex}`, slotNode, 0, 0, slotSize, slotSize);
-                return { node: slotNode, hole, screwHost };
+                const slotNode = this.createNode(`SlotWrap_${slotIndex}`, boxNode, pos.x, pos.y, 24, 24);
+                const holeNode = this.createGraphicsNode(`Slot_${slotIndex}`, slotNode, 24, 24, 0, 0);
+                const screwHost = this.createNode(`ScrewHost_${slotIndex}`, slotNode, 0, 0, 24, 24);
+                return { node: slotNode, hole: holeNode.getComponent(Graphics)!, screwHost };
             });
 
             boxNode.on(Node.EventType.TOUCH_END, () => {
-                const box = this.boxes[index];
-                if (box && box.color === 'locked') {
-                    this.handleUnlockBox(box);
-                }
             }, this);
 
             this.boxViews.push({
                 node: boxNode,
                 body: bodyGraphics,
                 lockLabel,
-                slots
+                slots,
+                lastBodyColor: ''
             });
         }
     }
@@ -1682,7 +1841,7 @@ export class GameManager extends Component {
             const slotNode = this.createNode(`TempSlotWrap_${index}`, this.tempContainerNode, startX + index * spacing, 0, slotRadius * 2, slotRadius * 2);
             const holeNode = this.createGraphicsNode(`TempSlot_${index}`, slotNode, slotRadius * 2, slotRadius * 2, 0, 0);
             const hole = holeNode.getComponent(Graphics)!;
-            this.drawCircle(hole, slotRadius, new Color(202, 206, 212, 255), 0);
+            this.drawCircle(hole, slotRadius, new Color(170, 155, 120, 255), 0);
             const screwHost = this.createNode(`TempScrewHost_${index}`, slotNode, 0, 0, slotRadius * 2, slotRadius * 2);
             this.tempSlotViews.push({ node: slotNode, hole, screwHost });
         }
@@ -1692,14 +1851,13 @@ export class GameManager extends Component {
         if (!this.toolContainerNode || this.toolViews.length > 0) return;
 
         const toolList = [
-            { key: 'add' as const, label: '加孔位', icon: '🔍' },
-            { key: 'break' as const, label: '熔玻璃', icon: '🔨' },
-            { key: 'clear' as const, label: '清空孔位', icon: '🧹' }
+            { key: 'add' as const, label: '加果篮', icon: '🧺' },
+            { key: 'clear' as const, label: '清空果盘', icon: '🧹' }
         ];
         const buttonWidth = 74;
         const buttonHeight = 82;
-        const gap = (this.screenWidth - 40 - buttonWidth * 3) / 2;
-        const startX = -((buttonWidth * 3 + gap * 2) / 2) + buttonWidth / 2;
+        const gap = (this.screenWidth - 40 - buttonWidth * 2) / 2;
+        const startX = -((buttonWidth * 2 + gap) / 2) + buttonWidth / 2;
         const badgeX = buttonWidth / 2 - 6;
         const badgeY = buttonHeight / 2 - 6;
 
@@ -1708,10 +1866,10 @@ export class GameManager extends Component {
             const btnNode = this.createNode(`ToolBtn_${tool.key}`, this.toolContainerNode!, x, 0, buttonWidth, buttonHeight);
 
             const shadow = this.createGraphicsNode('Shadow', btnNode, buttonWidth + 6, buttonHeight + 6, 0, -2);
-            this.drawRoundedRect(shadow.getComponent(Graphics)!, buttonWidth + 6, buttonHeight + 6, new Color(201, 218, 234, 255), 18);
+            this.drawRoundedRect(shadow.getComponent(Graphics)!, buttonWidth + 6, buttonHeight + 6, new Color(180, 195, 160, 255), 18);
 
             const body = this.createGraphicsNode('Body', btnNode, buttonWidth, buttonHeight, 0, 0);
-            this.drawRoundedRect(body.getComponent(Graphics)!, buttonWidth, buttonHeight, new Color(138, 77, 232, 255), 16, 5, new Color(175, 133, 240, 255));
+            this.drawRoundedRect(body.getComponent(Graphics)!, buttonWidth, buttonHeight, new Color(100, 155, 85, 255), 16, 5, new Color(145, 190, 120, 255));
 
             const iconLabel = this.createLabel(btnNode, tool.icon, 0, 8, 28, new Color(255, 255, 255, 255), false, 32);
             iconLabel.enableWrapText = false;
@@ -1811,27 +1969,40 @@ export class GameManager extends Component {
     }
 
     private createScrewVisual(parent: Node, x: number, y: number, diameter: number, color: ScrewColor, addShadow: boolean = true): Node {
-        const screwNode = this.createNode(`ScrewVisual_${color}`, parent, x, y, diameter, diameter);
+        const fruitNode = this.createNode(`Fruit_${color}`, parent, x, y, diameter, diameter);
 
         if (addShadow) {
-            const shadow = this.createGraphicsNode('Shadow', screwNode, diameter, diameter, 0, -4);
-            this.drawCircle(shadow.getComponent(Graphics)!, diameter / 2, new Color(0, 0, 0, 60), 0);
+            const shadow = this.createGraphicsNode('Shadow', fruitNode, diameter, diameter, 0, -3);
+            this.drawCircle(shadow.getComponent(Graphics)!, diameter / 2, new Color(0, 0, 0, 50), 0);
         }
 
-        const body = this.createGraphicsNode('Body', screwNode, diameter - 2, diameter - 2, 0, 0);
-        this.drawCircle(body.getComponent(Graphics)!, (diameter - 2) / 2, SCREW_FACE_COLORS[color], 2, new Color(248, 244, 235, 245));
+        const bodyColor = BOX_COLORS[color];
+        const darkColor = SCREW_FACE_COLORS[color];
+        const r = (diameter - 2) / 2;
 
-        const innerBody = this.createGraphicsNode('InnerBody', screwNode, diameter - 8, diameter - 8, 0, 1);
-        this.drawCircle(innerBody.getComponent(Graphics)!, (diameter - 8) / 2, BOX_COLORS[color], 1, new Color(255, 255, 255, 80));
+        const body = this.createGraphicsNode('Body', fruitNode, diameter, diameter, 0, 0);
+        const bg = body.getComponent(Graphics)!;
+        bg.fillColor = bodyColor;
+        bg.circle(-1, 1, r);
+        bg.fill();
+        bg.lineWidth = 2;
+        bg.strokeColor = darkColor;
+        bg.circle(-1, 1, r);
+        bg.stroke();
+        bg.fillColor = new Color(255, 255, 255, 50);
+        bg.circle(-r * 0.3, r * 0.3, r * 0.3);
+        bg.fill();
 
-        const highlight = this.createGraphicsNode('Highlight', screwNode, Math.max(8, diameter * 0.34), Math.max(8, diameter * 0.22), -diameter * 0.12, diameter * 0.14);
-        this.drawCircle(highlight.getComponent(Graphics)!, Math.max(4, diameter * 0.11), new Color(255, 255, 255, 70), 0);
+        const stemG = this.createGraphicsNode('Stem', fruitNode, diameter * 0.35, diameter * 0.22, diameter * 0.08, diameter * 0.32);
+        const sg = stemG.getComponent(Graphics)!;
+        sg.fillColor = new Color(90, 150, 65, 220);
+        sg.rect(-1.5, 0, 3, diameter * 0.18);
+        sg.fill();
+        sg.fillColor = new Color(115, 180, 80, 200);
+        sg.ellipse(diameter * 0.06, diameter * 0.06, diameter * 0.06, diameter * 0.04);
+        sg.fill();
 
-        const crossColor = color === ScrewColor.YELLOW ? new Color(104, 82, 28, 220) : new Color(74, 33, 40, 220);
-        const cross = this.createLabel(screwNode, '+', 0, 1, diameter - 10, crossColor, true, diameter);
-        cross.getComponent(Label)!.isBold = true;
-
-        return screwNode;
+        return fruitNode;
     }
 
     private drawRoundedRect(graphics: Graphics, width: number, height: number, fill: Color, radius: number, lineWidth = 0, stroke?: Color) {
@@ -1867,6 +2038,77 @@ export class GameManager extends Component {
             return;
         }
         this.drawRoundedRect(graphics, width, height, fill, radius, lineWidth, stroke);
+    }
+
+    private drawBasketBody(graphics: Graphics, width: number, height: number, fill: Color, boxColor: BoxColor) {
+        graphics.clear();
+        const hw = width / 2;
+        const hh = height / 2;
+        const radius = 12;
+        const rimH = 7;
+
+        const isLocked = boxColor === 'locked';
+        const isEmpty = boxColor === 'empty';
+        const isActive = !isLocked && !isEmpty;
+
+        const basketOuter = isLocked ? new Color(120, 100, 70, 255)
+            : isEmpty ? new Color(175, 160, 140, 255)
+            : new Color(185, 150, 115, 255);
+        const darkBrown = new Color(105, 78, 48, 220);
+        const lightBrown = new Color(210, 175, 135, 180);
+
+        graphics.fillColor = basketOuter;
+        graphics.roundRect(-hw, -hh, width, height, radius);
+        graphics.fill();
+
+        if (isActive) {
+            graphics.fillColor = fill;
+            graphics.roundRect(-hw + 3, -hh + 3, width - 6, height - 6, radius - 2);
+            graphics.fill();
+        } else if (isLocked) {
+            graphics.fillColor = new Color(135, 112, 78, 255);
+            graphics.roundRect(-hw + 3, -hh + 3, width - 6, height - 6, radius - 2);
+            graphics.fill();
+        }
+
+        graphics.strokeColor = darkBrown;
+        graphics.lineWidth = 2;
+        graphics.roundRect(-hw, -hh, width, height, radius);
+        graphics.stroke();
+
+        graphics.strokeColor = lightBrown;
+        graphics.lineWidth = 1;
+        graphics.roundRect(-hw, -hh, width - 2, height - 2, radius);
+        graphics.stroke();
+
+        const rimY = hh - rimH;
+        graphics.fillColor = new Color(140, 108, 72, 255);
+        graphics.ellipse(0, rimY, hw, rimH);
+        graphics.fill();
+        graphics.strokeColor = lightBrown;
+        graphics.lineWidth = 1;
+        graphics.ellipse(0, rimY, hw - 2, rimH - 2);
+        graphics.stroke();
+
+        const handleH = 16;
+        const handleW = width * 0.4;
+        const handleStartY = hh - 4;
+        graphics.strokeColor = new Color(145, 112, 72, 240);
+        graphics.lineWidth = 3;
+        graphics.moveTo(-handleW, handleStartY);
+        graphics.quadraticCurveTo(0, hh + handleH, handleW, handleStartY);
+        graphics.stroke();
+
+        if (isLocked) {
+            graphics.strokeColor = new Color(60, 40, 20, 200);
+            graphics.lineWidth = 3;
+            graphics.moveTo(-8, -4);
+            graphics.lineTo(8, 4);
+            graphics.stroke();
+            graphics.moveTo(-8, 4);
+            graphics.lineTo(8, -4);
+            graphics.stroke();
+        }
     }
 
     private getBoxColor(color: BoxColor): Color {
