@@ -22,3 +22,12 @@ node_modules/
 # WebStorm
 #//////////////////////////
 .idea/
+
+#//////////////////////////
+# Misc
+#//////////////////////////
+.DS_Store
+.dbg/
+*.backup
+*.backup.meta
+*.md
