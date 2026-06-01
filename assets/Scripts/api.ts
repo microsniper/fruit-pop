@@ -3,7 +3,8 @@ export enum GameTypeEnum {
 }
 
 export enum SourceEnum {
-  WECHAT = 'WECHAT'
+  WECHAT = 'WECHAT',
+  DOUYIN = 'DOUYIN'
 }
 
 const BASE_URL = 'https://game.sniper.net.cn'
@@ -15,13 +16,17 @@ interface ApiResponse<T = any> {
 }
 
 declare const wx: any;
+declare const tt: any;
+
+const platform = typeof tt !== 'undefined' ? tt : (typeof wx !== 'undefined' ? wx : null);
+const currentSource = typeof tt !== 'undefined' ? SourceEnum.DOUYIN : (typeof wx !== 'undefined' ? SourceEnum.WECHAT : SourceEnum.WECHAT);
 
 let token: string | null = null;
 let currentLevel = 1;
 
 try {
-    if (typeof wx !== 'undefined') {
-        token = wx.getStorageSync('token') || null;
+    if (platform) {
+        token = platform.getStorageSync('token') || null;
     }
 } catch (e) {}
 
@@ -32,8 +37,7 @@ const request = <T = any>(options: any): Promise<ApiResponse<T>> => {
       ...(options.header || {})
     }
     
-    if (typeof wx === 'undefined') {
-        // Fallback for browser preview (Cocos dashboard)
+    if (!platform) {
         if (!token) {
             token = localStorage.getItem('token') || null;
         }
@@ -59,14 +63,14 @@ const request = <T = any>(options: any): Promise<ApiResponse<T>> => {
     }
 
     if (!token) {
-      token = wx.getStorageSync('token') || null
+      token = platform.getStorageSync('token') || null
     }
     
     if (token) {
       headers['Authorization'] = `Bearer ${token}`
     }
 
-    wx.request({
+    platform.request({
       ...options,
       url: BASE_URL + options.url,
       header: headers,
@@ -97,9 +101,9 @@ export const loginAndGetProgress = async (): Promise<number> => {
   try {
     let code = "browser_mock_code";
     
-    if (typeof wx !== 'undefined') {
+    if (platform) {
         const loginRes = await new Promise<any>((resolve, reject) => {
-          wx.login({
+          platform.login({
             success: resolve,
             fail: reject
           })
@@ -113,13 +117,13 @@ export const loginAndGetProgress = async (): Promise<number> => {
       data: {
         code: code,
         gameType: GameTypeEnum.SCREW,
-        source: SourceEnum.WECHAT
+        source: currentSource
       }
     })
     token = res.data.token
     if (token) {
-        if (typeof wx !== 'undefined') {
-            wx.setStorageSync('token', token)
+        if (platform) {
+            platform.setStorageSync('token', token)
         } else {
             localStorage.setItem('token', token);
         }
@@ -139,8 +143,8 @@ export const saveProgress = async (levelNum: number): Promise<void> => {
 
   try {
     let hasToken = false;
-    if (typeof wx !== 'undefined') {
-        hasToken = !!token || !!wx.getStorageSync('token');
+    if (platform) {
+        hasToken = !!token || !!platform.getStorageSync('token');
     } else {
         hasToken = !!token || !!localStorage.getItem('token');
     }

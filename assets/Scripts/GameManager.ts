@@ -286,7 +286,7 @@ export class GameManager extends Component {
         const innerG = this.createGraphicsNode('Inner', spinner, 30, 30, 0, 0);
         this.drawCircle(innerG.getComponent(Graphics)!, 13, new Color(250, 160, 60, 255), 2, new Color(200, 100, 30, 240));
 
-        const title = this.createLabel(this.loadingNode, '果园大丰收', 0, centerY - 60, 24, new Color(80, 60, 35, 255), true);
+        const title = this.createLabel(this.loadingNode, '摘呀摘呀摘', 0, centerY - 60, 24, new Color(80, 60, 35, 255), true);
         title.getComponent(Label)!.horizontalAlign = 1;
 
         const subtitle = this.createLabel(this.loadingNode, '采摘中...', 0, centerY - 90, 14, new Color(130, 100, 70, 255), false);
@@ -1921,20 +1921,19 @@ export class GameManager extends Component {
     }
 
     private triggerVibration(type: 'light' | 'heavy' | 'success' = 'light') {
-        const wxApi = (globalThis as any).wx;
-        if (wxApi && typeof wxApi.vibrateShort === 'function') {
+        const platformApi = (globalThis as any).wx || (globalThis as any).tt;
+        if (platformApi && typeof platformApi.vibrateShort === 'function') {
             try {
                 if (type === 'success') {
-                    wxApi.vibrateShort({});
-                    setTimeout(() => wxApi.vibrateShort({}), 70);
+                    platformApi.vibrateShort({});
+                    setTimeout(() => platformApi.vibrateShort({}), 70);
                 } else if (type === 'heavy') {
-                    wxApi.vibrateShort({ type: 'heavy' });
+                    platformApi.vibrateShort({ type: 'heavy' });
                 } else {
-                    wxApi.vibrateShort({});
+                    platformApi.vibrateShort({});
                 }
                 return;
             } catch (_) {
-                // ignore and fallback below
             }
         }
 

@@ -3,6 +3,9 @@ import { _decorator, Component } from 'cc';
 const { ccclass } = _decorator;
 
 declare const wx: any;
+declare const tt: any;
+
+const platform = typeof wx !== 'undefined' ? wx : (typeof tt !== 'undefined' ? tt : null);
 
 const AD_UNIT_ID = 'adunit-xxxxxxxxxxxxxxxx';
 
@@ -29,9 +32,9 @@ export class AdManager extends Component {
 
     private initRewardedVideoAd() {
         try {
-            if (typeof wx === 'undefined' || !wx.createRewardedVideoAd) return;
+            if (!platform || !platform.createRewardedVideoAd) return;
 
-            this.rewardedVideoAd = wx.createRewardedVideoAd({ adUnitId: AD_UNIT_ID });
+            this.rewardedVideoAd = platform.createRewardedVideoAd({ adUnitId: AD_UNIT_ID });
 
             this.rewardedVideoAd.onLoad(() => {
                 this.isAdReady = true;
