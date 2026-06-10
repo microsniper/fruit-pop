@@ -7,7 +7,7 @@ export enum SourceEnum {
   DOUYIN = 'DOUYIN'
 }
 
-const BASE_URL = 'https://game.sniper.net.cn'
+const BASE_URL = 'https://test.game.sniper.net.cn'
 
 interface ApiResponse<T = any> {
   code: number
@@ -163,5 +163,70 @@ export const saveProgress = async (levelNum: number): Promise<void> => {
     })
   } catch {
     // API 不可用时保留当前内存进度
+  }
+}
+
+export interface RankItem {
+  rank: number
+  userId: number
+  nickname: string
+  avatarUrl: string
+  levelNum: number
+  isMe: boolean
+}
+
+export interface RankResponse {
+  myRank: RankItem | null
+  list: RankItem[]
+}
+
+export const fetchRank = async (): Promise<RankResponse> => {
+  try {
+    const res = await request<RankResponse>({
+      url: '/api/game/rank',
+      method: 'POST',
+      data: {
+        gameType: GameTypeEnum.SCREW
+      }
+    })
+    return res.data
+  } catch (e) {
+    console.error("Fetch rank failed:", e)
+    return { myRank: null, list: [] }
+  }
+}
+
+const PROFILE_KEY = 'profile'
+
+export const getCachedProfile = (): { nickname: string; avatarUrl: string } | null => {
+  try {
+    if (platform) {
+      const raw = platform.getStorageSync(PROFILE_KEY)
+      return raw || null
+    }
+    const raw = localStorage.getItem(PROFILE_KEY)
+    return raw ? JSON.parse(raw) : null
+  } catch {
+    return null
+  }
+}
+
+export const updateProfile = async (nickname: string, avatarUrl: string): Promise<boolean> => {
+  try {
+    await request({
+      url: '/api/game/profile',
+      method: 'POST',
+      data: { nickname, avatarUrl }
+    })
+    const data = { nickname, avatarUrl }
+    if (platform) {
+      platform.setStorageSync(PROFILE_KEY, data)
+    } else {
+      localStorage.setItem(PROFILE_KEY, JSON.stringify(data))
+    }
+    return true
+  } catch (e) {
+    console.error("Update profile failed:", e)
+    return false
   }
 }

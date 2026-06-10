@@ -1,9 +1,13 @@
-import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers } from 'cc';
-import { loginAndGetProgress, saveProgress } from './api';
+import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources } from 'cc';
+import { loginAndGetProgress, saveProgress, fetchRank, RankItem, getCachedProfile, updateProfile } from './api';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
 
 const { ccclass } = _decorator;
+
+declare const wx: any;
+declare const tt: any;
+
 void Widget;
 
 export enum ScrewColor {
@@ -89,6 +93,8 @@ interface BoxSlotView {
 interface BoxView {
     node: Node;
     body: Graphics;
+    fruitIcon: Sprite;
+    nameLabel: Label;
     lockLabel: Label;
     slots: BoxSlotView[];
     lastBodyColor: string;
@@ -130,13 +136,13 @@ const PLATE_TEMPLATES: PlateTemplate[] = [
 
 const BOX_COLORS: Record<ScrewColor, Color> = {
     [ScrewColor.RED]: new Color(220, 80, 70),
-    [ScrewColor.BLUE]: new Color(70, 110, 200),
+    [ScrewColor.BLUE]: new Color(240, 195, 60),    // 玉米黄
     [ScrewColor.YELLOW]: new Color(240, 190, 50),
     [ScrewColor.PINK]: new Color(235, 120, 150),
     [ScrewColor.ORANGE]: new Color(245, 150, 60),
     [ScrewColor.GREEN]: new Color(100, 190, 120),
     [ScrewColor.PURPLE]: new Color(155, 85, 195),
-    [ScrewColor.CYAN]: new Color(80, 180, 200)
+    [ScrewColor.CYAN]: new Color(240, 130, 50)      // 胡萝卜橙
 };
 
 const FACE_COLORS: Record<PlateTheme, Color> = {
@@ -146,13 +152,13 @@ const FACE_COLORS: Record<PlateTheme, Color> = {
 
 const SCREW_FACE_COLORS: Record<ScrewColor, Color> = {
     red: new Color(200, 60, 50, 255),
-    blue: new Color(55, 90, 180, 255),
+    blue: new Color(210, 170, 35, 255),   // 玉米暗色
     yellow: new Color(225, 175, 40, 255),
     pink: new Color(220, 100, 130, 255),
     orange: new Color(230, 135, 45, 255),
     green: new Color(80, 170, 100, 255),
     purple: new Color(135, 70, 175, 255),
-    cyan: new Color(60, 160, 185, 255)
+    cyan: new Color(210, 100, 30, 255)    // 胡萝卜暗色
 };
 
 const PAGE_CONTENT_SCALE = 0.9;
@@ -191,6 +197,11 @@ export class GameManager extends Component {
     private tempContainerNode: Node | null = null;
     private toolContainerNode: Node | null = null;
     private modalLayerNode: Node | null = null;
+    private rankPageNode: Node | null = null;
+    private defaultAvatarsLoaded = false;
+    private defaultAvatarFrames: SpriteFrame[] = [];
+    private fruitSprites: Map<string, SpriteFrame> = new Map();
+    private fruitsLoaded = false;
     private titleLabel: Label | null = null;
     private levelBadgeLabel: Label | null = null;
     private progressLabel: Label | null = null;
@@ -210,11 +221,19 @@ export class GameManager extends Component {
 
     async start() {
         this.setupLayout();
+
+        if (typeof wx !== 'undefined' && typeof wx.onNeedPrivacyAuthorization === 'function') {
+            wx.onNeedPrivacyAuthorization((resolve: any) => {
+                resolve({ buttonId: 'agree', event: 'agree' });
+            });
+        }
+
         this.initSound();
         this.initAd();
         this.showLoadingOverlay();
         const loadStart = Date.now();
         this.currentLevel = await loginAndGetProgress();
+        await this.loadFruitSprites();  // 确保水果图片加载完成后再初始化游戏
         this.initGame();
         const elapsed = (Date.now() - loadStart) / 1000;
         const delay = Math.max(0, 2.0 - elapsed);
@@ -444,6 +463,17 @@ export class GameManager extends Component {
         const badge = this.createGraphicsNode('LevelBadgeBg', this.topAreaNode, 130, 44, 0, topInnerY + 8);
         badge.setSiblingIndex(0);
         this.drawRoundedRect(badge.getComponent(Graphics)!, 130, 44, new Color(130, 160, 90, 255), 22);
+
+        const rankBtnX = -this.screenWidth / 2 + 60;
+        const rankBtnNode = this.createNode('RankBtn', this.topAreaNode, rankBtnX, topInnerY + 8, 90, 36);
+        const rankBtnBg = this.createGraphicsNode('RankBtnBg', rankBtnNode, 90, 36, 0, 0);
+        this.drawRoundedRect(rankBtnBg.getComponent(Graphics)!, 90, 36, new Color(200, 160, 60, 255), 18);
+        const rankLabel = this.createLabel(rankBtnNode, '🏆排行榜', 0, 0, 14, new Color(255, 255, 255, 255), true);
+
+        rankBtnNode.on(Node.EventType.TOUCH_END, () => {
+            this.showRankPanel();
+        }, this);
+
         this.progressLabel = null;
     }
 
@@ -542,18 +572,54 @@ export class GameManager extends Component {
             const boxNode = view.node;
             boxNode.setPosition(new Vec3(x, 0, 0));
             boxNode.active = true;
-            const bodyColor = box.color === 'locked'
+            const isLocked = box.color === 'locked';
+            const isEmpty = box.color === 'empty';
+            const isActive = !isLocked && !isEmpty;
+
+            const bodyColor = isLocked
                 ? new Color(140, 120, 90, 255)
-                : box.color === 'empty'
+                : isEmpty
                     ? new Color(180, 170, 150, 255)
                     : this.getBoxColor(box.color);
             const colorKey = `${box.color}_${box.capacity}`;
             if (view.lastBodyColor !== colorKey) {
                 this.drawBasketBody(view.body, boxWidth, boxHeight, bodyColor, box.color);
+                
+                // 设置水果图标和文字
+                if (isActive && this.isValidPrimaryBoxColor(box.color)) {
+                    const spriteFrame = this.getFruitSprite(box.color);
+                    if (spriteFrame) {
+                        view.fruitIcon.spriteFrame = spriteFrame;
+                        // 取消 CUSTOM 模式，让图片自动获取原始尺寸
+                        view.fruitIcon.sizeMode = Sprite.SizeMode.RAW;
+                        const origW = spriteFrame.width;
+                        const origH = spriteFrame.height;
+                        // 动态缩放节点以适应 52 的最大边 (之前是 46)
+                        const maxSize = 52;
+                        const scale = Math.min(maxSize / origW, maxSize / origH);
+                        view.fruitIcon.node.scale = new Vec3(scale, scale, 1);
+                        
+                        view.nameLabel.string = this.FRUIT_NAME_MAP[box.color] || '';
+                        view.nameLabel.node.active = true;
+                    } else {
+                        view.fruitIcon.node.active = false;
+                        view.nameLabel.string = this.FRUIT_NAME_MAP[box.color] || '';
+                        view.nameLabel.node.active = true;
+                    }
+                } else {
+                    view.fruitIcon.node.active = false;
+                    view.nameLabel.node.active = false;
+                }
+
                 view.lastBodyColor = colorKey;
             }
 
-            const isLocked = box.color === 'locked';
+            // 有果子放入后，隐藏背景图标；汉字保留
+            if (isActive && this.isValidPrimaryBoxColor(box.color)) {
+                const hasScrews = box.screws && box.screws.length > 0;
+                view.fruitIcon.node.active = !hasScrews && view.fruitIcon.spriteFrame !== null;
+            }
+
             view.lockLabel.node.active = isLocked;
             const boxCapacity = box.capacity || 3;
             const screwSize = boxCapacity >= 6 ? 20 : (boxCapacity >= 5 ? 22 : (boxCapacity >= 4 ? 24 : 26));
@@ -1798,6 +1864,15 @@ export class GameManager extends Component {
             const body = this.createGraphicsNode('Body', boxNode, boxWidth, boxHeight, 0, 0);
             const bodyGraphics = body.getComponent(Graphics)!;
 
+            // 中心水果图标 (半透明)
+            const iconNode = this.createNode('FruitIcon', boxNode, 0, 5, 48, 48);
+            const fruitIcon = iconNode.addComponent(Sprite);
+            fruitIcon.sizeMode = Sprite.SizeMode.CUSTOM;
+            fruitIcon.color = new Color(255, 255, 255, 70); // 更透明，不抢夺底色
+            
+            // 底部中文标签
+            const nameLabel = this.createLabel(boxNode, '', 0, -boxHeight / 2 + 15, 13, new Color(255, 255, 255, 255), true);
+
             const lockLabel = this.createLabel(boxNode, '解锁\n果篮', 0, 0, 15, new Color(255, 255, 255, 255), true, 19);
             lockLabel.node.active = false;
 
@@ -1814,6 +1889,8 @@ export class GameManager extends Component {
             this.boxViews.push({
                 node: boxNode,
                 body: bodyGraphics,
+                fruitIcon,
+                nameLabel,
                 lockLabel,
                 slots,
                 lastBodyColor: ''
@@ -1971,35 +2048,54 @@ export class GameManager extends Component {
         const fruitNode = this.createNode(`Fruit_${color}`, parent, x, y, diameter, diameter);
 
         if (addShadow) {
-            const shadow = this.createGraphicsNode('Shadow', fruitNode, diameter, diameter, 0, -3);
-            this.drawCircle(shadow.getComponent(Graphics)!, diameter / 2, new Color(0, 0, 0, 50), 0);
+            const shadow = this.createGraphicsNode('Shadow', fruitNode, diameter * 0.85, diameter * 0.3, 0, -diameter * 0.15);
+            const sg = shadow.getComponent(Graphics)!;
+            sg.fillColor = new Color(0, 0, 0, 40);
+            sg.ellipse(0, 0, diameter * 0.42, diameter * 0.12);
+            sg.fill();
         }
 
-        const bodyColor = BOX_COLORS[color];
-        const darkColor = SCREW_FACE_COLORS[color];
-        const r = (diameter - 2) / 2;
+        // 尝试用水果图片替代绘制
+        const spriteFrame = this.getFruitSprite(color);
+        if (spriteFrame) {
+            const imgNode = this.createNode('FruitImg', fruitNode, 0, 2, diameter * 1.1, diameter * 1.1);
+            const sprite = imgNode.addComponent(Sprite);
+            sprite.sizeMode = Sprite.SizeMode.RAW;
+            sprite.spriteFrame = spriteFrame;
+            
+            const origW = spriteFrame.width;
+            const origH = spriteFrame.height;
+            const maxSize = diameter * 1.35; // 之前是 1.1，调大到 1.35
+            const scale = Math.min(maxSize / origW, maxSize / origH);
+            imgNode.scale = new Vec3(scale, scale, 1);
+        } else {
+            // 回退：绘制彩色圆圈 + 茎
+            const bodyColor = BOX_COLORS[color];
+            const darkColor = SCREW_FACE_COLORS[color];
+            const r = (diameter - 2) / 2;
 
-        const body = this.createGraphicsNode('Body', fruitNode, diameter, diameter, 0, 0);
-        const bg = body.getComponent(Graphics)!;
-        bg.fillColor = bodyColor;
-        bg.circle(-1, 1, r);
-        bg.fill();
-        bg.lineWidth = 2;
-        bg.strokeColor = darkColor;
-        bg.circle(-1, 1, r);
-        bg.stroke();
-        bg.fillColor = new Color(255, 255, 255, 50);
-        bg.circle(-r * 0.3, r * 0.3, r * 0.3);
-        bg.fill();
+            const body = this.createGraphicsNode('Body', fruitNode, diameter, diameter, 0, 0);
+            const bg = body.getComponent(Graphics)!;
+            bg.fillColor = bodyColor;
+            bg.circle(-1, 1, r);
+            bg.fill();
+            bg.lineWidth = 2;
+            bg.strokeColor = darkColor;
+            bg.circle(-1, 1, r);
+            bg.stroke();
+            bg.fillColor = new Color(255, 255, 255, 50);
+            bg.circle(-r * 0.3, r * 0.3, r * 0.3);
+            bg.fill();
 
-        const stemG = this.createGraphicsNode('Stem', fruitNode, diameter * 0.35, diameter * 0.22, diameter * 0.08, diameter * 0.32);
-        const sg = stemG.getComponent(Graphics)!;
-        sg.fillColor = new Color(90, 150, 65, 220);
-        sg.rect(-1.5, 0, 3, diameter * 0.18);
-        sg.fill();
-        sg.fillColor = new Color(115, 180, 80, 200);
-        sg.ellipse(diameter * 0.06, diameter * 0.06, diameter * 0.06, diameter * 0.04);
-        sg.fill();
+            const stemG = this.createGraphicsNode('Stem', fruitNode, diameter * 0.35, diameter * 0.22, diameter * 0.08, diameter * 0.32);
+            const sg2 = stemG.getComponent(Graphics)!;
+            sg2.fillColor = new Color(90, 150, 65, 220);
+            sg2.rect(-1.5, 0, 3, diameter * 0.18);
+            sg2.fill();
+            sg2.fillColor = new Color(115, 180, 80, 200);
+            sg2.ellipse(diameter * 0.06, diameter * 0.06, diameter * 0.06, diameter * 0.04);
+            sg2.fill();
+        }
 
         return fruitNode;
     }
@@ -2056,12 +2152,14 @@ export class GameManager extends Component {
         const darkBrown = new Color(105, 78, 48, 220);
         const lightBrown = new Color(210, 175, 135, 180);
 
+        // 统一绘制底板
         graphics.fillColor = basketOuter;
         graphics.roundRect(-hw, -hh, width, height, radius);
         graphics.fill();
 
+        // 内部不再使用大面积纯色，而是统一用浅色内衬
         if (isActive) {
-            graphics.fillColor = fill;
+            graphics.fillColor = fill; 
             graphics.roundRect(-hw + 3, -hh + 3, width - 6, height - 6, radius - 2);
             graphics.fill();
         } else if (isLocked) {
@@ -2070,6 +2168,7 @@ export class GameManager extends Component {
             graphics.fill();
         }
 
+        // 外边框
         graphics.strokeColor = darkBrown;
         graphics.lineWidth = 2;
         graphics.roundRect(-hw, -hh, width, height, radius);
@@ -2080,6 +2179,7 @@ export class GameManager extends Component {
         graphics.roundRect(-hw, -hh, width - 2, height - 2, radius);
         graphics.stroke();
 
+        // 顶部边沿
         const rimY = hh - rimH;
         graphics.fillColor = new Color(140, 108, 72, 255);
         graphics.ellipse(0, rimY, hw, rimH);
@@ -2112,5 +2212,471 @@ export class GameManager extends Component {
 
     private getBoxColor(color: BoxColor): Color {
         return BOX_COLORS[color] || new Color(200, 200, 200, 255);
+    }
+
+    private async showRankPanel() {
+        const cached = getCachedProfile();
+        if (cached && cached.nickname) {
+            this.loadAndShowRank();
+            return;
+        }
+        this.showProfileAuthPage();
+    }
+
+    private showProfileAuthPage() {
+        if (!this.rootNode) return;
+        this.rootNode.removeAllChildren();
+
+        const pageW = this.screenWidth;
+        const pageH = this.screenHeight;
+
+        const page = this.createNode('AuthPage', this.rootNode, 0, 0, pageW, pageH);
+        const bg = this.createGraphicsNode('AuthBg', page, pageW, pageH, 0, 0);
+        this.drawRoundedRect(bg.getComponent(Graphics)!, pageW, pageH, new Color(220, 235, 210, 255), 0);
+
+        const iconY = 60;
+        const icon = this.createGraphicsNode('TrophyIcon', page, 80, 80, 0, iconY);
+        this.drawCircle(icon.getComponent(Graphics)!, 40, new Color(200, 160, 60, 255), 0);
+        this.createLabel(page, '🏆', 0, iconY, 36, new Color(255, 255, 255, 255), true);
+
+        this.createLabel(page, '授权昵称和头像', 0, iconY - 60, 22, new Color(80, 55, 30, 255), true);
+        this.createLabel(page, '让你的排名展示给好友', 0, iconY - 92, 14, new Color(140, 130, 110, 255), true);
+
+        const btnY = iconY - 150;
+        const authBtn = this.createNode('AuthBtn', page, 0, btnY, 180, 48);
+        const authBg = this.createGraphicsNode('AuthBg2', authBtn, 180, 48, 0, 0);
+        this.drawRoundedRect(authBg.getComponent(Graphics)!, 180, 48, new Color(100, 155, 85, 255), 24);
+        this.createLabel(authBtn, '授权登录', 0, 0, 18, new Color(255, 255, 255, 255), true);
+
+        authBtn.on(Node.EventType.TOUCH_END, () => {
+            this.doPlatformAuth(page);
+        }, this);
+
+        const skipY = btnY - 40;
+        this.createLabel(page, '暂不授权，直接查看', 0, skipY, 13, new Color(180, 180, 180, 255), true);
+        const skipBtn = this.createNode('SkipBtn', page, 0, skipY, 180, 40);
+        skipBtn.on(Node.EventType.TOUCH_END, () => {
+            page.destroy();
+            this.loadAndShowRank();
+        }, this);
+    }
+
+    private doPlatformAuth(pageNode: Node) {
+        if (typeof wx !== 'undefined') {
+            console.log('[Auth] starting auth flow...');
+
+            // 先触发隐私授权弹窗（微信 2023.09+ 强制要求）
+            const doCreateButton = () => {
+                const systemInfo = wx.getSystemInfoSync();
+                const button = wx.createUserInfoButton({
+                    type: 'text',
+                    text: '',
+                    style: {
+                        left: 0,
+                        top: 0,
+                        width: systemInfo.windowWidth,
+                        height: systemInfo.windowHeight,
+                        backgroundColor: 'transparent',
+                        color: 'transparent',
+                        textAlign: 'center',
+                        fontSize: 0,
+                    }
+                });
+
+                button.onTap((res: any) => {
+                    console.log('[Auth] createUserInfoButton onTap:', JSON.stringify(res));
+                    button.destroy();
+                    if (res && res.userInfo && res.userInfo.nickName && res.userInfo.nickName !== '微信用户') {
+                        this.saveProfileAndContinue(res.userInfo.nickName, res.userInfo.avatarUrl, pageNode);
+                    } else {
+                        console.log('[Auth] userInfo invalid or anonymous, skipping');
+                        pageNode.destroy();
+                        this.loadAndShowRank();
+                    }
+                });
+            };
+
+            // 检查是否需要隐私授权
+            if (typeof wx.requirePrivacyAuthorize === 'function') {
+                wx.requirePrivacyAuthorize({
+                    success: () => {
+                        console.log('[Auth] privacy authorized, creating button');
+                        doCreateButton();
+                    },
+                    fail: () => {
+                        console.log('[Auth] user denied privacy authorization');
+                        pageNode.destroy();
+                        this.loadAndShowRank();
+                    }
+                });
+            } else {
+                // 旧版本 SDK，直接创建按钮
+                doCreateButton();
+            }
+        } else if (typeof tt !== 'undefined' && tt.getUserInfo) {
+            console.log('[Auth] calling tt.getUserInfo...');
+            tt.getUserInfo({
+                success: (res: any) => {
+                    console.log('[Auth] tt.getUserInfo success:', JSON.stringify(res));
+                    if (res && res.userInfo) {
+                        this.saveProfileAndContinue(res.userInfo.nickName, res.userInfo.avatarUrl, pageNode);
+                    } else {
+                        pageNode.destroy();
+                        this.loadAndShowRank();
+                    }
+                },
+                fail: () => {
+                    pageNode.destroy();
+                    this.loadAndShowRank();
+                }
+            });
+        } else {
+            pageNode.destroy();
+            this.loadAndShowRank();
+        }
+    }
+
+    private async saveProfileAndContinue(nickname: string, avatarUrl: string, pageNode: Node) {
+        await updateProfile(nickname, avatarUrl);
+        pageNode.destroy();
+        this.loadAndShowRank();
+    }
+
+    private async loadDefaultAvatars(): Promise<void> {
+        if (this.defaultAvatarsLoaded) return;
+        return new Promise((resolve) => {
+            const avatarNames = ['Avatars1', 'Avatars2', 'Avatars3', 'Avatars4', 'Avatars5', 'Avatars6'];
+            let loaded = 0;
+            avatarNames.forEach((name) => {
+                resources.load(`avatar/${name}/spriteFrame`, SpriteFrame, (err, spriteFrame) => {
+                    loaded++;
+                    if (!err && spriteFrame) {
+                        this.defaultAvatarFrames.push(spriteFrame);
+                    }
+                    if (loaded === avatarNames.length) {
+                        this.defaultAvatarsLoaded = true;
+                        resolve();
+                    }
+                });
+            });
+        });
+    }
+
+    /** ScrewColor → 水果图片文件名映射 */
+    private FRUIT_MAP: Record<string, string> = {
+        'red': 'Red Apple',
+        'blue': 'Сorn',       // 玉米
+        'yellow': 'Lemon',
+        'pink': 'Peach',
+        'orange': 'Orange',
+        'green': 'Pear',
+        'purple': 'Eggplant',
+        'cyan': 'Carrot',     // 胡萝卜
+    };
+
+    /** ScrewColor → 水果中文名映射 */
+    private FRUIT_NAME_MAP: Record<string, string> = {
+        'red': '苹果',
+        'blue': '玉米',
+        'yellow': '柠檬',
+        'pink': '桃子',
+        'orange': '橘子',
+        'green': '鸭梨',
+        'purple': '茄子',
+        'cyan': '胡萝卜',
+    };
+
+    private async loadFruitSprites(): Promise<void> {
+        if (this.fruitsLoaded) return;
+        return new Promise((resolve) => {
+            const fruitNames = ['Red Apple', 'Lemon', 'Peach', 'Orange', 'Pear', 'Eggplant', 'Сorn', 'Carrot'];
+            let loaded = 0;
+            fruitNames.forEach((name) => {
+                resources.load(`fruits/${name}/spriteFrame`, SpriteFrame, (err, spriteFrame) => {
+                    loaded++;
+                    if (!err && spriteFrame) {
+                        this.fruitSprites.set(name, spriteFrame);
+                    } else {
+                        console.warn(`[Fruit] failed to load ${name}:`, err);
+                    }
+                    if (loaded === fruitNames.length) {
+                        this.fruitsLoaded = true;
+                        console.log(`[Fruit] loaded ${this.fruitSprites.size}/${fruitNames.length} fruit sprites`);
+                        resolve();
+                    }
+                });
+            });
+        });
+    }
+
+    private getFruitSprite(color: ScrewColor): SpriteFrame | null {
+        const fruitName = this.FRUIT_MAP[color];
+        if (!fruitName) return null;
+        return this.fruitSprites.get(fruitName) || null;
+    }
+
+    private getRandomDefaultAvatar(): SpriteFrame | null {
+        if (this.defaultAvatarFrames.length === 0) return null;
+        const idx = Math.floor(Math.random() * this.defaultAvatarFrames.length);
+        return this.defaultAvatarFrames[idx];
+    }
+
+    private createAvatarSpriteNode(parent: Node, x: number, y: number, size: number): Node {
+        const node = this.createNode('Avatar', parent, x, y, size, size);
+        const sprite = node.addComponent(Sprite);
+        sprite.sizeMode = Sprite.SizeMode.CUSTOM; // 强制使用自定义尺寸，避免原图过大
+        
+        // 可选：添加一个 Mask 组件让图片变成圆形
+        const maskNode = this.createNode('AvatarMask', parent, x, y, size, size);
+        const mask = maskNode.addComponent(Mask);
+        mask.type = Mask.Type.GRAPHICS_ELLIPSE; // 圆形遮罩
+        
+        // 把 sprite 放到 mask 下面
+        node.parent = maskNode;
+        node.setPosition(0, 0, 0);
+        
+        const frame = this.getRandomDefaultAvatar();
+        if (frame) {
+            sprite.spriteFrame = frame;
+        }
+        return maskNode;
+    }
+
+    private async loadAndShowRank() {
+        this.showLoadingOverlay();
+        try {
+            const data = await fetchRank();
+            await this.loadDefaultAvatars();
+            this.hideLoadingOverlay();
+            this.renderRankPage(data.list, data.myRank);
+        } catch {
+            this.hideLoadingOverlay();
+        }
+    }
+
+    private closeRankPage() {
+        if (this.rankPageNode && this.rankPageNode.isValid) {
+            this.rankPageNode.destroy();
+            this.rankPageNode = null;
+        }
+        if (this.modalLayerNode) {
+            this.modalLayerNode.active = false;
+        }
+        if (this.topAreaNode) this.topAreaNode.active = true;
+        if (this.boardAreaNode) this.boardAreaNode.active = true;
+        if (this.bottomAreaNode) this.bottomAreaNode.active = true;
+    }
+
+    private renderRankPage(list: RankItem[], myRank: RankItem | null) {
+        this.closeRankPage();
+        if (this.rootNode) {
+            this.rootNode.removeAllChildren();
+        }
+
+        if (this.topAreaNode) this.topAreaNode.active = false;
+        if (this.boardAreaNode) this.boardAreaNode.active = false;
+        if (this.bottomAreaNode) this.bottomAreaNode.active = false;
+
+        this.boardAreaNode = this.topAreaNode = this.bottomAreaNode = null;
+        this.boxesContainerNode = null;
+        this.tempContainerNode = null;
+        this.toolContainerNode = null;
+        this.plateNodes.clear();
+        this.fallingPlateNodes.clear();
+        this.boxViews = [];
+        this.tempSlotViews = [];
+        this.toolViews = [];
+
+        const pageW = this.screenWidth;
+        const pageH = this.screenHeight;
+        const padX = 20;
+        const listW = pageW - padX * 2;
+
+        this.rankPageNode = this.createNode('RankPage', this.rootNode, 0, 0, pageW, pageH);
+
+        // --- 整体背景 (采用浅色清新的原木/休闲主题色) ---
+        const bg = this.createGraphicsNode('RankBg', this.rankPageNode, pageW, pageH, 0, 0);
+        bg.getComponent(Graphics)!.fillColor = new Color(245, 248, 240, 255); // 极浅的米绿色背景
+        bg.getComponent(Graphics)!.rect(-pageW / 2, -pageH / 2, pageW, pageH);
+        bg.getComponent(Graphics)!.fill();
+
+        // --- 顶部导航区域 ---
+        const headerY = pageH / 2 - 40;
+        
+        // 返回按钮 (< 图标)
+        const backBtnW = 40;
+        const backBtnH = 40;
+        const backBtn = this.createNode('BackBtn', this.rankPageNode, -pageW / 2 + 30, headerY, backBtnW, backBtnH);
+        this.createLabel(backBtn, '❮', 0, 0, 24, new Color(100, 120, 90, 255), true); // 绿色箭头
+        backBtn.on(Node.EventType.TOUCH_END, () => this.goBackToGame(), this);
+
+        // 标题 (Leaderboard)
+        this.createLabel(this.rankPageNode, 'Leaderboard', 0, headerY, 22, new Color(60, 80, 50, 255), true); // 深绿色标题
+
+        // --- 前三名领奖台区域 (Top 3 Podium) ---
+        // 提取前三名
+        const top3 = list.slice(0, 3);
+        const podiumY = headerY - 140; // 领奖台中心高度
+        
+        // 定义领奖台配置：[2, 1, 3] 的顺序 (左，中，右)
+        const podiumConfigs = [
+            { rank: 2, offsetX: -90, yOffset: -30, scale: 0.85, color: new Color(160, 200, 240, 255) }, // 银色/浅蓝
+            { rank: 1, offsetX: 0,   yOffset: 20,  scale: 1.1,  color: new Color(255, 190, 60, 255) },  // 金色
+            { rank: 3, offsetX: 90,  yOffset: -40, scale: 0.8,  color: new Color(140, 220, 160, 255) }  // 铜色/浅绿
+        ];
+
+        // 绘制领奖台底板 (一个大圆角矩形，包裹前三名)
+        const podiumBgH = 160;
+        const podiumBgY = podiumY - 40;
+        const podiumBg = this.createGraphicsNode('PodiumBg', this.rankPageNode, listW, podiumBgH, 0, podiumBgY);
+        this.drawRoundedRect(podiumBg.getComponent(Graphics)!, listW, podiumBgH, new Color(230, 240, 220, 255), 24);
+
+        // 渲染前三名
+        podiumConfigs.forEach(config => {
+            const item = top3.find(t => t.rank === config.rank);
+            if (!item) return;
+
+            const itemX = config.offsetX;
+            const itemY = podiumY + config.yOffset;
+
+            // 头像
+            const avatarSize = 64 * config.scale;
+            // 头像图片 (默认随机头像)
+            this.createAvatarSpriteNode(this.rankPageNode, itemX, itemY, avatarSize);
+            // 外圈装饰环
+            const avatarBorder = this.createGraphicsNode(`PodiumBorder_${config.rank}`, this.rankPageNode, avatarSize + 8, avatarSize + 8, itemX, itemY);
+            this.drawCircle(avatarBorder.getComponent(Graphics)!, avatarSize / 2 + 4, new Color(0, 0, 0, 0), 3, config.color);
+
+            // 排名徽章 (贴在头像下方)
+            const badgeSize = 20 * config.scale;
+            const badgeY = itemY - avatarSize / 2;
+            const badge = this.createGraphicsNode(`PodiumBadge_${config.rank}`, this.rankPageNode, badgeSize, badgeSize, itemX, badgeY);
+            this.drawCircle(badge.getComponent(Graphics)!, badgeSize / 2, config.color);
+            this.createLabel(this.rankPageNode, `${config.rank}`, itemX, badgeY, 12 * config.scale, new Color(255, 255, 255, 255), true);
+
+            // 昵称
+            const nick = (item.nickname || '玩家').substring(0, 8);
+            this.createLabel(this.rankPageNode, nick, itemX, badgeY - 20, 14, new Color(80, 100, 70, 255), config.rank === 1);
+
+            // 关卡数 (高亮颜色)
+            this.createLabel(this.rankPageNode, `${item.levelNum}关`, itemX, badgeY - 40, 16, config.color, true);
+            
+            // 皇冠 (仅第一名有)
+            if (config.rank === 1) {
+                this.createLabel(this.rankPageNode, '👑', itemX, itemY + avatarSize / 2 + 15, 24, new Color(255, 190, 60, 255), true);
+            }
+        });
+
+        // --- 列表区域 (List Area) ---
+        // 列表大底板
+        let listStartY = podiumBgY - podiumBgH / 2 - 20;
+        const listBgH = pageH / 2 + listStartY + 20; // 延伸到底部
+        const listBgCenterY = listStartY - listBgH / 2;
+        
+        const listBg = this.createGraphicsNode('ListBg', this.rankPageNode, pageW, listBgH, 0, listBgCenterY);
+        // 上边两个角是圆角，下面直角
+        const g = listBg.getComponent(Graphics)!;
+        g.fillColor = new Color(255, 255, 255, 255); // 纯白底板，显得干净
+        g.roundRect(-pageW / 2, -listBgH / 2, pageW, listBgH, 30); // 简单起见统一用大圆角
+        g.fill();
+
+        // 渲染列表项 (从第 4 名开始)
+        const listItems = list.slice(3);
+        const visibleCount = Math.min(listItems.length, 20);
+        const itemH = 64;
+        let contentY = listStartY - 30;
+
+        for (let i = 0; i < visibleCount; i++) {
+            const item = listItems[i];
+            const itemY = contentY - i * itemH;
+            if (itemY < -pageH / 2 + 80) break; // 留出底部空间
+
+            const isMe = item.isMe;
+            const itemLeftX = -listW / 2 + 20;
+
+            // 排名数字 (最左侧，放大、加粗、醒目颜色)
+            const rankColor = isMe ? new Color(255, 150, 0, 255) : new Color(120, 140, 110, 255);
+            const rankLabel = this.createLabel(this.rankPageNode, `${item.rank}`, itemLeftX + 10, itemY, 20, rankColor, true);
+            rankLabel.horizontalAlign = 0; // LEFT
+            rankLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+
+            // 头像 (紧跟在排名右侧)
+            const avatarSize = 40;
+            const avatarX = itemLeftX + 60; // 排名占约 40px 宽度
+            this.createAvatarSpriteNode(this.rankPageNode, avatarX, itemY, avatarSize);
+
+            // 昵称 (紧跟在头像右侧)
+            const nick = (item.nickname || '玩家').substring(0, 8);
+            const nameColor = isMe ? new Color(200, 140, 30, 255) : new Color(80, 100, 70, 255);
+            
+            const nickLabel = this.createLabel(this.rankPageNode, nick, avatarX + 30, itemY, 16, nameColor, isMe);
+            nickLabel.horizontalAlign = 0; // LEFT
+            nickLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+
+            // 关卡数 (靠最右)
+            const rightX = listW / 2 - 20;
+            const lvLabel = this.createLabel(this.rankPageNode, `${item.levelNum} 关`, rightX, itemY, 18, nameColor, true);
+            lvLabel.horizontalAlign = 2; // RIGHT
+            lvLabel.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
+
+            // 分割线
+            if (i < visibleCount - 1) {
+                const lineY = itemY - itemH / 2;
+                const lineNode = this.createGraphicsNode('ItemLine', this.rankPageNode, listW, 1, 0, lineY);
+                lineNode.getComponent(Graphics)!.fillColor = new Color(240, 245, 235, 255);
+                lineNode.getComponent(Graphics)!.rect(-listW / 2, -0.5, listW, 1);
+                lineNode.getComponent(Graphics)!.fill();
+            }
+        }
+
+        // --- 底部悬浮的“我”的排名 ---
+        if (myRank) {
+            const myCardH = 70;
+            const myCardY = -pageH / 2 + myCardH / 2 + 20; // 悬浮在底部
+
+            // 我的排名底板 (带阴影)
+            const myBg = this.createGraphicsNode('MyRankBg', this.rankPageNode, listW, myCardH, 0, myCardY);
+            this.drawRoundedRect(myBg.getComponent(Graphics)!, listW, myCardH, new Color(255, 190, 60, 255), 20); // 醒目的暖黄色
+            
+            const itemLeftX = -listW / 2 + 20;
+
+            // 排名数字 (最左侧)
+            const rankLabel = this.createLabel(this.rankPageNode, `${myRank.rank || '?'}`, itemLeftX + 10, myCardY, 20, new Color(255, 255, 255, 255), true);
+            rankLabel.horizontalAlign = 0; // LEFT
+            rankLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+
+            // 头像 (紧跟排名)
+            const avatarSize = 40;
+            const avatarX = itemLeftX + 60;
+            this.createAvatarSpriteNode(this.rankPageNode, avatarX, myCardY, avatarSize);
+
+            // 昵称
+            const nick = (myRank.nickname || '玩家').substring(0, 8);
+            const nickLabel = this.createLabel(this.rankPageNode, nick, avatarX + 30, myCardY, 18, new Color(255, 255, 255, 255), true);
+            nickLabel.horizontalAlign = 0; // LEFT
+            nickLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+
+            // 关卡数
+            const rightX = listW / 2 - 20;
+            const lvLabel = this.createLabel(this.rankPageNode, `${myRank.levelNum || 0} 关`, rightX, myCardY, 20, new Color(255, 255, 255, 255), true);
+            lvLabel.horizontalAlign = 2; // RIGHT
+            lvLabel.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
+        }
+    }
+
+    private goBackToGame() {
+        this.closeRankPage();
+        if (this.rootNode) {
+            this.rootNode.removeAllChildren();
+        }
+        this.gameOver = false;
+        this.plateNodes.clear();
+        this.fallingPlateNodes.clear();
+        this.boxViews = [];
+        this.tempSlotViews = [];
+        this.toolViews = [];
+        this.setupLayout();
+        this.initGame();
+        this.renderAll();
     }
 }

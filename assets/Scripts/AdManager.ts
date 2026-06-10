@@ -33,6 +33,7 @@ export class AdManager extends Component {
     private initRewardedVideoAd() {
         try {
             if (!platform || !platform.createRewardedVideoAd) return;
+            if (!AD_UNIT_ID || AD_UNIT_ID.indexOf('xxxx') !== -1) return;
 
             this.rewardedVideoAd = platform.createRewardedVideoAd({ adUnitId: AD_UNIT_ID });
 
