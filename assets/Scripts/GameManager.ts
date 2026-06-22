@@ -18,7 +18,8 @@ export enum ScrewColor {
     ORANGE = 'orange',
     GREEN = 'green',
     PURPLE = 'purple',
-    CYAN = 'cyan'
+    CYAN = 'cyan',
+    RAINBOW = 'rainbow'
 }
 
 type BoxColor = ScrewColor | 'locked' | 'empty';
@@ -142,7 +143,8 @@ const BOX_COLORS: Record<ScrewColor, Color> = {
     [ScrewColor.ORANGE]: new Color(245, 150, 60),
     [ScrewColor.GREEN]: new Color(100, 190, 120),
     [ScrewColor.PURPLE]: new Color(155, 85, 195),
-    [ScrewColor.CYAN]: new Color(240, 130, 50)      // 胡萝卜橙
+    [ScrewColor.CYAN]: new Color(240, 130, 50),     // 胡萝卜橙
+    [ScrewColor.RAINBOW]: new Color(255, 255, 255)  // 彩虹果（白色底）
 };
 
 const FACE_COLORS: Record<PlateTheme, Color> = {
@@ -158,7 +160,8 @@ const SCREW_FACE_COLORS: Record<ScrewColor, Color> = {
     orange: new Color(230, 135, 45, 255),
     green: new Color(80, 170, 100, 255),
     purple: new Color(135, 70, 175, 255),
-    cyan: new Color(210, 100, 30, 255)    // 胡萝卜暗色
+    cyan: new Color(210, 100, 30, 255),   // 胡萝卜暗色
+    rainbow: new Color(180, 180, 180)     // 彩虹果暗色
 };
 
 const PAGE_CONTENT_SCALE = 0.9;
@@ -172,6 +175,7 @@ const SUPPORT_SURFACE_SCAN_STEP = 4;
 const SUPPORT_SURFACE_REFINE_ITERATIONS = 8;
 
 let tutorialShown = false;
+let rainbowIntroduced = false;
 
 @ccclass('GameManager')
 export class GameManager extends Component {
@@ -202,6 +206,10 @@ export class GameManager extends Component {
     private defaultAvatarFrames: SpriteFrame[] = [];
     private fruitSprites: Map<string, SpriteFrame> = new Map();
     private fruitsLoaded = false;
+    /** 上次收集水果的时间戳（毫秒），用于连击判定 */
+    private lastCollectTime = 0;
+    /** 当前连击次数 */
+    private comboCount = 0;
     private titleLabel: Label | null = null;
     private levelBadgeLabel: Label | null = null;
     private progressLabel: Label | null = null;
@@ -270,6 +278,16 @@ export class GameManager extends Component {
             sub: '🍎 点击果子 → 投入同色果篮\n🧺 凑满果篮 → 自动清空继续\n🍃 树枝清空 → 掉落露出新果子\n\n没合适果篮？先放果盘暂存！',
             button: '知道了！',
             onConfirm: () => {}
+        });
+    }
+
+    private showRainbowTutorial() {
+        this.renderModal({
+            title: '🌈 彩虹果！',
+            sub: '彩虹果是万能果实！\n✨它可以放入任意果篮，无视颜色\n哪里有空位就能去哪里\n\n合理利用彩虹果，轻松过关～',
+            button: '太棒了！',
+            onConfirm: () => {},
+            height: 280
         });
     }
 
@@ -483,6 +501,7 @@ export class GameManager extends Component {
         this.tempHoles = [];
         this.removedScrews = 0;
         this.tools = { add: 0, clear: 1 };
+        this.resetCombo();
         this.plateNodes.forEach((node) => {
             if (node && node.isValid) {
                 this.destroyNodeRecursively(node);
@@ -776,9 +795,21 @@ export class GameManager extends Component {
         }
 
         screwsToPlace.sort(() => Math.random() - 0.5);
+
+        // 彩虹果：从第6关开始出现，数量随关卡递增
+        const RAINBOW_START_LEVEL = 6;
+        if (levelNum >= RAINBOW_START_LEVEL) {
+            let rainbowCount = 1;
+            if (levelNum >= 12) rainbowCount = 2;
+            if (levelNum >= 20) rainbowCount = 3;
+            for (let i = 0; i < rainbowCount; i++) {
+                screwsToPlace.push(ScrewColor.RAINBOW);
+            }
+        }
+
         this.totalScrews = screwsToPlace.length;
 
-        const distinctColors = [...new Set(screwsToPlace)];
+        const distinctColors = [...new Set(screwsToPlace)].filter(c => c !== ScrewColor.RAINBOW);
         this.boxes[0].color = distinctColors[0] || ScrewColor.YELLOW;
         if (distinctColors.length > 1) {
             this.boxes[1].color = distinctColors[1];
@@ -1066,7 +1097,12 @@ export class GameManager extends Component {
 
         this.triggerVibration('heavy');
 
-        const targetBox = this.boxes.find((box) => box.color === screw.color && box.screws.length < box.capacity);
+        // 彩虹果特殊处理：可放入任意有空间的果篮
+        const isRainbow = screw.color === ScrewColor.RAINBOW;
+        const targetBox = isRainbow
+            ? this.boxes.find((box) => box.color !== 'locked' && box.color !== 'empty' && box.screws.length < box.capacity)
+            : this.boxes.find((box) => box.color === screw.color && box.screws.length < box.capacity);
+
         if (!targetBox) {
             if (this.tempHoles.length >= this.maxTempHoles) {
                 this.gameOver = true;
@@ -1084,6 +1120,32 @@ export class GameManager extends Component {
             this.tempHoles.push(screw.color);
         } else {
             targetBox.screws.push(screw.color);
+            
+            // ===== 连击判定 =====
+            const COMBO_WINDOW = 1500; // 1.5秒内连续收集算连击
+            const now = Date.now();
+            if (this.lastCollectTime > 0 && (now - this.lastCollectTime) < COMBO_WINDOW) {
+                this.comboCount++;
+            } else {
+                this.comboCount = 1;
+            }
+            this.lastCollectTime = now;
+            
+            // 连击 >=2 时显示飘字
+            if (this.comboCount >= 2) {
+                const comboInfo = this.getComboInfo(this.comboCount);
+                if (comboInfo.text) {
+                    // 从屏幕中央飘出
+                    this.showFloatText(comboInfo.text, 0, 10, comboInfo.color, comboInfo.fontSize);
+                }
+            }
+            // ===== 连击判定结束 =====
+
+            // 首次遇到彩虹果：弹出提示
+            if (isRainbow && !rainbowIntroduced) {
+                rainbowIntroduced = true;
+                this.showRainbowTutorial();
+            }
         }
 
         screw.removed = true;
@@ -1162,7 +1224,10 @@ export class GameManager extends Component {
         let changed = false;
         for (let i = this.tempHoles.length - 1; i >= 0; i--) {
             const color = this.tempHoles[i];
-            const targetBox = this.boxes.find((box) => box.color === color && box.screws.length < box.capacity);
+            const targetBox = color === ScrewColor.RAINBOW
+                ? this.boxes.find((box) => box.color !== 'locked' && box.color !== 'empty' && box.screws.length < box.capacity)
+                : this.boxes.find((box) => box.color === color && box.screws.length < box.capacity);
+                
             if (!targetBox) continue;
             targetBox.screws.push(color);
             this.tempHoles.splice(i, 1);
@@ -1189,12 +1254,14 @@ export class GameManager extends Component {
         this.plates.forEach((plate) => {
             if (plate.removed) return;
             plate.screws.forEach((screw) => {
-                if (!screw.removed) {
+                if (!screw.removed && screw.color !== ScrewColor.RAINBOW) {
                     colors.add(screw.color);
                 }
             });
         });
-        this.tempHoles.forEach((color) => colors.add(color));
+        this.tempHoles.forEach((color) => {
+            if (color !== ScrewColor.RAINBOW) colors.add(color);
+        });
         return Array.from(colors);
     }
 
@@ -1249,6 +1316,7 @@ export class GameManager extends Component {
     private getPreferredRefreshColors() {
         const weights = new Map<ScrewColor, number>();
         const addWeight = (color: ScrewColor, weight: number) => {
+            if (color === ScrewColor.RAINBOW) return;
             weights.set(color, (weights.get(color) || 0) + weight);
         };
 
@@ -1323,16 +1391,23 @@ export class GameManager extends Component {
             const sameColorBoxes = this.boxes.filter((item) => item.color === color);
             if (sameColorBoxes.length <= 1) return;
 
-            const outstandingCount = this.getOutstandingColorCount(color);
+            const outstandingCount = this.getOutstandingColorCount(color) + this.getOutstandingColorCount(ScrewColor.RAINBOW);
             if (outstandingCount > box.capacity) return;
 
             sameColorBoxes.sort((a, b) => b.screws.length - a.screws.length);
             const primary = sameColorBoxes[0];
             let mergedCount = 0;
+            let rainbowCount = 0;
             sameColorBoxes.forEach((item) => {
                 mergedCount += item.screws.filter((screw) => screw === color).length;
+                rainbowCount += item.screws.filter((screw) => screw === ScrewColor.RAINBOW).length;
             });
-            primary.screws = Array(Math.min(primary.capacity, mergedCount)).fill(color);
+            
+            // 重新分配果子，优先放普通果子，再放彩虹果
+            const newScrews = [];
+            for (let i = 0; i < Math.min(primary.capacity, mergedCount); i++) newScrews.push(color);
+            for (let i = 0; i < Math.min(primary.capacity - newScrews.length, rainbowCount); i++) newScrews.push(ScrewColor.RAINBOW);
+            primary.screws = newScrews;
 
             for (let i = 1; i < sameColorBoxes.length; i++) {
                 const extraBox = sameColorBoxes[i];
@@ -1350,11 +1425,14 @@ export class GameManager extends Component {
 
     private canClearBox(box: BoxData) {
         if (!this.isValidPrimaryBoxColor(box.color) || box.screws.length === 0) return false;
-        if (!box.screws.every((screw) => screw === box.color)) return false;
+        if (!box.screws.every((screw) => screw === box.color || screw === ScrewColor.RAINBOW)) return false;
 
         if (box.screws.length === box.capacity) return true;
 
-        if (box.screws.length === this.getOutstandingColorCount(box.color)) return true;
+        // 如果包含彩虹果，它也可以作为该颜色的一部分被清除
+        // 这里计算真正的该颜色剩余量加上剩余的彩虹果数量，来判断是否能提前清除
+        const outstanding = this.getOutstandingColorCount(box.color) + this.getOutstandingColorCount(ScrewColor.RAINBOW);
+        if (box.screws.length === outstanding) return true;
 
         return false;
     }
@@ -1989,6 +2067,62 @@ export class GameManager extends Component {
         return label;
     }
 
+    /** 飘字特效：文字从指定位置向上飘升并淡出（position 为 rootNode 本地坐标） */
+    private showFloatText(text: string, localX: number, localY: number, color: Color, fontSize: number = 28) {
+        if (!this.rootNode) return;
+        const parent = this.rootNode;
+
+        const labelNode = new Node('FloatText');
+        labelNode.layer = Layers.Enum.UI_2D;
+        labelNode.setPosition(localX, localY, 0);
+        const uiTransform = labelNode.addComponent(UITransform);
+        uiTransform.setContentSize(260, 50);
+        const label = labelNode.addComponent(Label);
+        label.string = text;
+        label.fontSize = fontSize;
+        label.color = color;
+        label.horizontalAlign = 1;
+        label.verticalAlign = 1;
+        label.isBold = true;
+        label.enableOutline = true;
+        label.outlineColor = new Color(0, 0, 0, 120);
+        label.outlineWidth = 3;
+        parent.addChild(labelNode);
+
+        // 弹入动画：从 0.5 放大到 1.0
+        labelNode.setScale(0.5, 0.5, 1);
+        tween(labelNode)
+            .to(0.15, { scale: new Vec3(1.15, 1.15, 1) }, { easing: 'backOut' })
+            .to(0.1, { scale: new Vec3(1.0, 1.0, 1) })
+            .to(0.8, { position: new Vec3(localX, localY + 80, 0) }, { easing: 'sineOut' })
+            .delay(0.15)
+            .call(() => {
+                if (labelNode.isValid) labelNode.destroy();
+            })
+            .start();
+
+        // 透明度渐隐
+        tween(label)
+            .delay(0.5)
+            .to(0.35, { color: new Color(color.r, color.g, color.b, 0) })
+            .start();
+    }
+
+    /** 根据连击次数获取飘字文案和颜色 */
+    private getComboInfo(count: number): { text: string; color: Color; fontSize: number } {
+        if (count >= 7) return { text: '完美！', color: new Color(255, 215, 0, 255), fontSize: 36 };
+        if (count >= 5) return { text: `连击 x${count}！`, color: new Color(255, 140, 0, 255), fontSize: 34 };
+        if (count >= 3) return { text: `连击 x${count}！`, color: new Color(255, 100, 180, 255), fontSize: 32 };
+        if (count >= 2) return { text: '不错！', color: new Color(100, 220, 255, 255), fontSize: 28 };
+        return { text: '', color: Color.WHITE, fontSize: 28 };
+    }
+
+    /** 重置连击（新关卡/连击超时调用） */
+    private resetCombo() {
+        this.lastCollectTime = 0;
+        this.comboCount = 0;
+    }
+
     private createIconButton(parent: Node, x: number, y: number, width: number, height: number, text: string, fontSize: number) {
         const node = this.createNode('IconButton', parent, x, y, width, height);
         const bg = this.createGraphicsNode('Bg', node, width, height, 0, 0);
@@ -2076,16 +2210,39 @@ export class GameManager extends Component {
 
             const body = this.createGraphicsNode('Body', fruitNode, diameter, diameter, 0, 0);
             const bg = body.getComponent(Graphics)!;
-            bg.fillColor = bodyColor;
-            bg.circle(-1, 1, r);
-            bg.fill();
-            bg.lineWidth = 2;
-            bg.strokeColor = darkColor;
-            bg.circle(-1, 1, r);
-            bg.stroke();
-            bg.fillColor = new Color(255, 255, 255, 50);
-            bg.circle(-r * 0.3, r * 0.3, r * 0.3);
-            bg.fill();
+
+            if (color === ScrewColor.RAINBOW) {
+                // 彩虹果实：绘制多层彩色同心环
+                const rainbowColors = [
+                    new Color(255, 80, 80, 255),   // 红
+                    new Color(255, 180, 50, 255),  // 橙
+                    new Color(255, 240, 60, 255),  // 黄
+                    new Color(100, 210, 80, 255),  // 绿
+                    new Color(80, 180, 240, 255),  // 蓝
+                    new Color(155, 85, 210, 255),  // 紫
+                ];
+                const ringWidth = r / rainbowColors.length;
+                for (let i = rainbowColors.length - 1; i >= 0; i--) {
+                    bg.fillColor = rainbowColors[i];
+                    bg.circle(-1, 1, r - i * ringWidth);
+                    bg.fill();
+                }
+                // 中心白色高光
+                bg.fillColor = new Color(255, 255, 255, 200);
+                bg.circle(-r * 0.25, r * 0.25, r * 0.25);
+                bg.fill();
+            } else {
+                bg.fillColor = bodyColor;
+                bg.circle(-1, 1, r);
+                bg.fill();
+                bg.lineWidth = 2;
+                bg.strokeColor = darkColor;
+                bg.circle(-1, 1, r);
+                bg.stroke();
+                bg.fillColor = new Color(255, 255, 255, 50);
+                bg.circle(-r * 0.3, r * 0.3, r * 0.3);
+                bg.fill();
+            }
 
             const stemG = this.createGraphicsNode('Stem', fruitNode, diameter * 0.35, diameter * 0.22, diameter * 0.08, diameter * 0.32);
             const sg2 = stemG.getComponent(Graphics)!;
@@ -2372,6 +2529,7 @@ export class GameManager extends Component {
         'green': 'Pear',
         'purple': 'Eggplant',
         'cyan': 'Carrot',     // 胡萝卜
+        'rainbow': '',        // 彩虹果：代码绘制，无图片
     };
 
     /** ScrewColor → 水果中文名映射 */
@@ -2384,6 +2542,7 @@ export class GameManager extends Component {
         'green': '鸭梨',
         'purple': '茄子',
         'cyan': '胡萝卜',
+        'rainbow': '彩虹果',
     };
 
     private async loadFruitSprites(): Promise<void> {

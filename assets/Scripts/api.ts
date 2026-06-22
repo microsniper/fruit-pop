@@ -109,6 +109,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
           })
         });
         code = loginRes.code;
+        console.log('[API] wx.login success, code:', code);
     }
 
     const res = await request<{ token: string; source: SourceEnum; progress: { gameType: GameTypeEnum; levelNum: number } }>({
@@ -119,22 +120,58 @@ export const loginAndGetProgress = async (): Promise<number> => {
         gameType: GameTypeEnum.SCREW,
         source: currentSource
       }
-    })
-    token = res.data.token
+    });
+    console.log('[API] login response, levelNum:', res.data?.progress?.levelNum);
+    token = res.data.token;
     if (token) {
         if (platform) {
-            platform.setStorageSync('token', token)
+            platform.setStorageSync('token', token);
         } else {
             localStorage.setItem('token', token);
         }
     }
 
-    const serverLevel = res.data.progress?.levelNum || 1
-    setLocalLevel(serverLevel)
-    return serverLevel
+    const serverLevel = res.data.progress?.levelNum || 1;
+    setLocalLevel(serverLevel);
+    return serverLevel;
   } catch (e) {
-    console.error("Login failed:", e);
-    return getLocalLevel()
+    console.error("[API] Login failed:", e);
+    
+    // 登录失败时，尝试用本地缓存的旧 token 恢复进度
+    if (platform) {
+        const cachedToken = platform.getStorageSync('token');
+        if (cachedToken) {
+            token = cachedToken;
+            console.log('[API] fallback with cached token');
+            // 用旧 token 重新走一次登录（后端会识别已注册用户并返回进度）
+            try {
+                const loginRes = await new Promise<any>((resolve, reject) => {
+                    platform.login({ success: resolve, fail: reject });
+                });
+                const res = await request<{ token: string; progress: { levelNum: number } }>({
+                    url: '/api/game/login',
+                    method: 'POST',
+                    data: {
+                        code: loginRes.code,
+                        gameType: GameTypeEnum.SCREW,
+                        source: currentSource
+                    }
+                });
+                token = res.data.token;
+                if (token) {
+                    platform.setStorageSync('token', token);
+                }
+                const serverLevel = res.data.progress?.levelNum || 1;
+                setLocalLevel(serverLevel);
+                console.log('[API] fallback success, level:', serverLevel);
+                return serverLevel;
+            } catch (fallbackErr) {
+                console.error('[API] fallback also failed:', fallbackErr);
+            }
+        }
+    }
+    
+    return getLocalLevel();
   }
 }
 
