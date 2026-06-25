@@ -267,3 +267,26 @@ export const updateProfile = async (nickname: string, avatarUrl: string): Promis
     return false
   }
 }
+
+/** 
+ * 消耗一次当天的分享奖励次数
+ * 如果后端返回 HTTP 403 或者业务 code 表明超限，会进入 catch 或返回 false
+ */
+export const consumeShareCount = async (): Promise<{ success: boolean, isLimit: boolean }> => {
+  try {
+    const res = await request({
+      url: '/api/game/share/consume',
+      method: 'POST',
+      data: {
+        gameType: GameTypeEnum.SCREW
+      }
+    });
+    return { success: res.code === 200, isLimit: false };
+  } catch (e: any) {
+    console.error("Consume share count failed:", e);
+    const isLimit = e.message && e.message.includes('上限');
+    return { success: false, isLimit: !!isLimit };
+  }
+}
+
+

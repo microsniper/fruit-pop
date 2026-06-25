@@ -1,5 +1,5 @@
-import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources } from 'cc';
-import { loginAndGetProgress, saveProgress, fetchRank, RankItem, getCachedProfile, updateProfile } from './api';
+import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources, ImageAsset } from 'cc';
+import { loginAndGetProgress, saveProgress, fetchRank, RankItem, getCachedProfile, updateProfile, consumeShareCount } from './api';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
 
@@ -93,7 +93,10 @@ interface BoxSlotView {
 
 interface BoxView {
     node: Node;
-    body: Graphics;
+    /** 灰度底图 Sprite，通过 .color 动态染色 */
+    bodySprite: Sprite;
+    /** 锁状态的 X 图形覆盖层 */
+    lockOverlay: Graphics;
     fruitIcon: Sprite;
     nameLabel: Label;
     lockLabel: Label;
@@ -206,8 +209,42 @@ export class GameManager extends Component {
     private defaultAvatarFrames: SpriteFrame[] = [];
     private fruitSprites: Map<string, SpriteFrame> = new Map();
     private fruitsLoaded = false;
+    /** 灰度果篮底图，运行时动态染色 */
+    private basketSpriteFrame: SpriteFrame | null = null;
+    /** 分享图片本地路径缓存 */
+    private shareImageUrls: Record<string, string> = {};
+    /** 待执行的分享奖励回调 */
+    private pendingShareCallback: (() => void) | null = null;
+    /** 记录点击分享拉起微信面板时的时间戳，用于防御秒关白嫖 */
+    private shareStartTime = 0;
     /** 上次收集水果的时间戳（毫秒），用于连击判定 */
     private lastCollectTime = 0;
+
+    private getTodayStr(): string {
+        const d = new Date();
+        return `${d.getFullYear()}${d.getMonth() + 1}${d.getDate()}`;
+    }
+
+    private isShareLimitReached(): boolean {
+        try {
+            if (typeof wx !== 'undefined') {
+                return wx.getStorageSync('share_limit_date') === this.getTodayStr();
+            }
+            return localStorage.getItem('share_limit_date') === this.getTodayStr();
+        } catch (e) {
+            return false;
+        }
+    }
+
+    private setShareLimitReached() {
+        try {
+            if (typeof wx !== 'undefined') {
+                wx.setStorageSync('share_limit_date', this.getTodayStr());
+            } else {
+                localStorage.setItem('share_limit_date', this.getTodayStr());
+            }
+        } catch (e) {}
+    }
     /** 当前连击次数 */
     private comboCount = 0;
     private titleLabel: Label | null = null;
@@ -242,6 +279,8 @@ export class GameManager extends Component {
         const loadStart = Date.now();
         this.currentLevel = await loginAndGetProgress();
         await this.loadFruitSprites();  // 确保水果图片加载完成后再初始化游戏
+        await this.loadBasketBase();    // 加载灰度果篮底图
+        this.preloadShareImages();      // 预加载分享图片
         this.initGame();
         const elapsed = (Date.now() - loadStart) / 1000;
         const delay = Math.max(0, 2.0 - elapsed);
@@ -542,6 +581,15 @@ export class GameManager extends Component {
         
         this.ensurePrimaryBoxes();
         this.renderAll();
+
+        // 关卡含彩虹果且首次出现时，弹出提示
+        if (!rainbowIntroduced) {
+            const hasRainbowInLevel = this.plates.some(p => p.screws?.some(s => !s.removed && s.color === ScrewColor.RAINBOW));
+            if (hasRainbowInLevel) {
+                rainbowIntroduced = true;
+                this.scheduleOnce(() => this.showRainbowTutorial(), 0.5);
+            }
+        }
     }
 
     private destroyNodeRecursively(node: Node) {
@@ -576,7 +624,7 @@ export class GameManager extends Component {
         this.ensureBoxViews();
 
         const boxWidth = Math.min(84, this.screenWidth * 0.2);
-        const boxHeight = 92;
+        const boxHeight = boxWidth * 1.33; // 保持 3:4 左右的原始比例
         const gap = (this.screenWidth - 40 - boxWidth * 4) / 3;
         const startX = -((boxWidth * 4 + gap * 3) / 2) + boxWidth / 2;
 
@@ -602,7 +650,28 @@ export class GameManager extends Component {
                     : this.getBoxColor(box.color);
             const colorKey = `${box.color}_${box.capacity}`;
             if (view.lastBodyColor !== colorKey) {
-                this.drawBasketBody(view.body, boxWidth, boxHeight, bodyColor, box.color);
+                // 使用灰度底图 + 动态染色
+                if (this.basketSpriteFrame) {
+                    view.bodySprite.spriteFrame = this.basketSpriteFrame;
+                    view.bodySprite.color = bodyColor;
+                }
+
+                // 锁状态的 X 覆盖层
+                if (isLocked) {
+                    view.lockOverlay.node.active = true;
+                    view.lockOverlay.clear();
+                    view.lockOverlay.strokeColor = new Color(60, 40, 20, 200);
+                    view.lockOverlay.lineWidth = 3;
+                    const hh = boxHeight / 2;
+                    view.lockOverlay.moveTo(-hh * 0.3, -hh * 0.3);
+                    view.lockOverlay.lineTo(hh * 0.3, hh * 0.3);
+                    view.lockOverlay.stroke();
+                    view.lockOverlay.moveTo(-hh * 0.3, hh * 0.3);
+                    view.lockOverlay.lineTo(hh * 0.3, -hh * 0.3);
+                    view.lockOverlay.stroke();
+                } else {
+                    view.lockOverlay.node.active = false;
+                }
                 
                 // 设置水果图标和文字
                 if (isActive && this.isValidPrimaryBoxColor(box.color)) {
@@ -729,7 +798,7 @@ export class GameManager extends Component {
         });
     }
 
-    private renderModal(config: { title: string; sub: string; button: string; onConfirm: () => void; height?: number } | null) {
+    private renderModal(config: { title: string; sub: string; button: string; onConfirm: () => void; height?: number; secondButton?: string; secondOnConfirm?: () => void; hideClose?: boolean; onCancel?: () => void } | null) {
         if (!this.modalLayerNode) return;
         this.modalLayerNode.removeAllChildren();
         if (!config) return;
@@ -738,10 +807,20 @@ export class GameManager extends Component {
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 110), 0);
 
         const panelH = config.height || 300;
-        const panelW = this.screenWidth * 0.78;
+        const panelW = this.screenWidth * 0.82;
         const panel = this.createNode('Panel', this.modalLayerNode, 0, 0, panelW, panelH);
         const panelBg = this.createGraphicsNode('PanelBg', panel, panelW, panelH, 0, 0);
         this.drawRoundedRect(panelBg.getComponent(Graphics)!, panelW, panelH, new Color(255, 255, 255, 255), 24);
+
+        if (!config.hideClose) {
+            const closeBtnSize = 40;
+            const closeBtn = this.createNode('CloseBtn', panel, panelW / 2 - closeBtnSize / 2 - 5, panelH / 2 - closeBtnSize / 2 - 5, closeBtnSize, closeBtnSize);
+            this.createLabel(closeBtn, '×', 0, 2, 32, new Color(180, 180, 180, 255), true);
+            closeBtn.on(Node.EventType.TOUCH_END, () => {
+                this.renderModal(null);
+                if (config.onCancel) config.onCancel();
+            }, this);
+        }
 
         this.createLabel(panel, config.title, 0, panelH / 2 - 40, 26, new Color(32, 36, 42, 255), true);
 
@@ -752,18 +831,68 @@ export class GameManager extends Component {
         subLabel.fontSize = 16;
         subLabel.lineHeight = 26;
         subLabel.color = new Color(88, 95, 108, 255);
-        subLabel.horizontalAlign = 1;
-        subLabel.verticalAlign = 1;
+        subLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+        subLabel.verticalAlign = Label.VerticalAlign.CENTER;
+        subLabel.overflow = Label.Overflow.SHRINK; // 允许文字自动缩放或者折行
         subLabel.enableWrapText = true;
 
-        const button = this.createNode('Confirm', panel, 0, -panelH / 2 + 40, 150, 50);
-        const buttonBg = this.createGraphicsNode('BtnBg', button, 150, 50, 0, 0);
-        this.drawRoundedRect(buttonBg.getComponent(Graphics)!, 150, 50, new Color(100, 155, 85, 255), 25);
-        this.createLabel(button, config.button, 0, 0, 20, new Color(255, 255, 255, 255), true);
+        const hasSecond = config.secondButton && config.secondOnConfirm;
+        const btnW = hasSecond ? 126 : 160;
+        const btnH = 48;
+        const btnRadius = 24;
+
+        const button = this.createNode('Confirm', panel, hasSecond ? -74 : 0, -panelH / 2 + 45, btnW, btnH);
+        const buttonBg = this.createGraphicsNode('BtnBg', button, btnW, btnH, 0, 0);
+        this.drawRoundedRect(buttonBg.getComponent(Graphics)!, btnW, btnH, new Color(100, 160, 85, 255), btnRadius);
+        this.createLabel(button, config.button, 0, 0, 18, new Color(255, 255, 255, 255), true);
         button.on(Node.EventType.TOUCH_END, () => {
             this.renderModal(null);
             config.onConfirm();
         }, this);
+
+        if (hasSecond) {
+            const isShareBtn = config.secondButton!.includes('分享');
+            const limitReached = isShareBtn && this.isShareLimitReached();
+
+            const btn2 = this.createNode('SecondBtn', panel, 74, -panelH / 2 + 45, btnW, btnH);
+            const btn2Bg = this.createGraphicsNode('Btn2Bg', btn2, btnW, btnH, 0, 0);
+            
+            // 始终画原来的橙色按钮
+            this.drawRoundedRect(btn2Bg.getComponent(Graphics)!, btnW, btnH, new Color(245, 140, 40, 255), btnRadius);
+            
+            if (limitReached) {
+                // 原文字居中，透明度调得很低作为底纹
+                this.createLabel(btn2, config.secondButton!, 0, 0, 18, new Color(255, 255, 255, 50), true);
+                
+                // 黑色半透明蒙层
+                const overlay = this.createGraphicsNode('Overlay', btn2, btnW, btnH, 0, 0);
+                this.drawRoundedRect(overlay.getComponent(Graphics)!, btnW, btnH, new Color(0, 0, 0, 110), btnRadius);
+                
+                // "今日已达上限" 盖在正中间
+                const limitLabelNode = this.createNode('LimitLabel', btn2, 0, 0, btnW, btnH);
+                const limitLabel = limitLabelNode.addComponent(Label);
+                limitLabel.string = '今日已达上限';
+                limitLabel.fontSize = 16;
+                limitLabel.color = new Color(255, 255, 255, 255);
+                limitLabel.isBold = true;
+                limitLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+                limitLabel.verticalAlign = Label.VerticalAlign.CENTER;
+            } else {
+                // 正常状态
+                this.createLabel(btn2, config.secondButton!, 0, 0, 18, new Color(255, 255, 255, 255), true);
+            }
+
+            btn2.on(Node.EventType.TOUCH_END, () => {
+                if (limitReached) {
+                    if (typeof wx !== 'undefined') {
+                        wx.showToast({ title: '今日已达上限', icon: 'none' });
+                    }
+                    return;
+                }
+                this.renderModal(null);
+                config.secondOnConfirm!();
+            }, this);
+        }
     }
 
     private getProgressText() {
@@ -1107,13 +1236,22 @@ export class GameManager extends Component {
             if (this.tempHoles.length >= this.maxTempHoles) {
                 this.gameOver = true;
                 this.renderModal({
-                    title: '暂存孔满了',
-                    sub: '孔位已满，重试这一关吧',
-                    button: '重试一次',
-                    height: 180,
+                    title: '暂存盘满了',
+                    sub: '果盘已被塞满，\n分享给好友即可清空果盘继续闯关',
+                    button: '重试',
                     onConfirm: () => {
                         this.initGame();
-                    }
+                    },
+                    secondButton: '分享复活',
+                    secondOnConfirm: () => {
+                        this.doShareForReward('revive', () => {
+                            this.gameOver = false;
+                            this.tempHoles = [];
+                            this.renderTopUI();
+                            this.renderModal(null);
+                        });
+                    },
+                    height: 230,
                 });
                 return;
             }
@@ -1140,12 +1278,6 @@ export class GameManager extends Component {
                 }
             }
             // ===== 连击判定结束 =====
-
-            // 首次遇到彩虹果：弹出提示
-            if (isRainbow && !rainbowIntroduced) {
-                rainbowIntroduced = true;
-                this.showRainbowTutorial();
-            }
         }
 
         screw.removed = true;
@@ -1531,8 +1663,23 @@ export class GameManager extends Component {
                 });
                 return;
             }
-            this.showAdThen(() => {
-                this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
+            // 二选一：看广告 or 分享
+            this.renderModal({
+                title: '解锁果篮',
+                sub: '可选择看广告或分享给好友\n解锁新果篮',
+                button: '看广告解锁',
+                onConfirm: () => {
+                    this.showAdThen(() => {
+                        this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
+                    });
+                },
+                secondButton: '分享解锁',
+                secondOnConfirm: () => {
+                    this.doShareForReward('unlock', () => {
+                        this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
+                    });
+                },
+                height: 240,
             });
             return;
         }
@@ -1594,7 +1741,7 @@ export class GameManager extends Component {
             title: '通关成功',
             sub: `太棒了，你已完成第 ${this.currentLevel} 关`,
             button: '下一关',
-            height: 180,
+            height: 200,
             onConfirm: () => {
                 this.currentLevel++;
                 saveProgress(this.currentLevel);
@@ -1884,36 +2031,39 @@ export class GameManager extends Component {
     }
 
     private getBoxSlotPositions(capacity: number) {
+        // 由于使用了带提手和标签底板的新图，果篮内部有效区域整体偏上
+        // boxHeight 约为 120，中心点 0 是整个果篮（含提手）的中心
+        // 有效盛放区域的中心大概在 Y = +5 左右
         if (capacity === 4) {
             return [
-                { x: -17, y: 14 },
-                { x: 17, y: 14 },
-                { x: -17, y: -11 },
-                { x: 17, y: -11 }
+                { x: -18, y: 18 },
+                { x: 18, y: 18 },
+                { x: -18, y: -8 },
+                { x: 18, y: -8 }
             ];
         }
         if (capacity === 5) {
             return [
-                { x: -19, y: 17 },
-                { x: 19, y: 17 },
-                { x: -19, y: -14 },
-                { x: 19, y: -14 },
-                { x: 0, y: 2 }
+                { x: -20, y: 22 },
+                { x: 20, y: 22 },
+                { x: -20, y: -10 },
+                { x: 20, y: -10 },
+                { x: 0, y: 6 }
             ];
         }
         if (capacity === 6) {
             return [
-                { x: -13, y: 24 },
-                { x: -13, y: 2 },
-                { x: -13, y: -20 },
-                { x: 13, y: 24 },
-                { x: 13, y: 2 },
-                { x: 13, y: -20 }
+                { x: -16, y: 28 },
+                { x: -16, y: 4 },
+                { x: -16, y: -20 },
+                { x: 16, y: 28 },
+                { x: 16, y: 4 },
+                { x: 16, y: -20 }
             ];
         }
         return [
-            { x: -16, y: 13 },
-            { x: 16, y: 13 },
+            { x: -18, y: 14 },
+            { x: 18, y: 14 },
             { x: 0, y: -12 }
         ];
     }
@@ -1921,9 +2071,10 @@ export class GameManager extends Component {
     private ensureBoxViews() {
         if (!this.boxesContainerNode || this.boxViews.length === this.boxes.length) return;
 
-        const boxWidth = Math.min(84, this.screenWidth * 0.2);
-        const boxHeight = 92;
-        const gap = (this.screenWidth - 40 - boxWidth * 4) / 3;
+        // 放大果篮宽度
+        const boxWidth = Math.min(90, this.screenWidth * 0.22);
+        const boxHeight = boxWidth * 1.33; // 保持 3:4 左右的原始比例
+        const gap = (this.screenWidth - 30 - boxWidth * 4) / 3;
         const startX = -((boxWidth * 4 + gap * 3) / 2) + boxWidth / 2;
         const maxSlots = 6;
         const allSlotPositions = this.getBoxSlotPositions(maxSlots);
@@ -1933,25 +2084,28 @@ export class GameManager extends Component {
             const x = startX + index * (boxWidth + gap);
             const boxNode = this.createNode(`Box_${index}`, this.boxesContainerNode, x, 0, boxWidth, boxHeight);
 
-            const backLayer = this.createGraphicsNode('BackLayer', boxNode, boxWidth + 8, boxHeight + 8, 5, -4);
-            this.drawRoundedRect(backLayer.getComponent(Graphics)!, boxWidth + 8, boxHeight + 8, new Color(140, 115, 80, 120), 12);
+            // 果篮本体：使用灰度底图 Sprite，通过 color 动态染色
+            const bodyNode = this.createNode('Body', boxNode, 0, 0, boxWidth, boxHeight);
+            const bodySprite = bodyNode.addComponent(Sprite);
+            bodySprite.sizeMode = Sprite.SizeMode.CUSTOM;
 
-            const shadow = this.createGraphicsNode('Shadow', boxNode, boxWidth + 6, boxHeight + 6, 2, -2);
-            this.drawRoundedRect(shadow.getComponent(Graphics)!, boxWidth + 6, boxHeight + 6, new Color(155, 130, 95, 100), 12);
-
-            const body = this.createGraphicsNode('Body', boxNode, boxWidth, boxHeight, 0, 0);
-            const bodyGraphics = body.getComponent(Graphics)!;
+            // 锁状态的 X 覆盖层
+            const lockOverlayNode = this.createGraphicsNode('LockOverlay', boxNode, boxWidth, boxHeight, 0, 0);
+            const lockOverlay = lockOverlayNode.getComponent(Graphics)!;
+            lockOverlayNode.active = false;
 
             // 中心水果图标 (半透明)
-            const iconNode = this.createNode('FruitIcon', boxNode, 0, 5, 48, 48);
+            // 对齐中间孔位的中心点
+            const iconNode = this.createNode('FruitIcon', boxNode, 0, boxHeight * 0.08, 48, 48);
             const fruitIcon = iconNode.addComponent(Sprite);
             fruitIcon.sizeMode = Sprite.SizeMode.CUSTOM;
             fruitIcon.color = new Color(255, 255, 255, 70); // 更透明，不抢夺底色
             
-            // 底部中文标签
-            const nameLabel = this.createLabel(boxNode, '', 0, -boxHeight / 2 + 15, 13, new Color(255, 255, 255, 255), true);
+            // 底部中文标签 (精准对齐底部的白色标签框，往下挪)
+            const nameLabel = this.createLabel(boxNode, '', 0, -boxHeight / 2 + boxHeight * 0.15, 15, new Color(90, 60, 30, 255), true);
 
-            const lockLabel = this.createLabel(boxNode, '解锁\n果篮', 0, 0, 15, new Color(255, 255, 255, 255), true, 19);
+            // 解锁文字：颜色改为深棕色，放在白色标签框的位置
+            const lockLabel = this.createLabel(boxNode, '解锁', 0, -boxHeight / 2 + boxHeight * 0.15, 15, new Color(90, 60, 30, 255), true);
             lockLabel.node.active = false;
 
             const slots: BoxSlotView[] = allSlotPositions.map((pos, slotIndex) => {
@@ -1966,7 +2120,8 @@ export class GameManager extends Component {
 
             this.boxViews.push({
                 node: boxNode,
-                body: bodyGraphics,
+                bodySprite,
+                lockOverlay,
                 fruitIcon,
                 nameLabel,
                 lockLabel,
@@ -2211,38 +2366,16 @@ export class GameManager extends Component {
             const body = this.createGraphicsNode('Body', fruitNode, diameter, diameter, 0, 0);
             const bg = body.getComponent(Graphics)!;
 
-            if (color === ScrewColor.RAINBOW) {
-                // 彩虹果实：绘制多层彩色同心环
-                const rainbowColors = [
-                    new Color(255, 80, 80, 255),   // 红
-                    new Color(255, 180, 50, 255),  // 橙
-                    new Color(255, 240, 60, 255),  // 黄
-                    new Color(100, 210, 80, 255),  // 绿
-                    new Color(80, 180, 240, 255),  // 蓝
-                    new Color(155, 85, 210, 255),  // 紫
-                ];
-                const ringWidth = r / rainbowColors.length;
-                for (let i = rainbowColors.length - 1; i >= 0; i--) {
-                    bg.fillColor = rainbowColors[i];
-                    bg.circle(-1, 1, r - i * ringWidth);
-                    bg.fill();
-                }
-                // 中心白色高光
-                bg.fillColor = new Color(255, 255, 255, 200);
-                bg.circle(-r * 0.25, r * 0.25, r * 0.25);
-                bg.fill();
-            } else {
-                bg.fillColor = bodyColor;
-                bg.circle(-1, 1, r);
-                bg.fill();
-                bg.lineWidth = 2;
-                bg.strokeColor = darkColor;
-                bg.circle(-1, 1, r);
-                bg.stroke();
-                bg.fillColor = new Color(255, 255, 255, 50);
-                bg.circle(-r * 0.3, r * 0.3, r * 0.3);
-                bg.fill();
-            }
+            bg.fillColor = bodyColor;
+            bg.circle(-1, 1, r);
+            bg.fill();
+            bg.lineWidth = 2;
+            bg.strokeColor = darkColor;
+            bg.circle(-1, 1, r);
+            bg.stroke();
+            bg.fillColor = new Color(255, 255, 255, 50);
+            bg.circle(-r * 0.3, r * 0.3, r * 0.3);
+            bg.fill();
 
             const stemG = this.createGraphicsNode('Stem', fruitNode, diameter * 0.35, diameter * 0.22, diameter * 0.08, diameter * 0.32);
             const sg2 = stemG.getComponent(Graphics)!;
@@ -2290,81 +2423,6 @@ export class GameManager extends Component {
             return;
         }
         this.drawRoundedRect(graphics, width, height, fill, radius, lineWidth, stroke);
-    }
-
-    private drawBasketBody(graphics: Graphics, width: number, height: number, fill: Color, boxColor: BoxColor) {
-        graphics.clear();
-        const hw = width / 2;
-        const hh = height / 2;
-        const radius = 12;
-        const rimH = 7;
-
-        const isLocked = boxColor === 'locked';
-        const isEmpty = boxColor === 'empty';
-        const isActive = !isLocked && !isEmpty;
-
-        const basketOuter = isLocked ? new Color(120, 100, 70, 255)
-            : isEmpty ? new Color(175, 160, 140, 255)
-            : new Color(185, 150, 115, 255);
-        const darkBrown = new Color(105, 78, 48, 220);
-        const lightBrown = new Color(210, 175, 135, 180);
-
-        // 统一绘制底板
-        graphics.fillColor = basketOuter;
-        graphics.roundRect(-hw, -hh, width, height, radius);
-        graphics.fill();
-
-        // 内部不再使用大面积纯色，而是统一用浅色内衬
-        if (isActive) {
-            graphics.fillColor = fill; 
-            graphics.roundRect(-hw + 3, -hh + 3, width - 6, height - 6, radius - 2);
-            graphics.fill();
-        } else if (isLocked) {
-            graphics.fillColor = new Color(135, 112, 78, 255);
-            graphics.roundRect(-hw + 3, -hh + 3, width - 6, height - 6, radius - 2);
-            graphics.fill();
-        }
-
-        // 外边框
-        graphics.strokeColor = darkBrown;
-        graphics.lineWidth = 2;
-        graphics.roundRect(-hw, -hh, width, height, radius);
-        graphics.stroke();
-
-        graphics.strokeColor = lightBrown;
-        graphics.lineWidth = 1;
-        graphics.roundRect(-hw, -hh, width - 2, height - 2, radius);
-        graphics.stroke();
-
-        // 顶部边沿
-        const rimY = hh - rimH;
-        graphics.fillColor = new Color(140, 108, 72, 255);
-        graphics.ellipse(0, rimY, hw, rimH);
-        graphics.fill();
-        graphics.strokeColor = lightBrown;
-        graphics.lineWidth = 1;
-        graphics.ellipse(0, rimY, hw - 2, rimH - 2);
-        graphics.stroke();
-
-        const handleH = 16;
-        const handleW = width * 0.4;
-        const handleStartY = hh - 4;
-        graphics.strokeColor = new Color(145, 112, 72, 240);
-        graphics.lineWidth = 3;
-        graphics.moveTo(-handleW, handleStartY);
-        graphics.quadraticCurveTo(0, hh + handleH, handleW, handleStartY);
-        graphics.stroke();
-
-        if (isLocked) {
-            graphics.strokeColor = new Color(60, 40, 20, 200);
-            graphics.lineWidth = 3;
-            graphics.moveTo(-8, -4);
-            graphics.lineTo(8, 4);
-            graphics.stroke();
-            graphics.moveTo(-8, 4);
-            graphics.lineTo(8, -4);
-            graphics.stroke();
-        }
     }
 
     private getBoxColor(color: BoxColor): Color {
@@ -2529,7 +2587,7 @@ export class GameManager extends Component {
         'green': 'Pear',
         'purple': 'Eggplant',
         'cyan': 'Carrot',     // 胡萝卜
-        'rainbow': '',        // 彩虹果：代码绘制，无图片
+        'rainbow': 'Rainbow Fruit', // 彩虹果
     };
 
     /** ScrewColor → 水果中文名映射 */
@@ -2548,7 +2606,7 @@ export class GameManager extends Component {
     private async loadFruitSprites(): Promise<void> {
         if (this.fruitsLoaded) return;
         return new Promise((resolve) => {
-            const fruitNames = ['Red Apple', 'Lemon', 'Peach', 'Orange', 'Pear', 'Eggplant', 'Сorn', 'Carrot'];
+            const fruitNames = ['Red Apple', 'Lemon', 'Peach', 'Orange', 'Pear', 'Eggplant', 'Сorn', 'Carrot', 'Rainbow Fruit'];
             let loaded = 0;
             fruitNames.forEach((name) => {
                 resources.load(`fruits/${name}/spriteFrame`, SpriteFrame, (err, spriteFrame) => {
@@ -2566,6 +2624,110 @@ export class GameManager extends Component {
                 });
             });
         });
+    }
+
+    /** 加载灰度果篮底图（用于运行时动态染色） */
+    private async loadBasketBase(): Promise<void> {
+        if (this.basketSpriteFrame) return;
+        return new Promise((resolve) => {
+            resources.load('baskets/basket_base/spriteFrame', SpriteFrame, (err, spriteFrame) => {
+                if (!err && spriteFrame) {
+                    this.basketSpriteFrame = spriteFrame;
+                    console.log('[Basket] loaded grayscale basket base');
+                } else {
+                    console.warn('[Basket] failed to load basket base, fallback to drawing:', err);
+                }
+                resolve();
+            });
+        });
+    }
+
+    /** 预加载分享卡片图片（转换为本地可访问路径） */
+    private preloadShareImages() {
+        if (typeof wx === 'undefined') return;
+        // 所有分享场景统一用摘呀摘呀摘这张图
+        resources.load('share/摘呀摘呀摘', ImageAsset, (err, asset) => {
+            if (!err && asset) {
+                const url = asset.nativeUrl;
+                this.shareImageUrls['unlock'] = url;
+                this.shareImageUrls['revive'] = url;
+                this.shareImageUrls['win'] = url;
+            }
+        });
+
+        // 开启右上角三个点的分享菜单
+        wx.showShareMenu({
+            withShareTicket: false,
+            menus: ['shareAppMessage', 'shareTimeline']
+        });
+        // 右上角三个点分享时提供内容
+        wx.onShareAppMessage(() => ({
+            title: `摘呀摘呀摘！我已闯到第 ${this.currentLevel} 关，快来PK吧～`,
+            imageUrl: this.shareImageUrls['unlock'] || ''
+        }));
+
+        // 监听小程序切后台 → 返回时触发分享奖励逻辑
+        wx.onShow(() => {
+            if (this.pendingShareCallback) {
+                const cb = this.pendingShareCallback;
+                this.pendingShareCallback = null;
+                
+                // 1. 前端拦截：分享停留时间校验 (小于 3 秒判定为假分享)
+                const stayTime = Date.now() - this.shareStartTime;
+                if (stayTime < 3000) {
+                    wx.showToast({
+                        title: '分享失败，请分享到不同的群聊试试～',
+                        icon: 'none',
+                        duration: 2000
+                    });
+                    return;
+                }
+
+                // 2. 后端拦截：请求消耗当日分享奖励次数
+                wx.showLoading({ title: '获取奖励中...', mask: true });
+                consumeShareCount().then(res => {
+                    wx.hideLoading();
+                    if (res.success) {
+                        cb(); // 成功消耗，执行奖励逻辑
+                    } else {
+                        if (res.isLimit) {
+                            this.setShareLimitReached();
+                        }
+                        // 次数超限或网络异常
+                        this.renderModal({
+                            title: '提示',
+                            sub: res.isLimit ? '今日分享奖励次数已达上限\n请通过看广告获取奖励吧！' : '分享奖励获取失败，请重试',
+                            button: '知道了',
+                            height: 200,
+                            onConfirm: () => {}
+                        });
+                    }
+                }).catch(() => {
+                    wx.hideLoading();
+                    wx.showToast({ title: '网络异常，请重试', icon: 'none' });
+                });
+            }
+        });
+    }
+
+    /** 分享并发放奖励 */
+    private doShareForReward(scene: 'unlock' | 'revive', callback: () => void) {
+        const cfg: Record<string, { title: string; imgKey: string }> = {
+            unlock: { title: `我已闯到第 ${this.currentLevel} 关！🍎 快来《摘呀摘呀摘》P K我吧～`, imgKey: 'unlock' },
+            revive: { title: `救救我！卡在第 ${this.currentLevel} 关了 😭 谁来《摘呀摘呀摘》帮帮我？`, imgKey: 'revive' },
+        };
+        const { title, imgKey } = cfg[scene] || cfg.unlock;
+        const shareParams: any = { title };
+        const imgUrl = this.shareImageUrls[imgKey];
+        if (imgUrl) shareParams.imageUrl = imgUrl;
+
+        if (typeof wx !== 'undefined' && wx.shareAppMessage) {
+            this.pendingShareCallback = callback;
+            this.shareStartTime = Date.now();
+            wx.shareAppMessage(shareParams);
+        } else {
+            callback();
+        }
     }
 
     private getFruitSprite(color: ScrewColor): SpriteFrame | null {
@@ -2669,8 +2831,8 @@ export class GameManager extends Component {
         this.createLabel(backBtn, '❮', 0, 0, 24, new Color(100, 120, 90, 255), true); // 绿色箭头
         backBtn.on(Node.EventType.TOUCH_END, () => this.goBackToGame(), this);
 
-        // 标题 (Leaderboard)
-        this.createLabel(this.rankPageNode, 'Leaderboard', 0, headerY, 22, new Color(60, 80, 50, 255), true); // 深绿色标题
+        // 标题 (排行榜)
+        this.createLabel(this.rankPageNode, '排行榜', 0, headerY, 22, new Color(60, 80, 50, 255), true); // 深绿色标题
 
         // --- 前三名领奖台区域 (Top 3 Podium) ---
         // 提取前三名
