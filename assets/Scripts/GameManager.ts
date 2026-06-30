@@ -795,10 +795,10 @@ export class GameManager extends Component {
         toolList.forEach((tool, index) => {
             const view = this.toolViews[index];
             view.iconLabel.string = tool.icon;
-            view.iconLabel.color = (tool.count <= 0 && tool.key !== 'add')
+            view.iconLabel.color = (tool.count <= 0 && tool.key !== 'add' && tool.key !== 'clear')
                 ? new Color(200, 200, 200, 255)
                 : new Color(255, 255, 255, 255);
-            const badgeColor = (tool.count <= 0 && tool.key !== 'add') ? new Color(160, 150, 130, 255) : new Color(220, 160, 50, 255);
+            const badgeColor = (tool.count <= 0 && tool.key !== 'add' && tool.key !== 'clear') ? new Color(160, 150, 130, 255) : new Color(220, 160, 50, 255);
             this.drawCircle(view.badge, 13, badgeColor, 3, new Color(255, 245, 220, 255));
             view.badgeLabel.string = String(tool.count > 0 ? tool.count : '+');
         });
@@ -2716,9 +2716,9 @@ export class GameManager extends Component {
                 const cb = this.pendingShareCallback;
                 this.pendingShareCallback = null;
                 
-                // 1. 前端拦截：分享停留时间校验 (小于 3 秒判定为假分享)
+                // 1. 前端拦截：分享停留时间校验 (小于 2 秒判定为假分享)
                 const stayTime = Date.now() - this.shareStartTime;
-                if (stayTime < 3000) {
+                if (stayTime < 2000) {
                     wx.showToast({
                         title: '分享失败，请分享到不同的群聊试试～',
                         icon: 'none',
