@@ -281,7 +281,8 @@ export const consumeShareCount = async (): Promise<{ success: boolean, isLimit: 
         gameType: GameTypeEnum.SCREW
       }
     });
-    return { success: res.code === 200, isLimit: false };
+    const isLimit = res.data ? !!res.data.isLimit : false;
+    return { success: res.code === 200, isLimit: isLimit };
   } catch (e: any) {
     console.error("Consume share count failed:", e);
     const isLimit = e.message && e.message.includes('上限');

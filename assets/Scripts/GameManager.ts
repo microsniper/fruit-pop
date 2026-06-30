@@ -220,6 +220,28 @@ export class GameManager extends Component {
     /** 上次收集水果的时间戳（毫秒），用于连击判定 */
     private lastCollectTime = 0;
 
+    /** 记录上次求助成功的时间戳，用于本地3分钟CD控制 */
+    private lastHelpTime = 0;
+    private readonly HELP_COOLDOWN_MS = 3 * 60 * 1000;
+
+    /** 获取求助按钮状态：是否可用，以及CD倒计时 */
+    public getHelpButtonState(): { disabled: boolean; text: string } {
+        if (this.isShareLimitReached()) {
+            return { disabled: true, text: '今日已达上限' };
+        }
+        
+        const now = Date.now();
+        const timePassed = now - this.lastHelpTime;
+        if (timePassed < this.HELP_COOLDOWN_MS) {
+            const remainingSec = Math.ceil((this.HELP_COOLDOWN_MS - timePassed) / 1000);
+            const m = Math.floor(remainingSec / 60);
+            const s = remainingSec % 60;
+            return { disabled: true, text: `冷却中 ${m}:${s < 10 ? '0' : ''}${s}` };
+        }
+        
+        return { disabled: false, text: '求助群友' };
+    }
+
     private getTodayStr(): string {
         const d = new Date();
         return `${d.getFullYear()}${d.getMonth() + 1}${d.getDate()}`;
@@ -523,6 +545,10 @@ export class GameManager extends Component {
 
         const rankBtnX = -this.screenWidth / 2 + 60;
         const rankBtnNode = this.createNode('RankBtn', this.topAreaNode, rankBtnX, topInnerY + 8, 90, 36);
+        
+        // 暂时隐藏排行榜按钮
+        rankBtnNode.active = false;
+        
         const rankBtnBg = this.createGraphicsNode('RankBtnBg', rankBtnNode, 90, 36, 0, 0);
         this.drawRoundedRect(rankBtnBg.getComponent(Graphics)!, 90, 36, new Color(200, 160, 60, 255), 18);
         const rankLabel = this.createLabel(rankBtnNode, '🏆排行榜', 0, 0, 14, new Color(255, 255, 255, 255), true);
@@ -1227,23 +1253,42 @@ export class GameManager extends Component {
         this.triggerVibration('heavy');
 
         // 彩虹果特殊处理：可放入任意有空间的果篮
+        // 优化：如果有果篮差一个果子就满了（capacity - length === 1），优先放进去；否则找一个有同色果子最多的未满果篮；否则随便找个有空间的
         const isRainbow = screw.color === ScrewColor.RAINBOW;
-        const targetBox = isRainbow
-            ? this.boxes.find((box) => box.color !== 'locked' && box.color !== 'empty' && box.screws.length < box.capacity)
-            : this.boxes.find((box) => box.color === screw.color && box.screws.length < box.capacity);
+        let targetBox: BoxData | undefined;
+        
+        if (isRainbow) {
+            const activeBoxes = this.boxes.filter((box) => box.color !== 'locked' && box.color !== 'empty' && box.screws.length < box.capacity);
+            
+            if (activeBoxes.length > 0) {
+                activeBoxes.sort((a, b) => {
+                    const diffA = a.capacity - a.screws.length;
+                    const diffB = b.capacity - b.screws.length;
+                    if (diffA !== diffB) {
+                        return diffA - diffB; // 距离满差距小的排前面
+                    }
+                    return b.screws.length - a.screws.length; // 差距相同，装得多的排前面
+                });
+                targetBox = activeBoxes[0];
+            }
+        } else {
+            targetBox = this.boxes.find((box) => box.color === screw.color && box.screws.length < box.capacity);
+        }
 
         if (!targetBox) {
             if (this.tempHoles.length >= this.maxTempHoles) {
                 this.gameOver = true;
+                const btnState = this.getHelpButtonState();
                 this.renderModal({
                     title: '暂存盘满了',
-                    sub: '果盘已被塞满，\n分享给好友即可清空果盘继续闯关',
+                    sub: '果盘已被塞满，\n求助群友即可清空果盘继续闯关',
                     button: '重试',
                     onConfirm: () => {
                         this.initGame();
                     },
-                    secondButton: '分享复活',
+                    secondButton: btnState.text,
                     secondOnConfirm: () => {
+                        if (btnState.disabled) return;
                         this.doShareForReward('revive', () => {
                             this.gameOver = false;
                             this.tempHoles = [];
@@ -1663,18 +1708,16 @@ export class GameManager extends Component {
                 });
                 return;
             }
-            // 二选一：看广告 or 分享
+            
+            const btnState = this.getHelpButtonState();
             this.renderModal({
                 title: '解锁果篮',
-                sub: '可选择看广告或分享给好友\n解锁新果篮',
-                button: '看广告解锁',
-                onConfirm: () => {
-                    this.showAdThen(() => {
-                        this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
-                    });
-                },
-                secondButton: '分享解锁',
+                sub: '可求助群友解锁新果篮',
+                button: '取消',
+                onConfirm: () => {},
+                secondButton: btnState.text,
                 secondOnConfirm: () => {
+                    if (btnState.disabled) return;
                     this.doShareForReward('unlock', () => {
                         this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
                     });
@@ -1694,12 +1737,25 @@ export class GameManager extends Component {
             });
             return;
         }
-        this.showAdThen(() => {
-            this.tryConsumeTool(type, () => {
-                this.tempHoles = [];
-                this.renderTopUI();
-                this.checkWin();
-            });
+
+        const btnState = this.getHelpButtonState();
+        this.renderModal({
+            title: '清空果盘',
+            sub: '可求助群友清空暂存的果子',
+            button: '取消',
+            onConfirm: () => {},
+            secondButton: btnState.text,
+            secondOnConfirm: () => {
+                if (btnState.disabled) return;
+                this.doShareForReward('clear', () => {
+                    this.tryConsumeTool(type, () => {
+                        this.tempHoles = [];
+                        this.renderTopUI();
+                        this.checkWin();
+                    });
+                });
+            },
+            height: 240,
         });
     }
 
@@ -2652,6 +2708,7 @@ export class GameManager extends Component {
                 this.shareImageUrls['unlock'] = url;
                 this.shareImageUrls['revive'] = url;
                 this.shareImageUrls['win'] = url;
+                this.shareImageUrls['clear'] = url;
             }
         });
 
@@ -2688,6 +2745,10 @@ export class GameManager extends Component {
                 consumeShareCount().then(res => {
                     wx.hideLoading();
                     if (res.success) {
+                        this.lastHelpTime = Date.now(); // 记录 CD 时间
+                        if (res.isLimit) {
+                            this.setShareLimitReached();
+                        }
                         cb(); // 成功消耗，执行奖励逻辑
                     } else {
                         if (res.isLimit) {
@@ -2696,7 +2757,7 @@ export class GameManager extends Component {
                         // 次数超限或网络异常
                         this.renderModal({
                             title: '提示',
-                            sub: res.isLimit ? '今日分享奖励次数已达上限\n请通过看广告获取奖励吧！' : '分享奖励获取失败，请重试',
+                            sub: res.isLimit ? '今日求助次数已达上限' : '求助失败，请重试',
                             button: '知道了',
                             height: 200,
                             onConfirm: () => {}
@@ -2711,10 +2772,16 @@ export class GameManager extends Component {
     }
 
     /** 分享并发放奖励 */
-    private doShareForReward(scene: 'unlock' | 'revive', callback: () => void) {
+    private doShareForReward(scene: 'unlock' | 'revive' | 'clear', callback: () => void) {
+        const btnState = this.getHelpButtonState();
+        if (btnState.disabled) {
+            return;
+        }
+
         const cfg: Record<string, { title: string; imgKey: string }> = {
             unlock: { title: `我已闯到第 ${this.currentLevel} 关！🍎 快来《摘呀摘呀摘》P K我吧～`, imgKey: 'unlock' },
             revive: { title: `救救我！卡在第 ${this.currentLevel} 关了 😭 谁来《摘呀摘呀摘》帮帮我？`, imgKey: 'revive' },
+            clear: { title: `果盘满了装不下啦 😭 谁来《摘呀摘呀摘》帮我清空？`, imgKey: 'clear' },
         };
         const { title, imgKey } = cfg[scene] || cfg.unlock;
         const shareParams: any = { title };
@@ -2726,7 +2793,17 @@ export class GameManager extends Component {
             this.shareStartTime = Date.now();
             wx.shareAppMessage(shareParams);
         } else {
-            callback();
+            // 浏览器环境模拟
+            setTimeout(async () => {
+                const res = await consumeShareCount();
+                if (res.success) {
+                    this.lastHelpTime = Date.now();
+                    callback();
+                }
+                if (res.isLimit) {
+                    this.setShareLimitReached();
+                }
+            }, 1000);
         }
     }
 
