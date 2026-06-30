@@ -220,7 +220,7 @@ export class GameManager extends Component {
     /** 上次收集水果的时间戳（毫秒），用于连击判定 */
     private lastCollectTime = 0;
 
-    /** 记录上次求助成功的时间戳，用于本地3分钟CD控制 */
+    /** 记录上次求助成功的时间戳，用于本地3分钟CD控制（已废弃CD，仅保留变量防报错） */
     private lastHelpTime = 0;
     private readonly HELP_COOLDOWN_MS = 3 * 60 * 1000;
 
@@ -228,15 +228,6 @@ export class GameManager extends Component {
     public getHelpButtonState(): { disabled: boolean; text: string } {
         if (this.isShareLimitReached()) {
             return { disabled: true, text: '今日已达上限' };
-        }
-        
-        const now = Date.now();
-        const timePassed = now - this.lastHelpTime;
-        if (timePassed < this.HELP_COOLDOWN_MS) {
-            const remainingSec = Math.ceil((this.HELP_COOLDOWN_MS - timePassed) / 1000);
-            const m = Math.floor(remainingSec / 60);
-            const s = remainingSec % 60;
-            return { disabled: true, text: `冷却中 ${m}:${s < 10 ? '0' : ''}${s}` };
         }
         
         return { disabled: false, text: '求助群友' };
@@ -824,7 +815,7 @@ export class GameManager extends Component {
         });
     }
 
-    private renderModal(config: { title: string; sub: string; button: string; onConfirm: () => void; height?: number; secondButton?: string; secondOnConfirm?: () => void; hideClose?: boolean; onCancel?: () => void } | null) {
+    private renderModal(config: { title: string; sub: string; button?: string; onConfirm?: () => void; height?: number; secondButton?: string; secondOnConfirm?: () => void; hideClose?: boolean; onCancel?: () => void } | null) {
         if (!this.modalLayerNode) return;
         this.modalLayerNode.removeAllChildren();
         if (!config) return;
@@ -863,39 +854,43 @@ export class GameManager extends Component {
         subLabel.enableWrapText = true;
 
         const hasSecond = config.secondButton && config.secondOnConfirm;
-        const btnW = hasSecond ? 126 : 160;
+        const btnW = hasSecond && config.button ? 126 : 160;
         const btnH = 48;
         const btnRadius = 24;
 
-        const button = this.createNode('Confirm', panel, hasSecond ? -74 : 0, -panelH / 2 + 45, btnW, btnH);
-        const buttonBg = this.createGraphicsNode('BtnBg', button, btnW, btnH, 0, 0);
-        this.drawRoundedRect(buttonBg.getComponent(Graphics)!, btnW, btnH, new Color(100, 160, 85, 255), btnRadius);
-        this.createLabel(button, config.button, 0, 0, 18, new Color(255, 255, 255, 255), true);
-        button.on(Node.EventType.TOUCH_END, () => {
-            this.renderModal(null);
-            config.onConfirm();
-        }, this);
+        if (config.button) {
+            const button = this.createNode('Confirm', panel, hasSecond ? -74 : 0, -panelH / 2 + 45, btnW, btnH);
+            const buttonBg = this.createGraphicsNode('BtnBg', button, btnW, btnH, 0, 0);
+            this.drawRoundedRect(buttonBg.getComponent(Graphics)!, btnW, btnH, new Color(100, 160, 85, 255), btnRadius);
+            this.createLabel(button, config.button, 0, 0, 18, new Color(255, 255, 255, 255), true);
+            button.on(Node.EventType.TOUCH_END, () => {
+                this.renderModal(null);
+                if (config.onConfirm) config.onConfirm();
+            }, this);
+        }
 
         if (hasSecond) {
-            const isShareBtn = config.secondButton!.includes('分享');
-            const limitReached = isShareBtn && this.isShareLimitReached();
+            const limitReached = this.isShareLimitReached();
 
-            const btn2 = this.createNode('SecondBtn', panel, 74, -panelH / 2 + 45, btnW, btnH);
-            const btn2Bg = this.createGraphicsNode('Btn2Bg', btn2, btnW, btnH, 0, 0);
+            // 如果没有主按钮(button)，则次要按钮(求助按钮)居中显示
+            const btnX = config.button ? 74 : 0;
+            const btn2W = config.button ? btnW : 180;
+            const btn2 = this.createNode('SecondBtn', panel, btnX, -panelH / 2 + 45, btn2W, btnH);
+            const btn2Bg = this.createGraphicsNode('Btn2Bg', btn2, btn2W, btnH, 0, 0);
             
             // 始终画原来的橙色按钮
-            this.drawRoundedRect(btn2Bg.getComponent(Graphics)!, btnW, btnH, new Color(245, 140, 40, 255), btnRadius);
+            this.drawRoundedRect(btn2Bg.getComponent(Graphics)!, btn2W, btnH, new Color(245, 140, 40, 255), btnRadius);
             
             if (limitReached) {
                 // 原文字居中，透明度调得很低作为底纹
                 this.createLabel(btn2, config.secondButton!, 0, 0, 18, new Color(255, 255, 255, 50), true);
                 
                 // 黑色半透明蒙层
-                const overlay = this.createGraphicsNode('Overlay', btn2, btnW, btnH, 0, 0);
-                this.drawRoundedRect(overlay.getComponent(Graphics)!, btnW, btnH, new Color(0, 0, 0, 110), btnRadius);
+                const overlay = this.createGraphicsNode('Overlay', btn2, btn2W, btnH, 0, 0);
+                this.drawRoundedRect(overlay.getComponent(Graphics)!, btn2W, btnH, new Color(0, 0, 0, 110), btnRadius);
                 
                 // "今日已达上限" 盖在正中间
-                const limitLabelNode = this.createNode('LimitLabel', btn2, 0, 0, btnW, btnH);
+                const limitLabelNode = this.createNode('LimitLabel', btn2, 0, 0, btn2W, btnH);
                 const limitLabel = limitLabelNode.addComponent(Label);
                 limitLabel.string = '今日已达上限';
                 limitLabel.fontSize = 16;
@@ -1282,10 +1277,6 @@ export class GameManager extends Component {
                 this.renderModal({
                     title: '暂存盘满了',
                     sub: '果盘已被塞满，\n求助群友即可清空果盘继续闯关',
-                    button: '重试',
-                    onConfirm: () => {
-                        this.initGame();
-                    },
                     secondButton: btnState.text,
                     secondOnConfirm: () => {
                         if (btnState.disabled) return;
@@ -1713,8 +1704,6 @@ export class GameManager extends Component {
             this.renderModal({
                 title: '解锁果篮',
                 sub: '可求助群友解锁新果篮',
-                button: '取消',
-                onConfirm: () => {},
                 secondButton: btnState.text,
                 secondOnConfirm: () => {
                     if (btnState.disabled) return;
@@ -1742,8 +1731,6 @@ export class GameManager extends Component {
         this.renderModal({
             title: '清空果盘',
             sub: '可求助群友清空暂存的果子',
-            button: '取消',
-            onConfirm: () => {},
             secondButton: btnState.text,
             secondOnConfirm: () => {
                 if (btnState.disabled) return;
@@ -2745,7 +2732,6 @@ export class GameManager extends Component {
                 consumeShareCount().then(res => {
                     wx.hideLoading();
                     if (res.success) {
-                        this.lastHelpTime = Date.now(); // 记录 CD 时间
                         if (res.isLimit) {
                             this.setShareLimitReached();
                         }
@@ -2797,7 +2783,6 @@ export class GameManager extends Component {
             setTimeout(async () => {
                 const res = await consumeShareCount();
                 if (res.success) {
-                    this.lastHelpTime = Date.now();
                     callback();
                 }
                 if (res.isLimit) {
