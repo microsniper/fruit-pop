@@ -7,7 +7,24 @@ export enum SourceEnum {
   DOUYIN = 'DOUYIN'
 }
 
-const BASE_URL = 'https://test.game.sniper.net.cn'
+let BASE_URL = 'https://game.sniper.net.cn' // 默认生产环境
+
+// 自动识别小游戏环境切换域名
+try {
+  if (typeof wx !== 'undefined' && wx.getAccountInfoSync) {
+    const envVersion = wx.getAccountInfoSync().miniProgram.envVersion;
+    if (envVersion === 'develop' || envVersion === 'trial') {
+      BASE_URL = 'https://test.game.sniper.net.cn'; // 开发版或体验版使用测试环境
+    }
+  } else if (typeof tt !== 'undefined' && tt.getEnvInfoSync) {
+    const envVersion = tt.getEnvInfoSync().microapp.envType;
+    if (envVersion === 'development' || envVersion === 'preview') {
+      BASE_URL = 'https://test.game.sniper.net.cn'; // 抖音开发版或预览版使用测试环境
+    }
+  }
+} catch (e) {
+  console.warn('获取环境版本失败，默认使用生产环境', e);
+}
 
 interface ApiResponse<T = any> {
   code: number
