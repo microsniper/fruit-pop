@@ -1,5 +1,5 @@
-import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources, ImageAsset } from 'cc';
-import { loginAndGetProgress, saveProgress, fetchRank, RankItem, getCachedProfile, updateProfile, consumeShareCount } from './api';
+import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources, ImageAsset, ScrollView, EditBox } from 'cc';
+import { saveProgress, loginAndGetProgress, fetchRank, RankItem, consumeShareCount, hasUserProfile, updateProfile } from './api';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
 
@@ -10,7 +10,7 @@ declare const tt: any;
 
 void Widget;
 
-export enum ScrewColor {
+export enum FruitColor {
     RED = 'red',
     BLUE = 'blue',
     YELLOW = 'yellow',
@@ -22,7 +22,7 @@ export enum ScrewColor {
     RAINBOW = 'rainbow'
 }
 
-type BoxColor = ScrewColor | 'locked' | 'empty';
+type BoxColor = FruitColor | 'locked' | 'empty';
 type PlateTheme = 'yellow' | 'blue';
 
 interface PlateTemplate {
@@ -32,9 +32,9 @@ interface PlateTemplate {
     holes: { x: number; y: number }[];
 }
 
-interface ScrewData {
+interface FruitData {
     id: string;
-    color: ScrewColor;
+    color: FruitColor;
     x: number;
     y: number;
     removed: boolean;
@@ -49,7 +49,7 @@ interface PlateData {
     x: number;
     y: number;
     layer: number;
-    screws: ScrewData[];
+    fruits: FruitData[];
     holes: { x: number; y: number }[];
     removed: boolean;
     state?: 'stable' | 'falling' | 'supported' | 'removed';
@@ -79,7 +79,7 @@ interface PlateSupportCandidate {
 interface BoxData {
     color: BoxColor;
     capacity: number;
-    screws: ScrewColor[];
+    fruits: FruitColor[];
     isNew: boolean;
     isSlidingOut?: boolean;
     clearScheduled?: boolean;
@@ -88,7 +88,7 @@ interface BoxData {
 interface BoxSlotView {
     node: Node;
     hole: Graphics;
-    screwHost: Node;
+    fruitHost: Node;
 }
 
 interface BoxView {
@@ -107,7 +107,7 @@ interface BoxView {
 interface TempSlotView {
     node: Node;
     hole: Graphics;
-    screwHost: Node;
+    fruitHost: Node;
 }
 
 interface ToolView {
@@ -118,15 +118,15 @@ interface ToolView {
     badgeLabel: Label;
 }
 
-const COLORS: ScrewColor[] = [
-    ScrewColor.RED,
-    ScrewColor.BLUE,
-    ScrewColor.YELLOW,
-    ScrewColor.PINK,
-    ScrewColor.ORANGE,
-    ScrewColor.GREEN,
-    ScrewColor.PURPLE,
-    ScrewColor.CYAN
+const COLORS: FruitColor[] = [
+    FruitColor.RED,
+    FruitColor.BLUE,
+    FruitColor.YELLOW,
+    FruitColor.PINK,
+    FruitColor.ORANGE,
+    FruitColor.GREEN,
+    FruitColor.PURPLE,
+    FruitColor.CYAN
 ];
 
 const PLATE_TEMPLATES: PlateTemplate[] = [
@@ -138,16 +138,16 @@ const PLATE_TEMPLATES: PlateTemplate[] = [
     { type: 'circle', w: 140, h: 140, holes: [{ x: 0.5, y: 0.5 }] }
 ];
 
-const BOX_COLORS: Record<ScrewColor, Color> = {
-    [ScrewColor.RED]: new Color(220, 80, 70),
-    [ScrewColor.BLUE]: new Color(240, 195, 60),    // 玉米黄
-    [ScrewColor.YELLOW]: new Color(240, 190, 50),
-    [ScrewColor.PINK]: new Color(235, 120, 150),
-    [ScrewColor.ORANGE]: new Color(245, 150, 60),
-    [ScrewColor.GREEN]: new Color(100, 190, 120),
-    [ScrewColor.PURPLE]: new Color(155, 85, 195),
-    [ScrewColor.CYAN]: new Color(240, 130, 50),     // 胡萝卜橙
-    [ScrewColor.RAINBOW]: new Color(255, 255, 255)  // 彩虹果（白色底）
+const BOX_COLORS: Record<FruitColor, Color> = {
+    [FruitColor.RED]: new Color(220, 80, 70),
+    [FruitColor.BLUE]: new Color(240, 195, 60),    // 玉米黄
+    [FruitColor.YELLOW]: new Color(240, 190, 50),
+    [FruitColor.PINK]: new Color(235, 120, 150),
+    [FruitColor.ORANGE]: new Color(245, 150, 60),
+    [FruitColor.GREEN]: new Color(100, 190, 120),
+    [FruitColor.PURPLE]: new Color(155, 85, 195),
+    [FruitColor.CYAN]: new Color(240, 130, 50),     // 胡萝卜橙
+    [FruitColor.RAINBOW]: new Color(255, 255, 255)  // 彩虹果（白色底）
 };
 
 const FACE_COLORS: Record<PlateTheme, Color> = {
@@ -155,7 +155,7 @@ const FACE_COLORS: Record<PlateTheme, Color> = {
     blue: new Color(180, 150, 110, 255)
 };
 
-const SCREW_FACE_COLORS: Record<ScrewColor, Color> = {
+const FRUIT_FACE_COLORS: Record<FruitColor, Color> = {
     red: new Color(200, 60, 50, 255),
     blue: new Color(210, 170, 35, 255),   // 玉米暗色
     yellow: new Color(225, 175, 40, 255),
@@ -179,19 +179,20 @@ const SUPPORT_SURFACE_REFINE_ITERATIONS = 8;
 
 let tutorialShown = false;
 let rainbowIntroduced = false;
+let challengeTipShown = false;
 
 @ccclass('GameManager')
 export class GameManager extends Component {
     private rootNode: Node | null = null;
     private currentLevel = 1;
     private maxTempHoles = 5;
-    private totalScrews = 0;
-    private removedScrews = 0;
+    private totalFruits = 0;
+    private removedFruits = 0;
     private gameOver = false;
     private loadingNode: Node | null = null;
 
     private boxes: BoxData[] = [];
-    private tempHoles: ScrewColor[] = [];
+    private tempHoles: FruitColor[] = [];
     private plates: PlateData[] = [];
     private tools = { add: 0, clear: 1 };
 
@@ -340,6 +341,16 @@ export class GameManager extends Component {
             button: '太棒了！',
             onConfirm: () => {},
             height: 280
+        });
+    }
+
+    private showChallengeTip() {
+        this.renderModal({
+            title: '⚡ 挑战关卡',
+            sub: '果篮刷新变懒了！不再优先帮你匹配颜色，\n规划好再摘，别让暂存盘塞满～',
+            button: '知道了',
+            onConfirm: () => {},
+            height: 240
         });
     }
 
@@ -538,14 +549,14 @@ export class GameManager extends Component {
         const rankBtnNode = this.createNode('RankBtn', this.topAreaNode, rankBtnX, topInnerY + 8, 90, 36);
         
         // 暂时隐藏排行榜按钮
-        rankBtnNode.active = false;
+        rankBtnNode.active = true;
         
         const rankBtnBg = this.createGraphicsNode('RankBtnBg', rankBtnNode, 90, 36, 0, 0);
         this.drawRoundedRect(rankBtnBg.getComponent(Graphics)!, 90, 36, new Color(200, 160, 60, 255), 18);
         const rankLabel = this.createLabel(rankBtnNode, '🏆排行榜', 0, 0, 14, new Color(255, 255, 255, 255), true);
 
         rankBtnNode.on(Node.EventType.TOUCH_END, () => {
-            this.showRankPanel();
+            this.handleRankButtonClick();
         }, this);
 
         this.progressLabel = null;
@@ -555,7 +566,7 @@ export class GameManager extends Component {
         this.gameOver = false;
         this.plates = [];
         this.tempHoles = [];
-        this.removedScrews = 0;
+        this.removedFruits = 0;
         this.tools = { add: 0, clear: 1 };
         this.resetCombo();
         this.plateNodes.forEach((node) => {
@@ -586,10 +597,10 @@ export class GameManager extends Component {
             box.clearScheduled = false;
         });
         this.boxes = [
-            { color: ScrewColor.YELLOW, capacity: 3, screws: [], isNew: false, isSlidingOut: false, clearScheduled: false },
-            { color: ScrewColor.BLUE, capacity: 3, screws: [], isNew: false, isSlidingOut: false, clearScheduled: false },
-            { color: 'locked', capacity: 3, screws: [], isNew: false, isSlidingOut: false, clearScheduled: false },
-            { color: 'locked', capacity: 3, screws: [], isNew: false, isSlidingOut: false, clearScheduled: false }
+            { color: FruitColor.YELLOW, capacity: 3, fruits: [], isNew: false, isSlidingOut: false, clearScheduled: false },
+            { color: FruitColor.BLUE, capacity: 3, fruits: [], isNew: false, isSlidingOut: false, clearScheduled: false },
+            { color: 'locked', capacity: 3, fruits: [], isNew: false, isSlidingOut: false, clearScheduled: false },
+            { color: 'locked', capacity: 3, fruits: [], isNew: false, isSlidingOut: false, clearScheduled: false }
         ];
         this.generateLevel();
         
@@ -601,11 +612,17 @@ export class GameManager extends Component {
 
         // 关卡含彩虹果且首次出现时，弹出提示
         if (!rainbowIntroduced) {
-            const hasRainbowInLevel = this.plates.some(p => p.screws?.some(s => !s.removed && s.color === ScrewColor.RAINBOW));
+            const hasRainbowInLevel = this.plates.some(p => p.fruits?.some(s => !s.removed && s.color === FruitColor.RAINBOW));
             if (hasRainbowInLevel) {
                 rainbowIntroduced = true;
                 this.scheduleOnce(() => this.showRainbowTutorial(), 0.5);
             }
+        }
+
+        // 5的倍数关卡，弹出挑战提示
+        if (this.currentLevel % 5 === 0 && !challengeTipShown) {
+            challengeTipShown = true;
+            this.scheduleOnce(() => this.showChallengeTip(), 0.8);
         }
     }
 
@@ -646,8 +663,8 @@ export class GameManager extends Component {
         const startX = -((boxWidth * 4 + gap * 3) / 2) + boxWidth / 2;
 
         this.boxes.forEach((box, index) => {
-            if (index < 2 && !this.isValidPrimaryBoxColor(box.color)) {
-                const fallback = this.getPrimaryBoxFallbackColor(index);
+            if (index < 2 && !this.isValidPrimaryBoxFruitColor(box.color)) {
+                const fallback = this.getPrimaryBoxFruitFallbackColor(index);
                 this.updateBoxColor(box, fallback);
             }
 
@@ -691,7 +708,7 @@ export class GameManager extends Component {
                 }
                 
                 // 设置水果图标和文字
-                if (isActive && this.isValidPrimaryBoxColor(box.color)) {
+                if (isActive && this.isValidPrimaryBoxFruitColor(box.color)) {
                     const spriteFrame = this.getFruitSprite(box.color);
                     if (spriteFrame) {
                         view.fruitIcon.spriteFrame = spriteFrame;
@@ -720,14 +737,14 @@ export class GameManager extends Component {
             }
 
             // 有果子放入后，隐藏背景图标；汉字保留
-            if (isActive && this.isValidPrimaryBoxColor(box.color)) {
-                const hasScrews = box.screws && box.screws.length > 0;
-                view.fruitIcon.node.active = !hasScrews && view.fruitIcon.spriteFrame !== null;
+            if (isActive && this.isValidPrimaryBoxFruitColor(box.color)) {
+                const hasFruits = box.fruits && box.fruits.length > 0;
+                view.fruitIcon.node.active = !hasFruits && view.fruitIcon.spriteFrame !== null;
             }
 
             view.lockLabel.node.active = isLocked;
             const boxCapacity = box.capacity || 3;
-            const screwSize = boxCapacity >= 6 ? 20 : (boxCapacity >= 5 ? 22 : (boxCapacity >= 4 ? 24 : 26));
+            const fruitIconSize = boxCapacity >= 6 ? 20 : (boxCapacity >= 5 ? 22 : (boxCapacity >= 4 ? 24 : 26));
             const boxSlots = this.getBoxSlotPositions(boxCapacity);
 
             view.slots.forEach((slotView, slotIndex) => {
@@ -744,18 +761,18 @@ export class GameManager extends Component {
                 this.drawCircle(slotView.hole, holeRadius, new Color(0, 0, 0, 35), 0);
 
                 if (!active) {
-                    this.updateScrewHost(slotView.screwHost, screwSize);
+                    this.updateFruitHost(slotView.fruitHost, fruitIconSize);
                     return;
                 }
 
                 if (isLocked) {
-                    this.updateScrewHost(slotView.screwHost, screwSize);
+                    this.updateFruitHost(slotView.fruitHost, fruitIconSize);
                     return;
                 }
 
-                const screwColor = box.color === 'empty' ? undefined : box.screws[slotIndex];
-                slotView.hole.node.active = !screwColor;
-                this.updateScrewHost(slotView.screwHost, screwSize, screwColor);
+                const fruitColor = box.color === 'empty' ? undefined : box.fruits[slotIndex];
+                slotView.hole.node.active = !fruitColor;
+                this.updateFruitHost(slotView.fruitHost, fruitIconSize, fruitColor);
             });
 
             if (box.isNew) {
@@ -780,7 +797,7 @@ export class GameManager extends Component {
 
         this.tempSlotViews.forEach((slotView, index) => {
             const color = this.tempHoles[index];
-            this.updateScrewHost(slotView.screwHost, 26, color);
+            this.updateFruitHost(slotView.fruitHost, 26, color);
         });
     }
 
@@ -917,8 +934,8 @@ export class GameManager extends Component {
     }
 
     private getProgressText() {
-        if (this.totalScrews <= 0) return '0%';
-        return `${Math.floor((this.removedScrews / this.totalScrews) * 100)}%`;
+        if (this.totalFruits <= 0) return '0%';
+        return `${Math.floor((this.removedFruits / this.totalFruits) * 100)}%`;
     }
 
     private generateLevel() {
@@ -932,19 +949,19 @@ export class GameManager extends Component {
         this.boxes[2].color = 'locked';
         this.boxes[3].color = 'locked';
         this.boxes.forEach((box) => {
-            box.screws = [];
+            box.fruits = [];
             box.isNew = false;
             box.isSlidingOut = false;
         });
         const numTriplets = Math.min(15, 2 + levelNum);
-        const screwsToPlace: ScrewColor[] = [];
+        const fruitsToPlace: FruitColor[] = [];
 
         for (let i = 0; i < numTriplets; i++) {
             const color = activeColors[Math.floor(Math.random() * activeColors.length)];
-            screwsToPlace.push(color, color, color);
+            fruitsToPlace.push(color, color, color);
         }
 
-        screwsToPlace.sort(() => Math.random() - 0.5);
+        fruitsToPlace.sort(() => Math.random() - 0.5);
 
         // 彩虹果：从第6关开始出现，数量随关卡递增
         const RAINBOW_START_LEVEL = 6;
@@ -953,21 +970,21 @@ export class GameManager extends Component {
             if (levelNum >= 12) rainbowCount = 2;
             if (levelNum >= 20) rainbowCount = 3;
             for (let i = 0; i < rainbowCount; i++) {
-                screwsToPlace.push(ScrewColor.RAINBOW);
+                fruitsToPlace.push(FruitColor.RAINBOW);
             }
         }
 
-        this.totalScrews = screwsToPlace.length;
+        this.totalFruits = fruitsToPlace.length;
 
-        const distinctColors = [...new Set(screwsToPlace)].filter(c => c !== ScrewColor.RAINBOW);
-        this.boxes[0].color = distinctColors[0] || ScrewColor.YELLOW;
+        const distinctColors = [...new Set(fruitsToPlace)].filter(c => c !== FruitColor.RAINBOW);
+        this.boxes[0].color = distinctColors[0] || FruitColor.YELLOW;
         if (distinctColors.length > 1) {
             this.boxes[1].color = distinctColors[1];
         } else {
             const otherColors = activeColors.filter((color) => color !== distinctColors[0]);
             this.boxes[1].color = otherColors.length > 0
                 ? otherColors[Math.floor(Math.random() * otherColors.length)]
-                : (distinctColors[0] || ScrewColor.BLUE);
+                : (distinctColors[0] || FruitColor.BLUE);
         }
 
         let availableTemplates = PLATE_TEMPLATES;
@@ -995,7 +1012,7 @@ export class GameManager extends Component {
         let totalHolesAvailable = 0;
         let plateIndex = 0;
 
-        while (totalHolesAvailable < this.totalScrews) {
+        while (totalHolesAvailable < this.totalFruits) {
             const template = availableTemplates[Math.floor(Math.random() * availableTemplates.length)];
             let x = 0;
             let y = 0;
@@ -1079,7 +1096,7 @@ export class GameManager extends Component {
                 x,
                 y,
                 layer,
-                screws: [],
+                fruits: [],
                 holes: actualHoles,
                 removed: false,
                 state: 'stable',
@@ -1101,12 +1118,12 @@ export class GameManager extends Component {
         });
         allAvailableHoles.sort(() => Math.random() - 0.5);
 
-        screwsToPlace.forEach((color, index) => {
+        fruitsToPlace.forEach((color, index) => {
             const target = allAvailableHoles.pop();
             if (!target) return;
 
             const hole = target.plate.holes[target.holeIndex];
-            target.plate.screws.push({
+            target.plate.fruits.push({
                 id: `s_${index}`,
                 color,
                 x: hole.x,
@@ -1115,12 +1132,12 @@ export class GameManager extends Component {
             });
         });
 
-        this.plates = this.plates.filter((plate) => plate.screws.length > 0);
+        this.plates = this.plates.filter((plate) => plate.fruits.length > 0);
         this.plates.forEach((plate) => this.updatePlateGravity(plate));
     }
 
-    private getAvailableScrewsForNewBox(color: ScrewColor, targetBox: BoxData): number {
-        const totalOutstanding = this.getOutstandingColorCount(color);
+    private getAvailableFruitsForNewBox(color: FruitColor, targetBox: BoxData): number {
+        const totalOutstanding = this.getOutstandingFruitCount(color);
         let reservedByOthers = 0;
 
         this.boxes.forEach((box) => {
@@ -1135,7 +1152,7 @@ export class GameManager extends Component {
     private getNextCapacityForColor(color: BoxColor, targetBox: BoxData, minCapacity: number = 3): number {
         if (color === 'empty' || color === 'locked') return 3;
 
-        const remaining = this.getAvailableScrewsForNewBox(color as ScrewColor, targetBox);
+        const remaining = this.getAvailableFruitsForNewBox(color as FruitColor, targetBox);
         const normalizedMinCapacity = Math.max(3, Math.min(6, minCapacity));
         const validCaps: number[] = [];
         for (const c of [3, 4, 5, 6]) {
@@ -1196,7 +1213,7 @@ export class GameManager extends Component {
     }
 
     private updatePlateGravity(plate: PlateData) {
-        const remaining = plate.screws.filter(s => !s.removed);
+        const remaining = plate.fruits.filter(s => !s.removed);
         if (remaining.length !== 1) {
             plate.rotation = 0;
             plate.gravityOrigin = undefined;
@@ -1227,10 +1244,10 @@ export class GameManager extends Component {
         plate.gravityOrigin = { x: anchorX, y: anchorY };
     }
 
-    private handleScrewClick(plate: PlateData, screw: ScrewData) {
+    private handleFruitClick(plate: PlateData, fruit: FruitData) {
         if (this.gameOver) return;
 
-        if (this.isScrewBlocked(plate, screw)) {
+        if (this.isFruitBlocked(plate, fruit)) {
             this.triggerVibration('light');
             const plateNode = this.plateNodes.get(plate.id);
             if (plateNode) {
@@ -1249,25 +1266,25 @@ export class GameManager extends Component {
 
         // 彩虹果特殊处理：可放入任意有空间的果篮
         // 优化：如果有果篮差一个果子就满了（capacity - length === 1），优先放进去；否则找一个有同色果子最多的未满果篮；否则随便找个有空间的
-        const isRainbow = screw.color === ScrewColor.RAINBOW;
+        const isRainbow = fruit.color === FruitColor.RAINBOW;
         let targetBox: BoxData | undefined;
         
         if (isRainbow) {
-            const activeBoxes = this.boxes.filter((box) => box.color !== 'locked' && box.color !== 'empty' && box.screws.length < box.capacity);
+            const activeBoxes = this.boxes.filter((box) => box.color !== 'locked' && box.color !== 'empty' && box.fruits.length < box.capacity);
             
             if (activeBoxes.length > 0) {
                 activeBoxes.sort((a, b) => {
-                    const diffA = a.capacity - a.screws.length;
-                    const diffB = b.capacity - b.screws.length;
+                    const diffA = a.capacity - a.fruits.length;
+                    const diffB = b.capacity - b.fruits.length;
                     if (diffA !== diffB) {
                         return diffA - diffB; // 距离满差距小的排前面
                     }
-                    return b.screws.length - a.screws.length; // 差距相同，装得多的排前面
+                    return b.fruits.length - a.fruits.length; // 差距相同，装得多的排前面
                 });
                 targetBox = activeBoxes[0];
             }
         } else {
-            targetBox = this.boxes.find((box) => box.color === screw.color && box.screws.length < box.capacity);
+            targetBox = this.boxes.find((box) => box.color === fruit.color && box.fruits.length < box.capacity);
         }
 
         if (!targetBox) {
@@ -1291,9 +1308,9 @@ export class GameManager extends Component {
                 });
                 return;
             }
-            this.tempHoles.push(screw.color);
+            this.tempHoles.push(fruit.color);
         } else {
-            targetBox.screws.push(screw.color);
+            targetBox.fruits.push(fruit.color);
             
             // ===== 连击判定 =====
             const COMBO_WINDOW = 1500; // 1.5秒内连续收集算连击
@@ -1316,8 +1333,8 @@ export class GameManager extends Component {
             // ===== 连击判定结束 =====
         }
 
-        screw.removed = true;
-        this.removedScrews++;
+        fruit.removed = true;
+        this.removedFruits++;
 
         this.renderTopUI();
 
@@ -1325,7 +1342,7 @@ export class GameManager extends Component {
             this.scheduleBoxClear(targetBox, 0.25, true);
         }
 
-        const remaining = plate.screws.filter((item) => !item.removed);
+        const remaining = plate.fruits.filter((item) => !item.removed);
         if (remaining.length === 0) {
             plate.state = 'stable';
             plate.supportPlateId = undefined;
@@ -1375,7 +1392,7 @@ export class GameManager extends Component {
                 return;
             }
 
-            targetBox.screws = [];
+            targetBox.fruits = [];
             targetBox.isSlidingOut = false;
 
             const nextColor = this.pickRefreshColor(targetBox);
@@ -1392,12 +1409,12 @@ export class GameManager extends Component {
         let changed = false;
         for (let i = this.tempHoles.length - 1; i >= 0; i--) {
             const color = this.tempHoles[i];
-            const targetBox = color === ScrewColor.RAINBOW
-                ? this.boxes.find((box) => box.color !== 'locked' && box.color !== 'empty' && box.screws.length < box.capacity)
-                : this.boxes.find((box) => box.color === color && box.screws.length < box.capacity);
+            const targetBox = color === FruitColor.RAINBOW
+                ? this.boxes.find((box) => box.color !== 'locked' && box.color !== 'empty' && box.fruits.length < box.capacity)
+                : this.boxes.find((box) => box.color === color && box.fruits.length < box.capacity);
                 
             if (!targetBox) continue;
-            targetBox.screws.push(color);
+            targetBox.fruits.push(color);
             this.tempHoles.splice(i, 1);
             changed = true;
 
@@ -1418,34 +1435,34 @@ export class GameManager extends Component {
     }
 
     private getRemainingColors() {
-        const colors = new Set<ScrewColor>();
+        const colors = new Set<FruitColor>();
         this.plates.forEach((plate) => {
             if (plate.removed) return;
-            plate.screws.forEach((screw) => {
-                if (!screw.removed && screw.color !== ScrewColor.RAINBOW) {
-                    colors.add(screw.color);
+            plate.fruits.forEach((fruit) => {
+                if (!fruit.removed && fruit.color !== FruitColor.RAINBOW) {
+                    colors.add(fruit.color);
                 }
             });
         });
         this.tempHoles.forEach((color) => {
-            if (color !== ScrewColor.RAINBOW) colors.add(color);
+            if (color !== FruitColor.RAINBOW) colors.add(color);
         });
         return Array.from(colors);
     }
 
-    private isValidPrimaryBoxColor(color: BoxColor): color is ScrewColor {
-        return COLORS.indexOf(color as ScrewColor) !== -1;
+    private isValidPrimaryBoxFruitColor(color: BoxColor): color is FruitColor {
+        return COLORS.indexOf(color as FruitColor) !== -1;
     }
 
-    private getPrimaryBoxFallbackColor(index: number): ScrewColor {
+    private getPrimaryBoxFruitFallbackColor(index: number): FruitColor {
         const remaining = this.getRemainingColors();
         const otherPrimary = index === 0 ? this.boxes[1] : this.boxes[0];
-        const otherColor = otherPrimary && this.isValidPrimaryBoxColor(otherPrimary.color)
+        const otherColor = otherPrimary && this.isValidPrimaryBoxFruitColor(otherPrimary.color)
             ? otherPrimary.color
             : null;
         const candidate = remaining.find((color) => color !== otherColor);
         if (candidate) return candidate;
-        return COLORS[index] || ScrewColor.YELLOW;
+        return COLORS[index] || FruitColor.YELLOW;
     }
 
     private updateBoxColor(box: BoxData, color: BoxColor) {
@@ -1454,26 +1471,26 @@ export class GameManager extends Component {
         box.isSlidingOut = false;
         box.color = color;
         if (color === 'locked' || color === 'empty') {
-            box.screws = [];
+            box.fruits = [];
             return;
         }
-        if (box.screws.some((screw) => screw !== color)) {
-            box.screws = [];
+        if (box.fruits.some((fruit) => fruit !== color)) {
+            box.fruits = [];
         }
     }
 
-    private getOutstandingColorCount(color: ScrewColor) {
+    private getOutstandingFruitCount(color: FruitColor) {
         let count = 0;
         this.boxes.forEach((box) => {
-            count += box.screws.filter((screw) => screw === color).length;
+            count += box.fruits.filter((fruit) => fruit === color).length;
         });
         this.tempHoles.forEach((tempColor) => {
             if (tempColor === color) count++;
         });
         this.plates.forEach((plate) => {
             if (plate.removed) return;
-            plate.screws.forEach((screw) => {
-                if (!screw.removed && screw.color === color) {
+            plate.fruits.forEach((fruit) => {
+                if (!fruit.removed && fruit.color === color) {
                     count++;
                 }
             });
@@ -1482,20 +1499,26 @@ export class GameManager extends Component {
     }
 
     private getPreferredRefreshColors() {
-        const weights = new Map<ScrewColor, number>();
-        const addWeight = (color: ScrewColor, weight: number) => {
-            if (color === ScrewColor.RAINBOW) return;
+        const weights = new Map<FruitColor, number>();
+        const addWeight = (color: FruitColor, weight: number) => {
+            if (color === FruitColor.RAINBOW) return;
             weights.set(color, (weights.get(color) || 0) + weight);
         };
 
-        this.tempHoles.forEach((color) => addWeight(color, 100));
+        // 5的倍数关卡为挑战关卡，系统不再全力帮忙
+        const isChallenge = this.currentLevel % 5 === 0;
+        const tempWeight   = isChallenge ? 50  : 100;
+        const clickWeight  = isChallenge ? 30  : 20;
+        const blockWeight  = isChallenge ? 20  : 1;
+
+        this.tempHoles.forEach((color) => addWeight(color, tempWeight));
         this.plates.forEach((plate) => {
             if (plate.removed) return;
-            plate.screws.forEach((screw) => {
-                if (screw.removed) return;
-                addWeight(screw.color, 1);
-                if (!this.isScrewBlocked(plate, screw)) {
-                    addWeight(screw.color, 20);
+            plate.fruits.forEach((fruit) => {
+                if (fruit.removed) return;
+                addWeight(fruit.color, blockWeight);
+                if (!this.isFruitBlocked(plate, fruit)) {
+                    addWeight(fruit.color, clickWeight);
                 }
             });
         });
@@ -1508,7 +1531,7 @@ export class GameManager extends Component {
     private pickRefreshColor(targetBox: BoxData): BoxColor {
         const currentColors = this.boxes
             .filter((box) => box !== targetBox && box.color !== 'locked' && box.color !== 'empty')
-            .map((box) => box.color as ScrewColor);
+            .map((box) => box.color as FruitColor);
 
         const preferred = this.getPreferredRefreshColors();
         const preferredAvailable = preferred.filter((color) => currentColors.indexOf(color) === -1);
@@ -1528,11 +1551,11 @@ export class GameManager extends Component {
         return 'empty';
     }
 
-    private getUniqueReplacementColor(exclude: BoxData, duplicateColor: ScrewColor): BoxColor {
+    private getUniqueReplacementColor(exclude: BoxData, duplicateColor: FruitColor): BoxColor {
         const remaining = this.getRemainingColors().filter((color) => color !== duplicateColor);
         const activeColors = this.boxes
             .filter((box) => box !== exclude && box.color !== 'locked' && box.color !== 'empty')
-            .map((box) => box.color as ScrewColor);
+            .map((box) => box.color as FruitColor);
 
         const available = remaining.filter((color) => activeColors.indexOf(color) === -1);
         if (available.length > 0) {
@@ -1548,8 +1571,8 @@ export class GameManager extends Component {
     }
 
     private normalizeEndgameBoxes() {
-        const activeBoxes = this.boxes.filter((box): box is BoxData & { color: ScrewColor } => this.isValidPrimaryBoxColor(box.color));
-        const processed = new Set<ScrewColor>();
+        const activeBoxes = this.boxes.filter((box): box is BoxData & { color: FruitColor } => this.isValidPrimaryBoxFruitColor(box.color));
+        const processed = new Set<FruitColor>();
 
         activeBoxes.forEach((box) => {
             const color = box.color;
@@ -1559,27 +1582,27 @@ export class GameManager extends Component {
             const sameColorBoxes = this.boxes.filter((item) => item.color === color);
             if (sameColorBoxes.length <= 1) return;
 
-            const outstandingCount = this.getOutstandingColorCount(color) + this.getOutstandingColorCount(ScrewColor.RAINBOW);
+            const outstandingCount = this.getOutstandingFruitCount(color) + this.getOutstandingFruitCount(FruitColor.RAINBOW);
             if (outstandingCount > box.capacity) return;
 
-            sameColorBoxes.sort((a, b) => b.screws.length - a.screws.length);
+            sameColorBoxes.sort((a, b) => b.fruits.length - a.fruits.length);
             const primary = sameColorBoxes[0];
             let mergedCount = 0;
             let rainbowCount = 0;
             sameColorBoxes.forEach((item) => {
-                mergedCount += item.screws.filter((screw) => screw === color).length;
-                rainbowCount += item.screws.filter((screw) => screw === ScrewColor.RAINBOW).length;
+                mergedCount += item.fruits.filter((fruit) => fruit === color).length;
+                rainbowCount += item.fruits.filter((fruit) => fruit === FruitColor.RAINBOW).length;
             });
             
             // 重新分配果子，优先放普通果子，再放彩虹果
-            const newScrews = [];
-            for (let i = 0; i < Math.min(primary.capacity, mergedCount); i++) newScrews.push(color);
-            for (let i = 0; i < Math.min(primary.capacity - newScrews.length, rainbowCount); i++) newScrews.push(ScrewColor.RAINBOW);
-            primary.screws = newScrews;
+            const newFruits = [];
+            for (let i = 0; i < Math.min(primary.capacity, mergedCount); i++) newFruits.push(color);
+            for (let i = 0; i < Math.min(primary.capacity - newFruits.length, rainbowCount); i++) newFruits.push(FruitColor.RAINBOW);
+            primary.fruits = newFruits;
 
             for (let i = 1; i < sameColorBoxes.length; i++) {
                 const extraBox = sameColorBoxes[i];
-                extraBox.screws = [];
+                extraBox.fruits = [];
                 const newColor = this.getUniqueReplacementColor(extraBox, color);
                 this.updateBoxColor(extraBox, newColor);
                 extraBox.capacity = this.getNextCapacityForColor(newColor, extraBox);
@@ -1592,15 +1615,15 @@ export class GameManager extends Component {
     }
 
     private canClearBox(box: BoxData) {
-        if (!this.isValidPrimaryBoxColor(box.color) || box.screws.length === 0) return false;
-        if (!box.screws.every((screw) => screw === box.color || screw === ScrewColor.RAINBOW)) return false;
+        if (!this.isValidPrimaryBoxFruitColor(box.color) || box.fruits.length === 0) return false;
+        if (!box.fruits.every((fruit) => fruit === box.color || fruit === FruitColor.RAINBOW)) return false;
 
-        if (box.screws.length === box.capacity) return true;
+        if (box.fruits.length === box.capacity) return true;
 
         // 如果包含彩虹果，它也可以作为该颜色的一部分被清除
         // 这里计算真正的该颜色剩余量加上剩余的彩虹果数量，来判断是否能提前清除
-        const outstanding = this.getOutstandingColorCount(box.color) + this.getOutstandingColorCount(ScrewColor.RAINBOW);
-        if (box.screws.length === outstanding) return true;
+        const outstanding = this.getOutstandingFruitCount(box.color) + this.getOutstandingFruitCount(FruitColor.RAINBOW);
+        if (box.fruits.length === outstanding) return true;
 
         return false;
     }
@@ -1619,31 +1642,31 @@ export class GameManager extends Component {
 
     private ensurePrimaryBoxes() {
         const firstTwo = this.boxes.slice(0, 2);
-        const active = firstTwo.filter((box) => this.isValidPrimaryBoxColor(box.color));
+        const active = firstTwo.filter((box) => this.isValidPrimaryBoxFruitColor(box.color));
         const missing = 2 - active.length;
         if (missing <= 0) {
             if (this.boxes[0].color === this.boxes[1].color) {
-                this.updateBoxColor(this.boxes[1], this.getPrimaryBoxFallbackColor(1));
+                this.updateBoxColor(this.boxes[1], this.getPrimaryBoxFruitFallbackColor(1));
                 this.boxes[1].capacity = this.getNextCapacityForColor(this.boxes[1].color, this.boxes[1]);
             }
             return;
         }
 
         const remaining = this.getRemainingColors();
-        const used = new Set(active.map((box) => box.color as ScrewColor));
+        const used = new Set(active.map((box) => box.color as FruitColor));
         const fillColors = remaining.filter((color) => !used.has(color));
 
         for (let i = 0; i < 2; i++) {
             const box = this.boxes[i];
-            if (this.isValidPrimaryBoxColor(box.color)) continue;
-            const color = fillColors.shift() || remaining[0] || COLORS[i] || ScrewColor.YELLOW;
+            if (this.isValidPrimaryBoxFruitColor(box.color)) continue;
+            const color = fillColors.shift() || remaining[0] || COLORS[i] || FruitColor.YELLOW;
             this.updateBoxColor(box, color);
-            box.screws = [];
+            box.fruits = [];
             box.capacity = this.getNextCapacityForColor(box.color, box);
         }
 
         if (this.boxes[0].color === this.boxes[1].color) {
-            this.updateBoxColor(this.boxes[1], this.getPrimaryBoxFallbackColor(1));
+            this.updateBoxColor(this.boxes[1], this.getPrimaryBoxFruitFallbackColor(1));
             this.boxes[1].capacity = this.getNextCapacityForColor(this.boxes[1].color, this.boxes[1]);
         }
     }
@@ -1656,7 +1679,7 @@ export class GameManager extends Component {
         const missingColors = remaining.filter((color) => !activeBoxes.some((box) => box.color === color));
         if (missingColors.length === 0) return;
 
-        const emptyActiveBoxes = activeBoxes.filter((box) => box.screws.length === 0);
+        const emptyActiveBoxes = activeBoxes.filter((box) => box.fruits.length === 0);
         if (emptyActiveBoxes.length > 0) {
             this.updateBoxColor(emptyActiveBoxes[0], missingColors[0]);
             emptyActiveBoxes[0].capacity = this.getNextCapacityForColor(missingColors[0], emptyActiveBoxes[0]);
@@ -1768,7 +1791,7 @@ export class GameManager extends Component {
 
     private startPlateFalling(plate: PlateData, forceDropOut = false) {
         if (plate.removed || plate.state === 'falling') return;
-        if (!forceDropOut && this.hasRemainingScrews(plate)) return;
+        if (!forceDropOut && this.hasRemainingFruits(plate)) return;
 
         this.dropPlateOutOfScene(plate);
     }
@@ -1793,21 +1816,21 @@ export class GameManager extends Component {
         });
     }
 
-    private readonly SCREW_BLOCK_COVERAGE = 0.3;
+    private readonly FRUIT_BLOCK_COVERAGE = 0.3;
 
-    private isScrewBlocked(plate: PlateData, screw: ScrewData) {
-        const screwLocalX = screw.x - plate.w / 2;
-        const screwLocalY = plate.h / 2 - screw.y;
-        const screwWorld = this.plateLocalToWorld(plate, screwLocalX, screwLocalY);
+    private isFruitBlocked(plate: PlateData, fruit: FruitData) {
+        const fruitLocalX = fruit.x - plate.w / 2;
+        const fruitLocalY = plate.h / 2 - fruit.y;
+        const fruitWorld = this.plateLocalToWorld(plate, fruitLocalX, fruitLocalY);
 
-        const screwRadius = 15;
+        const fruitRadius = 15;
         const sampleStep = 5;
         const samplePoints: { x: number; y: number }[] = [];
 
-        for (let sx = -screwRadius; sx <= screwRadius; sx += sampleStep) {
-            for (let sy = -screwRadius; sy <= screwRadius; sy += sampleStep) {
-                if (sx * sx + sy * sy <= screwRadius * screwRadius) {
-                    samplePoints.push({ x: screwWorld.x + sx, y: screwWorld.y + sy });
+        for (let sx = -fruitRadius; sx <= fruitRadius; sx += sampleStep) {
+            for (let sy = -fruitRadius; sy <= fruitRadius; sy += sampleStep) {
+                if (sx * sx + sy * sy <= fruitRadius * fruitRadius) {
+                    samplePoints.push({ x: fruitWorld.x + sx, y: fruitWorld.y + sy });
                 }
             }
         }
@@ -1824,7 +1847,7 @@ export class GameManager extends Component {
                 }
             }
 
-            if (coveredCount / totalSamples >= this.SCREW_BLOCK_COVERAGE) {
+            if (coveredCount / totalSamples >= this.FRUIT_BLOCK_COVERAGE) {
                 return true;
             }
         }
@@ -1842,8 +1865,8 @@ export class GameManager extends Component {
             && local.y >= -plate.h / 2 && local.y <= plate.h / 2;
     }
 
-    private hasRemainingScrews(plate: PlateData) {
-        return plate.screws.some((screw) => !screw.removed);
+    private hasRemainingFruits(plate: PlateData) {
+        return plate.fruits.some((fruit) => !fruit.removed);
     }
 
     private getPlatePivotOffset(plate: PlateData) {
@@ -2012,21 +2035,21 @@ export class GameManager extends Component {
         const face = this.createGraphicsNode('Face', plateNode, plate.w, plate.h, 0, 0);
         this.drawPlateShape(face.getComponent(Graphics)!, plate.type, plate.w, plate.h, FACE_COLORS[plate.color], 22, 5, new Color(225, 210, 180, 200));
 
-        plate.screws.filter((screw) => !screw.removed).forEach((screw) => {
-            const screwSize = 34;
-            const localX = -plate.w / 2 + screw.x;
-            const localY = plate.h / 2 - screw.y;
+        plate.fruits.filter((fruit) => !fruit.removed).forEach((fruit) => {
+            const fruitIconSize = 34;
+            const localX = -plate.w / 2 + fruit.x;
+            const localY = plate.h / 2 - fruit.y;
 
-            const fruitContainer = this.createNode(`FruitContainer_${screw.id}`, plateNode, localX, localY, screwSize, screwSize);
+            const fruitContainer = this.createNode(`FruitContainer_${fruit.id}`, plateNode, localX, localY, fruitIconSize, fruitIconSize);
 
-            const holeShadow = this.createGraphicsNode('Hole', fruitContainer, screwSize, screwSize, 0, 0);
-            this.drawCircle(holeShadow.getComponent(Graphics)!, screwSize / 2, new Color(80, 60, 30, 60), 0);
+            const holeShadow = this.createGraphicsNode('Hole', fruitContainer, fruitIconSize, fruitIconSize, 0, 0);
+            this.drawCircle(holeShadow.getComponent(Graphics)!, fruitIconSize / 2, new Color(80, 60, 30, 60), 0);
 
-            const screwNode = this.createScrewVisual(fruitContainer, 0, 0, screwSize, screw.color, true);
+            const fruitNode = this.createFruitVisual(fruitContainer, 0, 0, fruitIconSize, fruit.color, true);
             if (interactive) {
-                screwNode.on(Node.EventType.TOUCH_END, (e) => {
+                fruitNode.on(Node.EventType.TOUCH_END, (e) => {
                     e.propagationStopped = true;
-                    this.handleScrewClick(plate, screw);
+                    this.handleFruitClick(plate, fruit);
                 }, this);
             }
         });
@@ -2055,7 +2078,7 @@ export class GameManager extends Component {
             .findIndex((plate) => plate.id === plateId);
     }
 
-    private updateScrewHost(host: Node, diameter: number, color?: ScrewColor) {
+    private updateFruitHost(host: Node, diameter: number, color?: FruitColor) {
         const existing = host.children[0];
         const expectedName = color ? `Fruit_${color}` : '';
         if (!color) {
@@ -2070,7 +2093,7 @@ export class GameManager extends Component {
         }
 
         host.removeAllChildren();
-        this.createScrewVisual(host, 0, 0, diameter, color, false);
+        this.createFruitVisual(host, 0, 0, diameter, color, false);
     }
 
     private getBoxSlotPositions(capacity: number) {
@@ -2154,8 +2177,8 @@ export class GameManager extends Component {
             const slots: BoxSlotView[] = allSlotPositions.map((pos, slotIndex) => {
                 const slotNode = this.createNode(`SlotWrap_${slotIndex}`, boxNode, pos.x, pos.y, 24, 24);
                 const holeNode = this.createGraphicsNode(`Slot_${slotIndex}`, slotNode, 24, 24, 0, 0);
-                const screwHost = this.createNode(`ScrewHost_${slotIndex}`, slotNode, 0, 0, 24, 24);
-                return { node: slotNode, hole: holeNode.getComponent(Graphics)!, screwHost };
+                const fruitHost = this.createNode(`FruitHost_${slotIndex}`, slotNode, 0, 0, 24, 24);
+                return { node: slotNode, hole: holeNode.getComponent(Graphics)!, fruitHost };
             });
 
             boxNode.on(Node.EventType.TOUCH_END, () => {
@@ -2195,8 +2218,8 @@ export class GameManager extends Component {
             const holeNode = this.createGraphicsNode(`TempSlot_${index}`, slotNode, slotRadius * 2, slotRadius * 2, 0, 0);
             const hole = holeNode.getComponent(Graphics)!;
             this.drawCircle(hole, slotRadius, new Color(170, 155, 120, 255), 0);
-            const screwHost = this.createNode(`TempScrewHost_${index}`, slotNode, 0, 0, slotRadius * 2, slotRadius * 2);
-            this.tempSlotViews.push({ node: slotNode, hole, screwHost });
+            const fruitHost = this.createNode(`TempFruitHost_${index}`, slotNode, 0, 0, slotRadius * 2, slotRadius * 2);
+            this.tempSlotViews.push({ node: slotNode, hole, fruitHost });
         }
     }
 
@@ -2376,7 +2399,7 @@ export class GameManager extends Component {
         return node;
     }
 
-    private createScrewVisual(parent: Node, x: number, y: number, diameter: number, color: ScrewColor, addShadow: boolean = true): Node {
+    private createFruitVisual(parent: Node, x: number, y: number, diameter: number, color: FruitColor, addShadow: boolean = true): Node {
         const fruitNode = this.createNode(`Fruit_${color}`, parent, x, y, diameter, diameter);
 
         if (addShadow) {
@@ -2403,7 +2426,7 @@ export class GameManager extends Component {
         } else {
             // 回退：绘制彩色圆圈 + 茎
             const bodyColor = BOX_COLORS[color];
-            const darkColor = SCREW_FACE_COLORS[color];
+            const darkColor = FRUIT_FACE_COLORS[color];
             const r = (diameter - 2) / 2;
 
             const body = this.createGraphicsNode('Body', fruitNode, diameter, diameter, 0, 0);
@@ -2472,132 +2495,164 @@ export class GameManager extends Component {
         return BOX_COLORS[color] || new Color(200, 200, 200, 255);
     }
 
-    private async showRankPanel() {
-        const cached = getCachedProfile();
-        if (cached && cached.nickname) {
+    private handleRankButtonClick() {
+        if (hasUserProfile()) {
             this.loadAndShowRank();
-            return;
+        } else {
+            this.showProfilePanel();
         }
-        this.showProfileAuthPage();
     }
 
-    private showProfileAuthPage() {
-        if (!this.rootNode) return;
-        this.rootNode.removeAllChildren();
+    private showProfilePanel() {
+        if (!this.modalLayerNode) return;
+        this.modalLayerNode.removeAllChildren();
 
-        const pageW = this.screenWidth;
-        const pageH = this.screenHeight;
+        const page = this.createNode('ProfilePage', this.modalLayerNode, 0, 0, this.screenWidth, this.screenHeight);
+        
+        // 黑色半透明背景
+        const maskNode = this.createGraphicsNode('Mask', page, this.screenWidth, this.screenHeight, 0, 0);
+        const g = maskNode.getComponent(Graphics)!;
+        g.fillColor = new Color(0, 0, 0, 180);
+        g.fillRect(-this.screenWidth/2, -this.screenHeight/2, this.screenWidth, this.screenHeight);
 
-        const page = this.createNode('AuthPage', this.rootNode, 0, 0, pageW, pageH);
-        const bg = this.createGraphicsNode('AuthBg', page, pageW, pageH, 0, 0);
-        this.drawRoundedRect(bg.getComponent(Graphics)!, pageW, pageH, new Color(220, 235, 210, 255), 0);
+        // 面板背景
+        const panelW = 320;
+        const panelH = 420;
+        const panel = this.createNode('Panel', page, 0, 0, panelW, panelH);
+        const panelBg = this.createGraphicsNode('PanelBg', panel, panelW, panelH, 0, 0);
+        this.drawRoundedRect(panelBg.getComponent(Graphics)!, panelW, panelH, new Color(245, 235, 210, 255), 20);
 
-        const iconY = 60;
-        const icon = this.createGraphicsNode('TrophyIcon', page, 80, 80, 0, iconY);
-        this.drawCircle(icon.getComponent(Graphics)!, 40, new Color(200, 160, 60, 255), 0);
-        this.createLabel(page, '🏆', 0, iconY, 36, new Color(255, 255, 255, 255), true);
+        // 标题
+        this.createLabel(panel, '🍎 建立果园档案 🍎', 0, panelH/2 - 40, 24, new Color(120, 80, 40, 255), true);
+        this.createLabel(panel, '请选择你的专属形象', 0, panelH/2 - 80, 14, new Color(140, 100, 60, 255), false);
 
-        this.createLabel(page, '授权昵称和头像', 0, iconY - 60, 22, new Color(80, 55, 30, 255), true);
-        this.createLabel(page, '让你的排名展示给好友', 0, iconY - 92, 14, new Color(140, 130, 110, 255), true);
+        // 头像网格 (使用 ProfileManager 脚本管理)
+        const profileManager = page.addComponent('ProfileManager') as any;
 
-        const btnY = iconY - 150;
-        const authBtn = this.createNode('AuthBtn', page, 0, btnY, 180, 48);
-        const authBg = this.createGraphicsNode('AuthBg2', authBtn, 180, 48, 0, 0);
-        this.drawRoundedRect(authBg.getComponent(Graphics)!, 180, 48, new Color(100, 155, 85, 255), 24);
-        this.createLabel(authBtn, '授权登录', 0, 0, 18, new Color(255, 255, 255, 255), true);
+        const avatarLayout = this.createNode('AvatarLayout', panel, 0, 40, 240, 160);
+        profileManager.avatarLayout = avatarLayout;
 
-        authBtn.on(Node.EventType.TOUCH_END, () => {
-            this.doPlatformAuth(page);
-        }, this);
+        const startX = -75;
+        const startY = 40;
+        const spacingX = 75;
+        const spacingY = 75;
 
-        const skipY = btnY - 40;
-        this.createLabel(page, '暂不授权，直接查看', 0, skipY, 13, new Color(180, 180, 180, 255), true);
-        const skipBtn = this.createNode('SkipBtn', page, 0, skipY, 180, 40);
-        skipBtn.on(Node.EventType.TOUCH_END, () => {
-            page.destroy();
-            this.loadAndShowRank();
-        }, this);
-    }
-
-    private doPlatformAuth(pageNode: Node) {
-        if (typeof wx !== 'undefined') {
-            console.log('[Auth] starting auth flow...');
-
-            // 先触发隐私授权弹窗（微信 2023.09+ 强制要求）
-            const doCreateButton = () => {
-                const systemInfo = wx.getSystemInfoSync();
-                const button = wx.createUserInfoButton({
-                    type: 'text',
-                    text: '',
-                    style: {
-                        left: 0,
-                        top: 0,
-                        width: systemInfo.windowWidth,
-                        height: systemInfo.windowHeight,
-                        backgroundColor: 'transparent',
-                        color: 'transparent',
-                        textAlign: 'center',
-                        fontSize: 0,
-                    }
-                });
-
-                button.onTap((res: any) => {
-                    console.log('[Auth] createUserInfoButton onTap:', JSON.stringify(res));
-                    button.destroy();
-                    if (res && res.userInfo && res.userInfo.nickName && res.userInfo.nickName !== '微信用户') {
-                        this.saveProfileAndContinue(res.userInfo.nickName, res.userInfo.avatarUrl, pageNode);
-                    } else {
-                        console.log('[Auth] userInfo invalid or anonymous, skipping');
-                        pageNode.destroy();
-                        this.loadAndShowRank();
-                    }
-                });
-            };
-
-            // 检查是否需要隐私授权
-            if (typeof wx.requirePrivacyAuthorize === 'function') {
-                wx.requirePrivacyAuthorize({
-                    success: () => {
-                        console.log('[Auth] privacy authorized, creating button');
-                        doCreateButton();
-                    },
-                    fail: () => {
-                        console.log('[Auth] user denied privacy authorization');
-                        pageNode.destroy();
-                        this.loadAndShowRank();
-                    }
-                });
-            } else {
-                // 旧版本 SDK，直接创建按钮
-                doCreateButton();
+        for (let i = 0; i < 6; i++) {
+            const row = Math.floor(i / 3);
+            const col = i % 3;
+            const x = startX + col * spacingX;
+            const y = startY - row * spacingY;
+            
+            const avatarNode = this.createNode(`Avatar${i+1}`, avatarLayout, x, y, 55, 55);
+            
+            const avatarBg = this.createGraphicsNode('Bg', avatarNode, 55, 55, 0, 0);
+            this.drawRoundedRect(avatarBg.getComponent(Graphics)!, 55, 55, new Color(255, 255, 255, 255), 10);
+            
+            const spriteNode = this.createNode('Img', avatarNode, 0, 0, 45, 45);
+            const sprite = spriteNode.addComponent(Sprite);
+            // 强制设置宽高和尺寸模式，防止原图撑爆
+            const uiTransform = spriteNode.getComponent(UITransform);
+            if (uiTransform) {
+                uiTransform.setContentSize(45, 45);
             }
-        } else if (typeof tt !== 'undefined' && tt.getUserInfo) {
-            console.log('[Auth] calling tt.getUserInfo...');
-            tt.getUserInfo({
-                success: (res: any) => {
-                    console.log('[Auth] tt.getUserInfo success:', JSON.stringify(res));
-                    if (res && res.userInfo) {
-                        this.saveProfileAndContinue(res.userInfo.nickName, res.userInfo.avatarUrl, pageNode);
-                    } else {
-                        pageNode.destroy();
-                        this.loadAndShowRank();
-                    }
-                },
-                fail: () => {
-                    pageNode.destroy();
-                    this.loadAndShowRank();
+            sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+            
+            resources.load(`avatar/Avatars${i+1}/spriteFrame`, SpriteFrame, (err, spriteFrame) => {
+                if (!err && spriteFrame) {
+                    sprite.spriteFrame = spriteFrame;
                 }
             });
-        } else {
-            pageNode.destroy();
-            this.loadAndShowRank();
         }
-    }
 
-    private async saveProfileAndContinue(nickname: string, avatarUrl: string, pageNode: Node) {
-        await updateProfile(nickname, avatarUrl);
-        pageNode.destroy();
-        this.loadAndShowRank();
+        // 提示文本：请输入你的果园代号
+        this.createLabel(panel, '请输入你的果园代号', 0, -85, 14, new Color(140, 100, 60, 255), false);
+        
+        const editBoxNode = this.createNode('NameEditBox', panel, -25, -130, 160, 40);
+        const editBg = this.createGraphicsNode('EditBg', editBoxNode, 160, 40, 0, 0);
+        this.drawRoundedRect(editBg.getComponent(Graphics)!, 160, 40, new Color(255, 255, 255, 255), 8);
+        const editMask = editBoxNode.addComponent(Mask);
+        editMask.type = Mask.Type.GRAPHICS_RECT;
+        
+        const editBox = editBoxNode.addComponent(EditBox);
+        
+        // 禁掉 EditBox 可能残留的默认 Label，避免左侧出现 "label" 之类的占位文本。
+        const autoLabel = editBoxNode.getComponent(Label);
+        if (autoLabel) {
+            autoLabel.string = '';
+            autoLabel.enabled = false;
+        }
+        editBoxNode.children.forEach((child) => {
+            if (child === editBg) return;
+            const childLabel = child.getComponent(Label);
+            if (childLabel) {
+                childLabel.string = '';
+                child.active = false;
+            }
+        });
+        
+        // 手动接管显示层，确保昵称和 placeholder 在输入框里稳定居中显示。
+        const textNode = this.createNode('TEXT_LABEL', editBoxNode, 0, -5, 144, 36);
+        const textLabel = textNode.addComponent(Label);
+        textLabel.color = new Color(80, 55, 30, 255);
+        textLabel.fontSize = 18;
+        textLabel.lineHeight = 36;
+        textLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+        textLabel.verticalAlign = Label.VerticalAlign.CENTER;
+        textLabel.overflow = Label.Overflow.CLAMP;
+        textLabel.string = '';
+        
+        const placeholderNode = this.createNode('PLACEHOLDER_LABEL', editBoxNode, 0, -5, 144, 36);
+        const placeholderLabel = placeholderNode.addComponent(Label);
+        placeholderLabel.color = new Color(180, 180, 180, 255);
+        placeholderLabel.fontSize = 18;
+        placeholderLabel.lineHeight = 36;
+        placeholderLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+        placeholderLabel.verticalAlign = Label.VerticalAlign.CENTER;
+        placeholderLabel.overflow = Label.Overflow.CLAMP;
+        placeholderLabel.string = '';
+
+        editBox.textLabel = textLabel;
+        editBox.placeholderLabel = placeholderLabel;
+        editBox.placeholder = '点击输入代号';
+        editBox.string = ''; // 强制清空 EditBox 的默认 string（Cocos 会默认生成 'label'）
+        
+        profileManager.nameEditBox = editBox;
+        
+        // 随机按钮
+        const diceBtn = this.createNode('DiceBtn', panel, 85, -130, 40, 40);
+        const diceBg = this.createGraphicsNode('DiceBg', diceBtn, 40, 40, 0, 0);
+        this.drawRoundedRect(diceBg.getComponent(Graphics)!, 40, 40, new Color(200, 200, 200, 255), 8);
+        this.createLabel(diceBtn, '🎲', 0, 0, 20, new Color(255, 255, 255, 255), true);
+        diceBtn.on(Node.EventType.TOUCH_END, () => {
+            profileManager.onRandomName();
+        });
+
+        // 提示文本
+        const tipLabelNode = this.createLabel(panel, '', 0, -165, 14, new Color(255, 80, 80, 255), true);
+        tipLabelNode.string = '';
+        profileManager.tipLabel = tipLabelNode;
+
+        // 保存按钮
+        const saveBtn = this.createNode('SaveBtn', panel, 0, -210, 160, 48);
+        const saveBg = this.createGraphicsNode('SaveBg', saveBtn, 160, 48, 0, 0);
+        this.drawRoundedRect(saveBg.getComponent(Graphics)!, 160, 48, new Color(100, 180, 80, 255), 24);
+        this.createLabel(saveBtn, '✅ 开启排行', 0, 0, 18, new Color(255, 255, 255, 255), true);
+        
+        saveBtn.on(Node.EventType.TOUCH_END, () => {
+            profileManager.onSaveClicked();
+        });
+
+        // 关闭按钮
+        const closeBtn = this.createNode('CloseBtn', panel, panelW/2 - 20, panelH/2 - 20, 40, 40);
+        this.createLabel(closeBtn, '✖', 0, 0, 20, new Color(150, 150, 150, 255), true);
+        closeBtn.on(Node.EventType.TOUCH_END, () => {
+            page.destroy();
+        }, this);
+
+        profileManager.show(() => {
+            page.destroy();
+            this.loadAndShowRank();
+        });
     }
 
     private async loadDefaultAvatars(): Promise<void> {
@@ -2620,7 +2675,7 @@ export class GameManager extends Component {
         });
     }
 
-    /** ScrewColor → 水果图片文件名映射 */
+    /** FruitColor → 水果图片文件名映射 */
     private FRUIT_MAP: Record<string, string> = {
         'red': 'Red Apple',
         'blue': 'Сorn',       // 玉米
@@ -2633,7 +2688,7 @@ export class GameManager extends Component {
         'rainbow': 'Rainbow Fruit', // 彩虹果
     };
 
-    /** ScrewColor → 水果中文名映射 */
+    /** FruitColor → 水果中文名映射 */
     private FRUIT_NAME_MAP: Record<string, string> = {
         'red': '苹果',
         'blue': '玉米',
@@ -2792,10 +2847,21 @@ export class GameManager extends Component {
         }
     }
 
-    private getFruitSprite(color: ScrewColor): SpriteFrame | null {
+    private getFruitSprite(color: FruitColor): SpriteFrame | null {
         const fruitName = this.FRUIT_MAP[color];
         if (!fruitName) return null;
         return this.fruitSprites.get(fruitName) || null;
+    }
+
+    /** 根据 avatarUrl 解析默认头像索引，兼容旧数据 "1"~"6" */
+    private getDefaultAvatarFrame(avatarUrl: string): SpriteFrame | null {
+        if (!avatarUrl || this.defaultAvatarFrames.length === 0) return null;
+        // 匹配 default:N 或纯数字格式
+        const match = avatarUrl.match(/^default:(\d+)$|^(\d+)$/);
+        if (!match) return null;
+        const index = parseInt(match[1] || match[2], 10) - 1;
+        if (index < 0 || index >= this.defaultAvatarFrames.length) return null;
+        return this.defaultAvatarFrames[index];
     }
 
     private getRandomDefaultAvatar(): SpriteFrame | null {
@@ -2804,7 +2870,7 @@ export class GameManager extends Component {
         return this.defaultAvatarFrames[idx];
     }
 
-    private createAvatarSpriteNode(parent: Node, x: number, y: number, size: number): Node {
+    private createAvatarSpriteNode(parent: Node, x: number, y: number, size: number, avatarUrl?: string): Node {
         const node = this.createNode('Avatar', parent, x, y, size, size);
         const sprite = node.addComponent(Sprite);
         sprite.sizeMode = Sprite.SizeMode.CUSTOM; // 强制使用自定义尺寸，避免原图过大
@@ -2818,7 +2884,8 @@ export class GameManager extends Component {
         node.parent = maskNode;
         node.setPosition(0, 0, 0);
         
-        const frame = this.getRandomDefaultAvatar();
+        // 优先用 avatarUrl 解析对应的默认头像，解析失败则随机兜底
+        const frame = this.getDefaultAvatarFrame(avatarUrl || '') || this.getRandomDefaultAvatar();
         if (frame) {
             sprite.spriteFrame = frame;
         }
@@ -2897,8 +2964,10 @@ export class GameManager extends Component {
         this.createLabel(this.rankPageNode, '排行榜', 0, headerY, 22, new Color(60, 80, 50, 255), true); // 深绿色标题
 
         // --- 前三名领奖台区域 (Top 3 Podium) ---
-        // 提取前三名
-        const top3 = list.slice(0, 3);
+        // 按实际排名取，避免并列排名时 slice 错位
+        const top1 = list.find(t => t.rank === 1);
+        const top2 = list.find(t => t.rank === 2);
+        const top3 = list.find(t => t.rank === 3);
         const podiumY = headerY - 140; // 领奖台中心高度
         
         // 定义领奖台配置：[2, 1, 3] 的顺序 (左，中，右)
@@ -2915,8 +2984,9 @@ export class GameManager extends Component {
         this.drawRoundedRect(podiumBg.getComponent(Graphics)!, listW, podiumBgH, new Color(230, 240, 220, 255), 24);
 
         // 渲染前三名
+        const podiumMap: Record<number, RankItem | undefined> = { 1: top1, 2: top2, 3: top3 };
         podiumConfigs.forEach(config => {
-            const item = top3.find(t => t.rank === config.rank);
+            const item = podiumMap[config.rank];
             if (!item) return;
 
             const itemX = config.offsetX;
@@ -2924,8 +2994,8 @@ export class GameManager extends Component {
 
             // 头像
             const avatarSize = 64 * config.scale;
-            // 头像图片 (默认随机头像)
-            this.createAvatarSpriteNode(this.rankPageNode, itemX, itemY, avatarSize);
+            // 头像图片 (使用用户选择的头像)
+            this.createAvatarSpriteNode(this.rankPageNode, itemX, itemY, avatarSize, item.avatarUrl);
             // 外圈装饰环
             const avatarBorder = this.createGraphicsNode(`PodiumBorder_${config.rank}`, this.rankPageNode, avatarSize + 8, avatarSize + 8, itemX, itemY);
             this.drawCircle(avatarBorder.getComponent(Graphics)!, avatarSize / 2 + 4, new Color(0, 0, 0, 0), 3, config.color);
@@ -2953,7 +3023,8 @@ export class GameManager extends Component {
         // --- 列表区域 (List Area) ---
         // 列表大底板
         let listStartY = podiumBgY - podiumBgH / 2 - 20;
-        const listBgH = pageH / 2 + listStartY + 20; // 延伸到底部
+        const myRankH = myRank ? 90 : 20; // 为底部的"我的排名"预留高度
+        const listBgH = pageH / 2 + listStartY; // 延伸到底部，刚好到屏幕边缘
         const listBgCenterY = listStartY - listBgH / 2;
         
         const listBg = this.createGraphicsNode('ListBg', this.rankPageNode, pageW, listBgH, 0, listBgCenterY);
@@ -2964,48 +3035,68 @@ export class GameManager extends Component {
         g.fill();
 
         // 渲染列表项 (从第 4 名开始)
-        const listItems = list.slice(3);
-        const visibleCount = Math.min(listItems.length, 20);
+        const listItems = list.filter(t => t.rank > 3); // 排除领奖台已展示的前三名
+        const visibleCount = listItems.length;
         const itemH = 64;
-        let contentY = listStartY - 30;
+
+        // 创建 ScrollView 可视区域
+        const viewW = pageW;
+        const viewH = listBgH - 30 - myRankH; // 上边距 30，下边距 myRankH
+        const viewY = listBgCenterY - 15 + myRankH / 2; // 微调位置
+
+        const scrollViewNode = this.createNode('ScrollView', this.rankPageNode, 0, viewY, viewW, viewH);
+        const scrollView = scrollViewNode.addComponent(ScrollView);
+        scrollView.horizontal = false;
+        scrollView.vertical = true;
+        
+        const viewNode = this.createNode('View', scrollViewNode, 0, 0, viewW, viewH);
+        const mask = viewNode.addComponent(Mask);
+        mask.type = Mask.Type.GRAPHICS_RECT;
+        
+        const contentH = Math.max(visibleCount * itemH, viewH);
+        const contentNode = this.createNode('Content', viewNode, 0, 0, viewW, contentH);
+        const contentUI = contentNode.getComponent(UITransform)!;
+        contentUI.setAnchorPoint(0.5, 1); // 顶部对齐
+        contentNode.setPosition(0, viewH / 2, 0); // 放在 view 的最上面
+        
+        scrollView.content = contentNode;
 
         for (let i = 0; i < visibleCount; i++) {
             const item = listItems[i];
-            const itemY = contentY - i * itemH;
-            if (itemY < -pageH / 2 + 80) break; // 留出底部空间
+            const itemY = -i * itemH - itemH / 2; // 相对 contentNode (anchor 0.5, 1)
 
             const isMe = item.isMe;
             const itemLeftX = -listW / 2 + 20;
 
             // 排名数字 (最左侧，放大、加粗、醒目颜色)
             const rankColor = isMe ? new Color(255, 150, 0, 255) : new Color(120, 140, 110, 255);
-            const rankLabel = this.createLabel(this.rankPageNode, `${item.rank}`, itemLeftX + 10, itemY, 20, rankColor, true);
+            const rankLabel = this.createLabel(contentNode, `${item.rank}`, itemLeftX + 10, itemY, 20, rankColor, true);
             rankLabel.horizontalAlign = 0; // LEFT
             rankLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
             // 头像 (紧跟在排名右侧)
             const avatarSize = 40;
             const avatarX = itemLeftX + 60; // 排名占约 40px 宽度
-            this.createAvatarSpriteNode(this.rankPageNode, avatarX, itemY, avatarSize);
+            this.createAvatarSpriteNode(contentNode, avatarX, itemY, avatarSize, item.avatarUrl);
 
             // 昵称 (紧跟在头像右侧)
             const nick = (item.nickname || '玩家').substring(0, 8);
             const nameColor = isMe ? new Color(200, 140, 30, 255) : new Color(80, 100, 70, 255);
             
-            const nickLabel = this.createLabel(this.rankPageNode, nick, avatarX + 30, itemY, 16, nameColor, isMe);
+            const nickLabel = this.createLabel(contentNode, nick, avatarX + 30, itemY, 16, nameColor, isMe);
             nickLabel.horizontalAlign = 0; // LEFT
             nickLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
             // 关卡数 (靠最右)
             const rightX = listW / 2 - 20;
-            const lvLabel = this.createLabel(this.rankPageNode, `${item.levelNum} 关`, rightX, itemY, 18, nameColor, true);
+            const lvLabel = this.createLabel(contentNode, `${item.levelNum} 关`, rightX, itemY, 18, nameColor, true);
             lvLabel.horizontalAlign = 2; // RIGHT
             lvLabel.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
 
             // 分割线
             if (i < visibleCount - 1) {
                 const lineY = itemY - itemH / 2;
-                const lineNode = this.createGraphicsNode('ItemLine', this.rankPageNode, listW, 1, 0, lineY);
+                const lineNode = this.createGraphicsNode('ItemLine', contentNode, listW, 1, 0, lineY);
                 lineNode.getComponent(Graphics)!.fillColor = new Color(240, 245, 235, 255);
                 lineNode.getComponent(Graphics)!.rect(-listW / 2, -0.5, listW, 1);
                 lineNode.getComponent(Graphics)!.fill();
@@ -3031,7 +3122,7 @@ export class GameManager extends Component {
             // 头像 (紧跟排名)
             const avatarSize = 40;
             const avatarX = itemLeftX + 60;
-            this.createAvatarSpriteNode(this.rankPageNode, avatarX, myCardY, avatarSize);
+            this.createAvatarSpriteNode(this.rankPageNode, avatarX, myCardY, avatarSize, myRank.avatarUrl);
 
             // 昵称
             const nick = (myRank.nickname || '玩家').substring(0, 8);

@@ -1,5 +1,7 @@
+import { md5 } from './utils/md5';
+
 export enum GameTypeEnum {
-  SCREW = 'SCREW'
+  FRUIT_PICKING = 'FRUIT_PICKING'
 }
 
 export enum SourceEnum {
@@ -38,6 +40,8 @@ declare const tt: any;
 const platform = typeof tt !== 'undefined' ? tt : (typeof wx !== 'undefined' ? wx : null);
 const currentSource = typeof tt !== 'undefined' ? SourceEnum.DOUYIN : (typeof wx !== 'undefined' ? SourceEnum.WECHAT : SourceEnum.WECHAT);
 
+const SECRET_KEY = "X9vP2xL5mN8qR1sT4wY7zB0cJ3fH6gD9";
+
 let token: string | null = null;
 let currentLevel = 1;
 
@@ -47,63 +51,109 @@ try {
     }
 } catch (e) {}
 
-const request = <T = any>(options: any): Promise<ApiResponse<T>> => {
-  return new Promise((resolve, reject) => {
-    const headers: Record<string, string> = {
-      'Content-Type': 'application/json',
-      ...(options.header || {})
-    }
-    
-    if (!platform) {
-        if (!token) {
-            token = localStorage.getItem('token') || null;
-        }
-        if (token) {
-            headers['Authorization'] = `Bearer ${token}`
-        }
-        
-        fetch(BASE_URL + options.url, {
-            method: options.method || 'GET',
-            headers: headers,
-            body: options.data ? JSON.stringify(options.data) : undefined
-        })
-        .then(res => res.json())
-        .then(data => {
-            if (data.code === 200) {
-                resolve(data)
-            } else {
-                reject(new Error(data.message || '请求失败'))
-            }
-        })
-        .catch(reject);
-        return;
-    }
-
-    if (!token) {
-      token = platform.getStorageSync('token') || null
-    }
-    
-    if (token) {
-      headers['Authorization'] = `Bearer ${token}`
-    }
-
-    platform.request({
-      ...options,
-      url: BASE_URL + options.url,
-      header: headers,
-      success: (res: any) => {
-        const data = res.data as ApiResponse<T>
-        if (data.code === 200) {
-          resolve(data)
-        } else {
-          reject(new Error(data.message || '请求失败'))
-        }
-      },
-      fail: (err: any) => {
-        reject(err)
+const request = async <T = any>(options: any, isRetry: boolean = false): Promise<ApiResponse<T>> => {
+  const doRequest = (): Promise<ApiResponse<T>> => {
+    return new Promise((resolve, reject) => {
+      const headers: Record<string, string> = {
+        'Content-Type': 'application/json',
+        ...(options.header || {})
       }
-    })
-  })
+      
+      if (!token) {
+        if (platform) {
+          token = platform.getStorageSync('token') || null;
+        } else {
+          token = localStorage.getItem('token') || null;
+        }
+      }
+      if (token) {
+        headers['Authorization'] = `Bearer ${token}`
+      }
+
+      // 生成签名
+      const timestampStr = Date.now().toString();
+      headers['X-Timestamp'] = timestampStr;
+      
+      let bodyStr = "";
+      if (options.data) {
+        bodyStr = JSON.stringify(options.data);
+      }
+      const strToSign = bodyStr + timestampStr + SECRET_KEY;
+      headers['X-Sign'] = md5(strToSign);
+
+      if (!platform) {
+          fetch(BASE_URL + options.url, {
+              method: options.method || 'GET',
+              headers: headers,
+              body: options.data ? JSON.stringify(options.data) : undefined
+          })
+          .then(async res => {
+              if (res.status === 401) {
+                  reject({ status: 401, message: 'Unauthorized' });
+                  return;
+              }
+              return res.json();
+          })
+          .then(data => {
+              if (!data) return; // 401 已经 reject
+              if (data.code === 200) {
+                  resolve(data)
+              } else if (data.code === 401) {
+                  reject({ status: 401, message: data.message || 'Unauthorized' });
+              } else {
+                  reject(new Error(data.message || '请求失败'))
+              }
+          })
+          .catch(reject);
+          return;
+      }
+
+      platform.request({
+        ...options,
+        url: BASE_URL + options.url,
+        header: headers,
+        success: (res: any) => {
+          if (res.statusCode === 401) {
+            reject({ status: 401, message: 'Unauthorized' });
+            return;
+          }
+          const data = res.data as ApiResponse<T>
+          if (data.code === 200) {
+            resolve(data)
+          } else if (data.code === 401) {
+            reject({ status: 401, message: data.message || 'Unauthorized' });
+          } else {
+            reject(new Error(data.message || '请求失败'))
+          }
+        },
+        fail: (err: any) => {
+          reject(err)
+        }
+      })
+    });
+  };
+
+  try {
+    return await doRequest();
+  } catch (err: any) {
+    if (err && err.status === 401 && !isRetry) {
+      console.log('[API] 401 Unauthorized, cleaning token and retrying login...');
+      // 清空过期 Token
+      token = null;
+      if (platform) {
+        platform.removeStorageSync('token');
+      } else {
+        localStorage.removeItem('token');
+      }
+      
+      // 重新静默登录
+      await loginAndGetProgress();
+      
+      // 携带新 Token 重试原请求
+      return await request<T>(options, true);
+    }
+    throw err;
+  }
 }
 
 export const getLocalLevel = (): number => {
@@ -129,22 +179,24 @@ export const loginAndGetProgress = async (): Promise<number> => {
         console.log('[API] wx.login success, code:', code);
     }
 
-    const res = await request<{ token: string; source: SourceEnum; progress: { gameType: GameTypeEnum; levelNum: number } }>({
+    const res = await request<{ token: string; source: SourceEnum; hasProfile: boolean; progress: { gameType: GameTypeEnum; levelNum: number } }>({
       url: '/api/game/login',
       method: 'POST',
       data: {
         code: code,
-        gameType: GameTypeEnum.SCREW,
+        gameType: GameTypeEnum.FRUIT_PICKING,
         source: currentSource
       }
     });
-    console.log('[API] login response, levelNum:', res.data?.progress?.levelNum);
+    console.log('[API] login response, levelNum:', res.data?.progress?.levelNum, 'hasProfile:', res.data?.hasProfile);
     token = res.data.token;
     if (token) {
         if (platform) {
             platform.setStorageSync('token', token);
+            platform.setStorageSync('hasProfile', res.data?.hasProfile);
         } else {
             localStorage.setItem('token', token);
+            localStorage.setItem('hasProfile', String(res.data?.hasProfile));
         }
     }
 
@@ -165,18 +217,19 @@ export const loginAndGetProgress = async (): Promise<number> => {
                 const loginRes = await new Promise<any>((resolve, reject) => {
                     platform.login({ success: resolve, fail: reject });
                 });
-                const res = await request<{ token: string; progress: { levelNum: number } }>({
+                const res = await request<{ token: string; hasProfile: boolean; progress: { levelNum: number } }>({
                     url: '/api/game/login',
                     method: 'POST',
                     data: {
                         code: loginRes.code,
-                        gameType: GameTypeEnum.SCREW,
+                        gameType: GameTypeEnum.FRUIT_PICKING,
                         source: currentSource
                     }
                 });
                 token = res.data.token;
                 if (token) {
                     platform.setStorageSync('token', token);
+                    platform.setStorageSync('hasProfile', res.data?.hasProfile);
                 }
                 const serverLevel = res.data.progress?.levelNum || 1;
                 setLocalLevel(serverLevel);
@@ -211,7 +264,7 @@ export const saveProgress = async (levelNum: number): Promise<void> => {
       url: '/api/game/progress',
       method: 'POST',
       data: {
-        gameType: GameTypeEnum.SCREW,
+        gameType: GameTypeEnum.FRUIT_PICKING,
         levelNum
       }
     })
@@ -240,13 +293,24 @@ export const fetchRank = async (): Promise<RankResponse> => {
       url: '/api/game/rank',
       method: 'POST',
       data: {
-        gameType: GameTypeEnum.SCREW
+        gameType: GameTypeEnum.FRUIT_PICKING
       }
     })
     return res.data
   } catch (e) {
     console.error("Fetch rank failed:", e)
     return { myRank: null, list: [] }
+  }
+}
+
+export const hasUserProfile = (): boolean => {
+  try {
+    if (platform) {
+      return !!platform.getStorageSync('hasProfile');
+    }
+    return localStorage.getItem('hasProfile') === 'true';
+  } catch {
+    return false;
   }
 }
 
@@ -265,7 +329,12 @@ export const getCachedProfile = (): { nickname: string; avatarUrl: string } | nu
   }
 }
 
-export const updateProfile = async (nickname: string, avatarUrl: string): Promise<boolean> => {
+export interface ProfileUpdateResult {
+  success: boolean
+  message?: string
+}
+
+export const updateProfile = async (nickname: string, avatarUrl: string): Promise<ProfileUpdateResult> => {
   try {
     await request({
       url: '/api/game/profile',
@@ -275,13 +344,18 @@ export const updateProfile = async (nickname: string, avatarUrl: string): Promis
     const data = { nickname, avatarUrl }
     if (platform) {
       platform.setStorageSync(PROFILE_KEY, data)
+      platform.setStorageSync('hasProfile', true)
     } else {
       localStorage.setItem(PROFILE_KEY, JSON.stringify(data))
+      localStorage.setItem('hasProfile', 'true')
     }
-    return true
+    return { success: true }
   } catch (e) {
     console.error("Update profile failed:", e)
-    return false
+    const message = e instanceof Error
+      ? e.message
+      : ((e as { message?: string } | null)?.message || '保存失败，请重试')
+    return { success: false, message }
   }
 }
 
@@ -295,7 +369,7 @@ export const consumeShareCount = async (): Promise<{ success: boolean, isLimit: 
       url: '/api/game/share/consume',
       method: 'POST',
       data: {
-        gameType: GameTypeEnum.SCREW
+        gameType: GameTypeEnum.FRUIT_PICKING
       }
     });
     const isLimit = res.data ? !!res.data.isLimit : false;
@@ -306,5 +380,3 @@ export const consumeShareCount = async (): Promise<{ success: boolean, isLimit: 
     return { success: false, isLimit: !!isLimit };
   }
 }
-
-
