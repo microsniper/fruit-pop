@@ -38,6 +38,8 @@ declare const wx: any;
 declare const tt: any;
 
 const platform = typeof tt !== 'undefined' ? tt : (typeof wx !== 'undefined' ? wx : null);
+const originalWxRequest = typeof wx !== 'undefined' && wx.request ? wx.request.bind(wx) : null;
+const originalWxLogin = typeof wx !== 'undefined' && wx.login ? wx.login.bind(wx) : null;
 const currentSource = typeof tt !== 'undefined' ? SourceEnum.DOUYIN : (typeof wx !== 'undefined' ? SourceEnum.WECHAT : SourceEnum.WECHAT);
 
 const SECRET_KEY = "X9vP2xL5mN8qR1sT4wY7zB0cJ3fH6gD9";
@@ -108,7 +110,8 @@ const request = async <T = any>(options: any, isRetry: boolean = false): Promise
           return;
       }
 
-      platform.request({
+      const reqFunc = originalWxRequest || platform.request.bind(platform);
+      reqFunc({
         ...options,
         url: BASE_URL + options.url,
         header: headers,
@@ -169,8 +172,9 @@ export const loginAndGetProgress = async (): Promise<number> => {
     let code = "browser_mock_code";
     
     if (platform) {
+        const loginFunc = originalWxLogin || platform.login.bind(platform);
         const loginRes = await new Promise<any>((resolve, reject) => {
-          platform.login({
+          loginFunc({
             success: resolve,
             fail: reject
           })
@@ -179,7 +183,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
         console.log('[API] wx.login success, code:', code);
     }
 
-    const res = await request<{ token: string; source: SourceEnum; hasProfile: boolean; progress: { gameType: GameTypeEnum; levelNum: number } }>({
+    const res = await request<{ token: string; openid: string; source: SourceEnum; hasProfile: boolean; isNewUser: boolean; progress: { gameType: GameTypeEnum; levelNum: number } }>({
       url: '/api/game/login',
       method: 'POST',
       data: {
@@ -188,15 +192,29 @@ export const loginAndGetProgress = async (): Promise<number> => {
         source: currentSource
       }
     });
-    console.log('[API] login response, levelNum:', res.data?.progress?.levelNum, 'hasProfile:', res.data?.hasProfile);
+    console.log('[API] login response, levelNum:', res.data?.progress?.levelNum, 'hasProfile:', res.data?.hasProfile, 'isNewUser:', res.data?.isNewUser);
     token = res.data.token;
     if (token) {
         if (platform) {
             platform.setStorageSync('token', token);
             platform.setStorageSync('hasProfile', res.data?.hasProfile);
+            if (res.data?.isNewUser) {
+                platform.setStorageSync('isNewUser', true);
+            }
         } else {
             localStorage.setItem('token', token);
             localStorage.setItem('hasProfile', String(res.data?.hasProfile));
+            if (res.data?.isNewUser) {
+                localStorage.setItem('isNewUser', 'true');
+            }
+        }
+    }
+    // 存储 openid 供广告 SDK 使用
+    if (res.data.openid) {
+        if (platform) {
+            platform.setStorageSync('openid', res.data.openid);
+        } else {
+            localStorage.setItem('openid', res.data.openid);
         }
     }
 
@@ -214,8 +232,9 @@ export const loginAndGetProgress = async (): Promise<number> => {
             console.log('[API] fallback with cached token');
             // 用旧 token 重新走一次登录（后端会识别已注册用户并返回进度）
             try {
+                const loginFunc = originalWxLogin || platform.login.bind(platform);
                 const loginRes = await new Promise<any>((resolve, reject) => {
-                    platform.login({ success: resolve, fail: reject });
+                    loginFunc({ success: resolve, fail: reject });
                 });
                 const res = await request<{ token: string; hasProfile: boolean; progress: { levelNum: number } }>({
                     url: '/api/game/login',

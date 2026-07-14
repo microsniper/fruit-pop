@@ -3,6 +3,9 @@ import { saveProgress, loginAndGetProgress, fetchRank, RankItem, consumeShareCou
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
 
+// @ts-ignore
+import { SDK } from '@dn-sdk/minigame/build/index.js';
+
 const { ccclass } = _decorator;
 
 declare const wx: any;
@@ -221,6 +224,9 @@ export class GameManager extends Component {
     /** 上次收集水果的时间戳（毫秒），用于连击判定 */
     private lastCollectTime = 0;
 
+    /** 腾讯广告 SDK 实例 */
+    private tencentAdsSDK: any = null;
+
     /** 记录上次求助成功的时间戳，用于本地3分钟CD控制（已废弃CD，仅保留变量防报错） */
     private lastHelpTime = 0;
     private readonly HELP_COOLDOWN_MS = 3 * 60 * 1000;
@@ -237,6 +243,17 @@ export class GameManager extends Component {
     private getTodayStr(): string {
         const d = new Date();
         return `${d.getFullYear()}${d.getMonth() + 1}${d.getDate()}`;
+    }
+
+    private getTencentAdsOpenId(): string {
+        try {
+            if (typeof wx !== 'undefined') {
+                return wx.getStorageSync('openid') || '';
+            }
+            return localStorage.getItem('openid') || '';
+        } catch {
+            return '';
+        }
     }
 
     private isShareLimitReached(): boolean {
@@ -287,11 +304,52 @@ export class GameManager extends Component {
             });
         }
 
+        // 初始化腾讯广告 SDK
+        if (typeof wx !== 'undefined') {
+            try {
+                // @ts-ignore
+                this.tencentAdsSDK = new SDK({
+                    appid: 'wx1b17732d2eaef53a',
+                    user_action_set_id: 1222652382,
+                    secret_key: '2243d8ef6c26f8dcae8d61a9aa0d9233',
+                });
+                console.log('[TencentAds] SDK init success');
+            } catch (e) {
+                console.error('[TencentAds] SDK init failed:', e);
+            }
+        }
+
         this.initSound();
         this.initAd();
         this.showLoadingOverlay();
         const loadStart = Date.now();
         this.currentLevel = await loginAndGetProgress();
+        
+        // 登录后设置 openid 到广告 SDK，并手动上报注册（联调阶段无条件触发）
+        if (this.tencentAdsSDK) {
+            try {
+                const openid = this.getTencentAdsOpenId();
+                if (openid) {
+                    // @ts-ignore
+                    this.tencentAdsSDK.setOpenId(openid);
+                    console.log('[TencentAds] openid set:', openid);
+
+                    // 联调阶段：无条件触发一次注册上报
+                    // @ts-ignore
+                    if (this.tencentAdsSDK.onRegister) {
+                        // @ts-ignore
+                        this.tencentAdsSDK.onRegister();
+                    } else {
+                        // @ts-ignore
+                        this.tencentAdsSDK.track('REGISTER');
+                    }
+                    console.log('[TencentAds] track REGISTER manual trigger');
+                }
+            } catch (e) {
+                console.error('[TencentAds] setOpenId or track REGISTER failed:', e);
+            }
+        }
+
         await this.loadFruitSprites();  // 确保水果图片加载完成后再初始化游戏
         await this.loadBasketBase();    // 加载灰度果篮底图
         this.preloadShareImages();      // 预加载分享图片
