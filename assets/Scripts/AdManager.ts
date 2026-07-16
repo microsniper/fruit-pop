@@ -1,4 +1,5 @@
 import { _decorator, Component } from 'cc';
+import { SoundManager } from './SoundManager';
 
 const { ccclass } = _decorator;
 
@@ -7,7 +8,7 @@ declare const tt: any;
 
 const platform = typeof wx !== 'undefined' ? wx : (typeof tt !== 'undefined' ? tt : null);
 
-const AD_UNIT_ID = 'adunit-xxxxxxxxxxxxxxxx';
+const AD_UNIT_ID = 'adunit-af01cf5530e8b278';
 
 @ccclass('AdManager')
 export class AdManager extends Component {
@@ -47,6 +48,9 @@ export class AdManager extends Component {
             });
 
             this.rewardedVideoAd.onClose((res: any) => {
+                // 广告关闭后恢复 BGM（微信广告会暂停音频）
+                SoundManager.getInstance()?.playBGM();
+
                 if (!this.pendingResolve || !this.pendingReject) return;
 
                 if (res && res.isEnded) {

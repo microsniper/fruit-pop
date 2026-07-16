@@ -1062,6 +1062,29 @@ export class GameManager extends Component {
             }
         }
 
+        // 10关后加入宽横板（6孔），20关后加入巨方板（7孔）
+        if (levelNum >= 20) {
+            const jumboProbability = Math.min(0.25, (levelNum - 20) * 0.02);
+            if (Math.random() < jumboProbability) {
+                const jumboTemplate = { type: 'rect' as const, w: 200, h: 200, holes: [
+                    { x: 0.12, y: 0.12 }, { x: 0.50, y: 0.10 }, { x: 0.88, y: 0.12 },
+                    { x: 0.25, y: 0.50 }, { x: 0.75, y: 0.50 },
+                    { x: 0.12, y: 0.88 }, { x: 0.88, y: 0.88 }
+                ]};
+                availableTemplates = [...availableTemplates, jumboTemplate];
+            }
+        }
+        if (levelNum >= 10) {
+            const wideProbability = Math.min(0.35, (levelNum - 10) * 0.03);
+            if (Math.random() < wideProbability) {
+                const wideTemplate = { type: 'rect' as const, w: 260, h: 120, holes: [
+                    { x: 0.12, y: 0.25 }, { x: 0.38, y: 0.22 }, { x: 0.62, y: 0.25 },
+                    { x: 0.18, y: 0.75 }, { x: 0.50, y: 0.78 }, { x: 0.82, y: 0.75 }
+                ]};
+                availableTemplates = [...availableTemplates, wideTemplate];
+            }
+        }
+
         const spreadFactor = Math.max(0.62, 1.16 - levelNum * 0.07);
         const rangeX = 168 * spreadFactor;
         const rangeY = 228 * spreadFactor;
@@ -1351,18 +1374,23 @@ export class GameManager extends Component {
                 const btnState = this.getHelpButtonState();
                 this.renderModal({
                     title: '暂存盘满了',
-                    sub: '果盘已被塞满，\n求助群友即可清空果盘继续闯关',
-                    secondButton: btnState.text,
+                    sub: '果盘已被塞满！看个广告清空果盘继续闯关，\n或者重新开始本关～',
+                    button: '重新开始',
+                    onConfirm: () => {
+                        this.gameOver = false;
+                        this.initGame();
+                    },
+                    secondButton: '看广告复活',
                     secondOnConfirm: () => {
-                        if (btnState.disabled) return;
-                        this.doShareForReward('revive', () => {
+                        this.showAdThen(() => {
                             this.gameOver = false;
                             this.tempHoles = [];
                             this.renderTopUI();
                             this.renderModal(null);
                         });
                     },
-                    height: 230,
+                    hideClose: true,
+                    height: 240,
                 });
                 return;
             }
@@ -1565,9 +1593,9 @@ export class GameManager extends Component {
 
         // 5的倍数关卡为挑战关卡，系统不再全力帮忙
         const isChallenge = this.currentLevel % 5 === 0;
-        const tempWeight   = isChallenge ? 50  : 100;
-        const clickWeight  = isChallenge ? 30  : 20;
-        const blockWeight  = isChallenge ? 20  : 1;
+        const tempWeight   = isChallenge ? 10  : 20;
+        const clickWeight  = isChallenge ? 20  : 30;
+        const blockWeight  = isChallenge ? 60  : 60;
 
         this.tempHoles.forEach((color) => addWeight(color, tempWeight));
         this.plates.forEach((plate) => {
@@ -1784,7 +1812,13 @@ export class GameManager extends Component {
             const btnState = this.getHelpButtonState();
             this.renderModal({
                 title: '解锁果篮',
-                sub: '可求助群友解锁新果篮',
+                sub: '看一段广告即可解锁新果篮，\n或者求助群友帮忙～',
+                button: '看广告解锁',
+                onConfirm: () => {
+                    this.showAdThen(() => {
+                        this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
+                    });
+                },
                 secondButton: btnState.text,
                 secondOnConfirm: () => {
                     if (btnState.disabled) return;
@@ -1792,7 +1826,7 @@ export class GameManager extends Component {
                         this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
                     });
                 },
-                height: 240,
+                height: 250,
             });
             return;
         }
@@ -1811,7 +1845,17 @@ export class GameManager extends Component {
         const btnState = this.getHelpButtonState();
         this.renderModal({
             title: '清空果盘',
-            sub: '可求助群友清空暂存的果子',
+            sub: '看一段广告即可清空暂存的果子，\n或者求助群友帮忙～',
+            button: '看广告清空',
+            onConfirm: () => {
+                this.showAdThen(() => {
+                    this.tryConsumeTool(type, () => {
+                        this.tempHoles = [];
+                        this.renderTopUI();
+                        this.checkWin();
+                    });
+                });
+            },
             secondButton: btnState.text,
             secondOnConfirm: () => {
                 if (btnState.disabled) return;
@@ -1823,7 +1867,7 @@ export class GameManager extends Component {
                     });
                 });
             },
-            height: 240,
+            height: 250,
         });
     }
 
