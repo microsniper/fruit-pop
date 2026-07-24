@@ -1,11 +1,10 @@
-import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources, ImageAsset, ScrollView, EditBox } from 'cc';
-import { saveProgress, loginAndGetProgress, fetchRank, RankItem, consumeShareCount, hasUserProfile, updateProfile } from './api';
+import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources, ImageAsset, ScrollView, EditBox, LabelOutline, UIOpacity } from 'cc';
+import { saveProgress, loginAndGetProgress, fetchRank, RankItem, consumeShareCount, hasUserProfile, updateProfile, reportEvent, fetchGameConfig, GameConfig } from './api';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
+import { BundleManager } from './BundleManager';
 
 // @ts-ignore
-import { SDK } from '@dn-sdk/minigame/build/index.js';
-
 const { ccclass } = _decorator;
 
 declare const wx: any;
@@ -86,6 +85,7 @@ interface BoxData {
     isNew: boolean;
     isSlidingOut?: boolean;
     clearScheduled?: boolean;
+    incomingCount?: number;
 }
 
 interface BoxSlotView {
@@ -133,23 +133,26 @@ const COLORS: FruitColor[] = [
 ];
 
 const PLATE_TEMPLATES: PlateTemplate[] = [
-    { type: 'rect', w: 160, h: 160, holes: [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.2, y: 0.8 }, { x: 0.8, y: 0.8 }] },
-    { type: 'rect', w: 140, h: 140, holes: [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.5, y: 0.8 }] },
+    { type: 'rect', w: 160, h: 160, holes: [{ x: 0.2, y: 0.2 }, { x: 0.8, y: 0.2 }, { x: 0.5, y: 0.5 }, { x: 0.2, y: 0.8 }, { x: 0.8, y: 0.8 }] },
+    { type: 'rect', w: 140, h: 140, holes: [{ x: 0.2, y: 0.8 }, { x: 0.5, y: 0.8 }, { x: 0.8, y: 0.8 }, { x: 0.2, y: 0.2 }] },
     { type: 'rect', w: 110, h: 110, holes: [{ x: 0.25, y: 0.25 }, { x: 0.75, y: 0.75 }] },
     { type: 'rect', w: 180, h: 100, holes: [{ x: 0.2, y: 0.5 }, { x: 0.8, y: 0.5 }] },
+    { type: 'rect', w: 250, h: 100, holes: [{ x: 0.15, y: 0.5 }, { x: 0.4, y: 0.5 }, { x: 0.6, y: 0.5 }, { x: 0.85, y: 0.5 }] },
     { type: 'rect', w: 100, h: 180, holes: [{ x: 0.5, y: 0.2 }, { x: 0.5, y: 0.8 }] },
-    { type: 'circle', w: 140, h: 140, holes: [{ x: 0.5, y: 0.5 }] }
+    { type: 'rect', w: 100, h: 250, holes: [{ x: 0.5, y: 0.15 }, { x: 0.5, y: 0.38 }, { x: 0.5, y: 0.62 }, { x: 0.5, y: 0.85 }] },
+    { type: 'circle', w: 140, h: 140, holes: [{ x: 0.5, y: 0.5 }] },
+    { type: 'circle', w: 200, h: 200, holes: [{ x: 0.5, y: 0.2 }, { x: 0.25, y: 0.7 }, { x: 0.75, y: 0.7 }] }
 ];
 
 const BOX_COLORS: Record<FruitColor, Color> = {
-    [FruitColor.RED]: new Color(220, 80, 70),
-    [FruitColor.BLUE]: new Color(240, 195, 60),    // 玉米黄
-    [FruitColor.YELLOW]: new Color(240, 190, 50),
-    [FruitColor.PINK]: new Color(235, 120, 150),
-    [FruitColor.ORANGE]: new Color(245, 150, 60),
-    [FruitColor.GREEN]: new Color(100, 190, 120),
-    [FruitColor.PURPLE]: new Color(155, 85, 195),
-    [FruitColor.CYAN]: new Color(240, 130, 50),     // 胡萝卜橙
+    [FruitColor.RED]: new Color(235, 100, 90),
+    [FruitColor.BLUE]: new Color(250, 210, 80),    // 玉米黄
+    [FruitColor.YELLOW]: new Color(250, 205, 70),
+    [FruitColor.PINK]: new Color(245, 140, 170),
+    [FruitColor.ORANGE]: new Color(255, 170, 80),
+    [FruitColor.GREEN]: new Color(120, 210, 140),
+    [FruitColor.PURPLE]: new Color(175, 105, 215),
+    [FruitColor.CYAN]: new Color(255, 150, 70),     // 胡萝卜橙
     [FruitColor.RAINBOW]: new Color(255, 255, 255)  // 彩虹果（白色底）
 };
 
@@ -189,13 +192,21 @@ export class GameManager extends Component {
     private rootNode: Node | null = null;
     private currentLevel = 1;
     private maxTempHoles = 5;
+    /** 飞行中的水果颜色：让选色统计池在飞行窗口期也能看见未落地水果，避免清篮换色刷出无关颜色导致死局 */
+    private flyingFruitColors: FruitColor[] = [];
     private totalFruits = 0;
     private removedFruits = 0;
+    private sunsCollectedThisLevel = 0;
+    private totalSuns = 0;
+    /** 小太阳不足提示横幅节点：用于幂等控制，显示期间忽略重复触发 */
+    private sunShortageTipNode: Node | null = null;
     private gameOver = false;
+    private gameConfig: GameConfig | null = null;
     private loadingNode: Node | null = null;
 
     private boxes: BoxData[] = [];
     private tempHoles: FruitColor[] = [];
+    private incomingTempCount: number = 0;
     private plates: PlateData[] = [];
     private tools = { add: 0, clear: 1 };
 
@@ -206,6 +217,8 @@ export class GameManager extends Component {
     private bottomAreaNode: Node | null = null;
     private boxesContainerNode: Node | null = null;
     private tempContainerNode: Node | null = null;
+    private sunCountLabel: Label | null = null;
+    private sunIconNode: Node | null = null;
     private toolContainerNode: Node | null = null;
     private modalLayerNode: Node | null = null;
     private rankPageNode: Node | null = null;
@@ -215,6 +228,7 @@ export class GameManager extends Component {
     private fruitsLoaded = false;
     /** 灰度果篮底图，运行时动态染色 */
     private basketSpriteFrame: SpriteFrame | null = null;
+    private plateSpriteFrame: SpriteFrame | null = null;
     /** 分享图片本地路径缓存 */
     private shareImageUrls: Record<string, string> = {};
     /** 待执行的分享奖励回调 */
@@ -224,8 +238,6 @@ export class GameManager extends Component {
     /** 上次收集水果的时间戳（毫秒），用于连击判定 */
     private lastCollectTime = 0;
 
-    /** 腾讯广告 SDK 实例 */
-    private tencentAdsSDK: any = null;
 
     /** 记录上次求助成功的时间戳，用于本地3分钟CD控制（已废弃CD，仅保留变量防报错） */
     private lastHelpTime = 0;
@@ -240,20 +252,12 @@ export class GameManager extends Component {
         return { disabled: false, text: '求助群友' };
     }
 
+    private soundEnabled: boolean = true;
+    private vibrationEnabled: boolean = true;
+    
     private getTodayStr(): string {
         const d = new Date();
         return `${d.getFullYear()}${d.getMonth() + 1}${d.getDate()}`;
-    }
-
-    private getTencentAdsOpenId(): string {
-        try {
-            if (typeof wx !== 'undefined') {
-                return wx.getStorageSync('openid') || '';
-            }
-            return localStorage.getItem('openid') || '';
-        } catch {
-            return '';
-        }
     }
 
     private isShareLimitReached(): boolean {
@@ -285,6 +289,8 @@ export class GameManager extends Component {
     private fallingPlateNodes = new Map<string, Node>();
     private boxViews: BoxView[] = [];
     private tempBgGraphics: Graphics | null = null;
+    
+    // 省略其他不相关的变量
     private tempSlotViews: TempSlotView[] = [];
     private toolViews: ToolView[] = [];
 
@@ -304,52 +310,25 @@ export class GameManager extends Component {
             });
         }
 
-        // 初始化腾讯广告 SDK
-        if (typeof wx !== 'undefined') {
-            try {
-                // @ts-ignore
-                this.tencentAdsSDK = new SDK({
-                    appid: 'wx1b17732d2eaef53a',
-                    user_action_set_id: 1222652382,
-                    secret_key: '2243d8ef6c26f8dcae8d61a9aa0d9233',
-                });
-                console.log('[TencentAds] SDK init success');
-            } catch (e) {
-                console.error('[TencentAds] SDK init failed:', e);
-            }
+        // 恢复小太阳数量
+        const storedSuns = localStorage.getItem('totalSuns');
+        if (storedSuns) {
+            this.totalSuns = parseInt(storedSuns, 10) || 0;
         }
+
+        const storedSound = localStorage.getItem('soundEnabled');
+        this.soundEnabled = storedSound !== 'false';
+        const storedVibration = localStorage.getItem('vibrationEnabled');
+        this.vibrationEnabled = storedVibration !== 'false';
 
         this.initSound();
         this.initAd();
         this.showLoadingOverlay();
         const loadStart = Date.now();
         this.currentLevel = await loginAndGetProgress();
+        this.gameConfig = await fetchGameConfig();
         
-        // 登录后设置 openid 到广告 SDK，并手动上报注册（联调阶段无条件触发）
-        if (this.tencentAdsSDK) {
-            try {
-                const openid = this.getTencentAdsOpenId();
-                if (openid) {
-                    // @ts-ignore
-                    this.tencentAdsSDK.setOpenId(openid);
-                    console.log('[TencentAds] openid set:', openid);
-
-                    // 联调阶段：无条件触发一次注册上报
-                    // @ts-ignore
-                    if (this.tencentAdsSDK.onRegister) {
-                        // @ts-ignore
-                        this.tencentAdsSDK.onRegister();
-                    } else {
-                        // @ts-ignore
-                        this.tencentAdsSDK.track('REGISTER');
-                    }
-                    console.log('[TencentAds] track REGISTER manual trigger');
-                }
-            } catch (e) {
-                console.error('[TencentAds] setOpenId or track REGISTER failed:', e);
-            }
-        }
-
+        BundleManager.getInstance().preload();  // 后台预加载分包
         await this.loadFruitSprites();  // 确保水果图片加载完成后再初始化游戏
         await this.loadBasketBase();    // 加载灰度果篮底图
         this.preloadShareImages();      // 预加载分享图片
@@ -384,32 +363,147 @@ export class GameManager extends Component {
 
         tutorialShown = true;
 
-        this.renderModal({
-            title: '🎉 欢迎来到果园',
-            sub: '🍎 点击果子 → 投入同色果篮\n🧺 凑满果篮 → 自动清空继续\n🍃 树枝清空 → 掉落露出新果子\n\n没合适果篮？先放果盘暂存！',
-            button: '知道了！',
-            onConfirm: () => {}
-        });
+        this.renderCommonTip('🎉 欢迎来到果园', '🍎 点击果子 → 投入同色果篮\n🧺 凑满果篮 → 自动清空继续\n🪵 板子清空 → 掉落露出新果子\n\n没合适果篮？先放果盘暂存！');
     }
 
     private showRainbowTutorial() {
-        this.renderModal({
-            title: '🌈 彩虹果！',
-            sub: '彩虹果是万能果实！\n✨它可以放入任意果篮，无视颜色\n哪里有空位就能去哪里\n\n合理利用彩虹果，轻松过关～',
-            button: '太棒了！',
-            onConfirm: () => {},
-            height: 280
-        });
+        this.renderCommonTip('🌈 彩虹果！', '彩虹果是万能果实！\n✨ 它可以放入任意果篮，无视颜色\n哪里有空位就能去哪里\n\n合理利用彩虹果，轻松过关～');
     }
 
     private showChallengeTip() {
-        this.renderModal({
-            title: '⚡ 挑战关卡',
-            sub: '果篮刷新变懒了！不再优先帮你匹配颜色，\n规划好再摘，别让暂存盘塞满～',
-            button: '知道了',
-            onConfirm: () => {},
-            height: 240
-        });
+        this.renderCommonTip('⚡ 挑战关卡', '果篮刷新变懒了！\n不再优先帮你匹配颜色，\n规划好再摘，别让暂存盘塞满～');
+    }
+
+    /**
+     * 通用提示弹窗：panel_common_tip.png（标题“提示”与“知道了”按钮已画在图里）
+     * 内容文案写在白色面板区域，点“知道了”关闭。新手/彩虹果/挑战关提示共用。
+     */
+    private renderCommonTip(title: string, content: string, onConfirm?: () => void) {
+        if (!this.modalLayerNode) return;
+        this.modalLayerNode.removeAllChildren();
+
+        // 遮罩
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
+
+        // 面板：该图 trimType=auto（trim 后可见区 421x461），宽 310，高按可见区域等比校正，杜绝变形
+        const panelW = 310;
+        const panelNode = this.createNode('CommonTipPanel', this.modalLayerNode, 0, 0, panelW, panelW * 461 / 421);
+        const panelTransform = panelNode.getComponent(UITransform)!;
+        const sprite = panelNode.addComponent(Sprite);
+        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_common_tip/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && sprite && sprite.isValid) {
+                sprite.spriteFrame = sf;
+                // 按 trim 后可见区域（rect）等比校正高度，不能用 originalSize（含已裁剪的透明边）
+                const rect = sf.rect;
+                if (rect && rect.width > 0) {
+                    panelTransform.setContentSize(panelW, panelW * rect.height / rect.width);
+                }
+            }
+        }).catch(() => {});
+
+        // 阻止点击穿透到遮罩
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 标题：25 号深棕粗体，位于白板上方（坐标按 trim 后可见区比例计算）
+        this.createLabel(panelNode, title, 0, 0.183 * panelTransform.height, 25, new Color(96, 64, 32, 255), true);
+
+        // 内容文案：写在白色面板区域（坐标与尺寸均按 trim 后可见区比例跟随面板）
+        const contentNode = this.createNode('TipContent', panelNode, 0, -0.10 * panelTransform.height, panelW * 0.80, panelTransform.height * 0.435);
+        const contentLabel = contentNode.addComponent(Label);
+        contentLabel.string = content;
+        contentLabel.fontSize = 18;
+        contentLabel.lineHeight = 30;
+        contentLabel.color = new Color(96, 64, 32, 255); // 深棕，果园卡通风
+        contentLabel.isBold = true;
+        contentLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+        contentLabel.verticalAlign = Label.VerticalAlign.CENTER;
+        contentLabel.overflow = Label.Overflow.SHRINK;
+
+        // “知道了”按钮热区（trim 后按钮中心约在可见区高 91.5% 处，热区放宽便于点击）
+        const btnOk = this.createNode('BtnOk', panelNode, 0, -0.415 * panelTransform.height, panelW * 0.5, 56);
+        btnOk.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode!.removeAllChildren();
+            if (onConfirm) onConfirm();
+        }, this);
+
+        // 从小到大弹出
+        panelNode.setScale(new Vec3(0.6, 0.6, 1));
+        tween(panelNode).to(0.25, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+    }
+
+    /** 挑战失败弹窗：panel_fail.png，暂存区满时弹出。重新挑战=重开本关；继续游戏=看广告清空暂存区 */
+    private renderFailModal() {
+        if (!this.modalLayerNode) return;
+        this.modalLayerNode.removeAllChildren();
+
+        // 遮罩
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
+
+        // 面板：原图 2000x2000，trim 后可见区约 1048x1888（1:1.8），宽 280，高按可见区等比校正
+        const panelW = 280;
+        const panelNode = this.createNode('FailPanel', this.modalLayerNode, 0, 0, panelW, panelW * 1888 / 1048);
+        const panelTransform = panelNode.getComponent(UITransform)!;
+        const sprite = panelNode.addComponent(Sprite);
+        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+
+        // 阻止点击穿透到遮罩
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 从小到大弹出
+        panelNode.setScale(new Vec3(0.6, 0.6, 1));
+        tween(panelNode).to(0.25, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_fail/spriteFrame', SpriteFrame).then((sf) => {
+            if (!sf || !sprite || !sprite.isValid) return;
+            sprite.spriteFrame = sf;
+            // 按 trim 后可见区域（rect）等比校正高度
+            const rect = sf.rect;
+            if (rect && rect.width > 0) {
+                panelTransform.setContentSize(panelW, panelW * rect.height / rect.width);
+            }
+            const pw = panelTransform.width;
+            const ph = panelTransform.height;
+            // 可见区比例坐标 → 面板本地坐标（比例基于可见区 1048x1888 像素分析）
+            const px = (fx: number) => (fx - 0.5) * pw;
+            const py = (fy: number) => (0.5 - fy) * ph;
+
+            // 顶部太阳数量：太阳图标右侧，白色左对齐（背景为遮罩深色）
+            const sunsLabel = this.createLabel(panelNode, `${this.totalSuns}`, px(0.50), py(0.038), 28, new Color(255, 255, 255, 255), true);
+            const sunsTransform = sunsLabel.node.getComponent(UITransform);
+            if (sunsTransform) sunsTransform.setAnchorPoint(0, 0.5);
+            sunsLabel.horizontalAlign = 0; // LEFT
+
+            // “历史最好成绩”下方空白：第 X 关（X 为当前关数）
+            this.createLabel(panelNode, `第 ${this.currentLevel} 关`, 0, py(0.45), 26, new Color(50, 50, 50, 255), true);
+
+            // 重新挑战（黄按钮热区）：挑战失败，清零小太阳后重开当前关卡
+            const btnRetry = this.createNode('BtnRetry', panelNode, 0, py(0.747), pw * 0.48, ph * 0.095);
+            btnRetry.on(Node.EventType.TOUCH_END, () => {
+                this.gameOver = false;
+                this.totalSuns = 0;
+                localStorage.setItem('totalSuns', '0');
+                this.modalLayerNode!.removeAllChildren();
+                this.initGame();
+            }, this);
+
+            // 继续游戏（蓝按钮热区）：唤起广告，看完后清空暂存区
+            const btnContinue = this.createNode('BtnContinue', panelNode, 0, py(0.901), pw * 0.50, ph * 0.105);
+            btnContinue.on(Node.EventType.TOUCH_END, () => {
+                this.showAdThen(() => {
+                    this.gameOver = false;
+                    this.tempHoles = [];
+                    this.renderTopUI();
+                    this.modalLayerNode!.removeAllChildren();
+                }, 'revive');
+            }, this);
+        }).catch(() => {});
     }
 
     private showLoadingOverlay() {
@@ -489,8 +583,8 @@ export class GameManager extends Component {
         this.screenWidth = 375;
         this.screenHeight = 812;
         
-        this.topHeight = this.screenHeight * 0.31;
-        this.bottomHeight = this.screenHeight * 0.16;
+        this.topHeight = this.screenHeight * 0.28;
+        this.bottomHeight = this.screenHeight * 0.10;
         this.boardHeight = this.screenHeight - this.topHeight - this.bottomHeight;
         this.boardWidth = this.screenWidth * 0.94;
 
@@ -567,8 +661,26 @@ export class GameManager extends Component {
         const bottomY = -this.screenHeight / 2 + this.bottomHeight / 2;
 
         this.topAreaNode = this.createNode('TopArea', this.rootNode, 0, topY, this.screenWidth, this.topHeight);
-        const topBg = this.createGraphicsNode('TopBg', this.topAreaNode, this.screenWidth, this.topHeight, 0, 0);
-        this.drawRoundedRect(topBg.getComponent(Graphics)!, this.screenWidth, this.topHeight, new Color(245, 248, 235, 255), 0);
+        // 背景图独立裁切层：等比缩放填满，溢出部分裁掉，不影响其他子元素
+        const topBgClip = this.createNode('TopBgClip', this.topAreaNode, 0, 0, this.screenWidth, this.topHeight);
+        topBgClip.addComponent(Mask);
+        const topBg = this.createNode('TopBg', topBgClip, 0, 0, this.screenWidth, this.topHeight);
+        const topBgSprite = topBg.addComponent(Sprite);
+        topBgSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        resources.load('ui/bg_top/spriteFrame', SpriteFrame, (err, sf) => {
+            if (!err && sf && topBgSprite && topBgSprite.isValid) {
+                topBgSprite.spriteFrame = sf;
+                // 等比缩放填满区域（cover-fit），居中裁切，避免变形
+                const rect = sf.rect;
+                if (rect && rect.width > 0) {
+                    const scaleX = this.screenWidth / rect.width;
+                    const scaleY = this.topHeight / rect.height;
+                    const scale = Math.max(scaleX, scaleY);
+                    const bgTransform = topBg.getComponent(UITransform)!;
+                    bgTransform.setContentSize(rect.width * scale, rect.height * scale);
+                }
+            }
+        });
 
         this.boardAreaNode = this.createNode('BoardArea', this.rootNode, 0, boardY, this.screenWidth, this.boardHeight);
         const boardMask = this.boardAreaNode.addComponent(Mask);
@@ -588,7 +700,8 @@ export class GameManager extends Component {
 
         this.buildStaticTopUI();
         this.boxesContainerNode = this.createNode('Boxes', this.topAreaNode, 0, 8 - TOP_CONTENT_OFFSET, this.screenWidth - 40, 130);
-        this.tempContainerNode = this.createNode('TempSlots', this.topAreaNode, 0, -this.topHeight * 0.26 - TOP_CONTENT_OFFSET, this.screenWidth - 60, 90);
+        // 暂存区向上移动 10px
+        this.tempContainerNode = this.createNode('TempSlots', this.topAreaNode, 0, -this.topHeight * 0.35 - TOP_CONTENT_OFFSET + 10, this.screenWidth - 60, 90);
         this.toolContainerNode = this.createNode('Tools', this.bottomAreaNode, 0, 0, this.screenWidth - 40, this.bottomHeight - 10);
     }
 
@@ -597,24 +710,25 @@ export class GameManager extends Component {
 
         const topInnerY = this.topHeight / 2 - 42 - TOP_CONTENT_OFFSET;
 
-        this.levelBadgeLabel = this.createLabel(this.topAreaNode, '第 1 关', 0, topInnerY + 8, 22, new Color(80, 55, 30, 255), true);
+        this.levelBadgeLabel = this.createLabel(this.topAreaNode, '第 1 关', 0, topInnerY + 8, 22, new Color(255, 255, 255, 255), true);
 
         const badge = this.createGraphicsNode('LevelBadgeBg', this.topAreaNode, 130, 44, 0, topInnerY + 8);
         badge.setSiblingIndex(0);
         this.drawRoundedRect(badge.getComponent(Graphics)!, 130, 44, new Color(130, 160, 90, 255), 22);
 
-        const rankBtnX = -this.screenWidth / 2 + 60;
-        const rankBtnNode = this.createNode('RankBtn', this.topAreaNode, rankBtnX, topInnerY + 8, 90, 36);
+        const rankBtnX = -this.screenWidth / 2 + 50;
+        const settingsBtnNode = this.createNode('SettingsBtn', this.topAreaNode, rankBtnX, topInnerY + 16, 38, 38);
         
-        // 暂时隐藏排行榜按钮
-        rankBtnNode.active = true;
-        
-        const rankBtnBg = this.createGraphicsNode('RankBtnBg', rankBtnNode, 90, 36, 0, 0);
-        this.drawRoundedRect(rankBtnBg.getComponent(Graphics)!, 90, 36, new Color(200, 160, 60, 255), 18);
-        const rankLabel = this.createLabel(rankBtnNode, '🏆排行榜', 0, 0, 14, new Color(255, 255, 255, 255), true);
+        const settingsSprite = settingsBtnNode.addComponent(Sprite);
+        settingsSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        resources.load('ui/btn_settings/spriteFrame', SpriteFrame, (err, sf) => {
+            if (!err && sf && settingsSprite && settingsSprite.isValid) {
+                settingsSprite.spriteFrame = sf;
+            }
+        });
 
-        rankBtnNode.on(Node.EventType.TOUCH_END, () => {
-            this.handleRankButtonClick();
+        settingsBtnNode.on(Node.EventType.TOUCH_END, () => {
+            this.renderSettingsModal(true);
         }, this);
 
         this.progressLabel = null;
@@ -624,7 +738,9 @@ export class GameManager extends Component {
         this.gameOver = false;
         this.plates = [];
         this.tempHoles = [];
+        this.flyingFruitColors = [];
         this.removedFruits = 0;
+        this.sunsCollectedThisLevel = 0;
         this.tools = { add: 0, clear: 1 };
         this.resetCombo();
         this.plateNodes.forEach((node) => {
@@ -677,8 +793,9 @@ export class GameManager extends Component {
             }
         }
 
-        // 5的倍数关卡，弹出挑战提示
-        if (this.currentLevel % 5 === 0 && !challengeTipShown) {
+        // 挑战关卡，弹出挑战提示
+        const interval = this.gameConfig?.challengeInterval || 5;
+        if (this.currentLevel % interval === 0 && !challengeTipShown) {
             challengeTipShown = true;
             this.scheduleOnce(() => this.showChallengeTip(), 0.8);
         }
@@ -736,7 +853,7 @@ export class GameManager extends Component {
             const isActive = !isLocked && !isEmpty;
 
             const bodyColor = isLocked
-                ? new Color(140, 120, 90, 255)
+                ? new Color(92, 255, 176, 255) // 未解锁果篮改为 #5cffb0
                 : isEmpty
                     ? new Color(180, 170, 150, 255)
                     : this.getBoxColor(box.color);
@@ -748,19 +865,13 @@ export class GameManager extends Component {
                     view.bodySprite.color = bodyColor;
                 }
 
-                // 锁状态的 X 覆盖层
+                // 锁状态覆盖层 (仅显示背景变暗，不画X)
                 if (isLocked) {
                     view.lockOverlay.node.active = true;
                     view.lockOverlay.clear();
-                    view.lockOverlay.strokeColor = new Color(60, 40, 20, 200);
-                    view.lockOverlay.lineWidth = 3;
-                    const hh = boxHeight / 2;
-                    view.lockOverlay.moveTo(-hh * 0.3, -hh * 0.3);
-                    view.lockOverlay.lineTo(hh * 0.3, hh * 0.3);
-                    view.lockOverlay.stroke();
-                    view.lockOverlay.moveTo(-hh * 0.3, hh * 0.3);
-                    view.lockOverlay.lineTo(hh * 0.3, -hh * 0.3);
-                    view.lockOverlay.stroke();
+                    view.lockOverlay.fillColor = new Color(0, 0, 0, 80); // 加一层半透明黑底让它看起来像锁住的
+                    view.lockOverlay.roundRect(-boxWidth/2, -boxHeight/2, boxWidth, boxHeight, 15);
+                    view.lockOverlay.fill();
                 } else {
                     view.lockOverlay.node.active = false;
                 }
@@ -794,10 +905,9 @@ export class GameManager extends Component {
                 view.lastBodyColor = colorKey;
             }
 
-            // 有果子放入后，隐藏背景图标；汉字保留
+            // 始终隐藏背景大图标，汉字保留
             if (isActive && this.isValidPrimaryBoxFruitColor(box.color)) {
-                const hasFruits = box.fruits && box.fruits.length > 0;
-                view.fruitIcon.node.active = !hasFruits && view.fruitIcon.spriteFrame !== null;
+                view.fruitIcon.node.active = false;
             }
 
             view.lockLabel.node.active = isLocked;
@@ -814,9 +924,26 @@ export class GameManager extends Component {
                     slotView.node.setPosition(new Vec3(slotPos.x, slotPos.y, 0));
                 }
                 
-                // 动态绘制孔洞大小
+                // 动态绘制孔洞大小 (现在使用Sprite图片代替Graphics)
                 const holeRadius = boxCapacity >= 6 ? 10 : 12;
-                this.drawCircle(slotView.hole, holeRadius, new Color(0, 0, 0, 35), 0);
+                slotView.hole.clear(); // 清除之前用Graphics画的孔
+                
+                // 给 hole 节点添加 Sprite
+                let holeSprite = slotView.hole.node.getComponent(Sprite);
+                if (!holeSprite) {
+                    holeSprite = slotView.hole.node.addComponent(Sprite);
+                }
+                holeSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+                resources.load('ui/hole/spriteFrame', SpriteFrame, (err, sf) => {
+                    if (!err && sf && holeSprite && holeSprite.isValid) {
+                        holeSprite.spriteFrame = sf;
+                    }
+                });
+                const holeTransform = slotView.hole.node.getComponent(UITransform);
+                if (holeTransform) {
+                    // 圆的直径是半径的2倍，再加上一点边距，所以乘以 2.2
+                    holeTransform.setContentSize(holeRadius * 2.2, holeRadius * 2.2);
+                }
 
                 if (!active) {
                     this.updateFruitHost(slotView.fruitHost, fruitIconSize);
@@ -847,16 +974,20 @@ export class GameManager extends Component {
         if (!this.tempContainerNode) return;
         this.ensureTempSlotViews();
 
-        const containerW = this.screenWidth - 154;
-        const containerH = 36;
-        if (this.tempBgGraphics) {
-            this.drawRoundedRect(this.tempBgGraphics, containerW, containerH, new Color(215, 225, 190, 255), 15, 2, new Color(180, 195, 160, 180));
-        }
-
         this.tempSlotViews.forEach((slotView, index) => {
             const color = this.tempHoles[index];
             this.updateFruitHost(slotView.fruitHost, 26, color);
+            
+            // 确保不画黑圆，只用图片
+            if (slotView.hole) {
+                slotView.hole.clear();
+            }
         });
+
+        // 更新小太阳数量
+        if (this.sunCountLabel && this.sunCountLabel.isValid) {
+            this.sunCountLabel.string = `${this.totalSuns}`;
+        }
     }
 
     private renderTools() {
@@ -869,13 +1000,12 @@ export class GameManager extends Component {
         ];
         toolList.forEach((tool, index) => {
             const view = this.toolViews[index];
-            view.iconLabel.string = tool.icon;
-            view.iconLabel.color = (tool.count <= 0 && tool.key !== 'add' && tool.key !== 'clear')
-                ? new Color(200, 200, 200, 255)
-                : new Color(255, 255, 255, 255);
-            const badgeColor = (tool.count <= 0 && tool.key !== 'add' && tool.key !== 'clear') ? new Color(160, 150, 130, 255) : new Color(220, 160, 50, 255);
-            this.drawCircle(view.badge, 13, badgeColor, 3, new Color(255, 245, 220, 255));
-            view.badgeLabel.string = String(tool.count > 0 ? tool.count : '+');
+            view.iconLabel.string = '';
+            view.iconLabel.node.active = false;
+            // 屏蔽徽章更新，因为已经隐藏
+            // const badgeColor = (tool.count <= 0 && tool.key !== 'add' && tool.key !== 'clear') ? new Color(160, 150, 130, 255) : new Color(220, 160, 50, 255);
+            // this.drawCircle(view.badge, 13, badgeColor, 3, new Color(255, 245, 220, 255));
+            // view.badgeLabel.string = String(tool.count > 0 ? tool.count : '+');
         });
     }
 
@@ -888,6 +1018,573 @@ export class GameManager extends Component {
         visiblePlates.forEach((plate) => {
             this.createPlateNode(this.boardContentNode!, plate, true);
         });
+    }
+
+    private renderAddBasketModal() {
+        if (!this.modalLayerNode) return;
+        this.modalLayerNode.removeAllChildren();
+
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
+
+        // 使用 panel_add_basket.png
+        // 图片实际内容大约是 1190x1768，按照宽度 320 缩放，高度约为 475
+        const panelW = 320;
+        const panelH = 475;
+        const panelNode = this.createNode('AddBasketPanel', this.modalLayerNode, 0, 0, panelW, panelH);
+        
+        const panelSprite = panelNode.addComponent(Sprite);
+        panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_add_basket/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && panelSprite && panelSprite.isValid) {
+                panelSprite.spriteFrame = sf;
+            }
+        }).catch(() => {});
+
+        // 阻止点击穿透到遮罩
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 1. 关闭按钮（右上角 X）
+        const closeBtn = this.createNode('CloseBtn', panelNode, panelW / 2 - 30, panelH / 2 - 30, 60, 60);
+        closeBtn.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode!.removeAllChildren();
+        }, this);
+
+        // 顶部太阳图标已在底图中绘制，这里只补数量
+        const topSunsLabel = this.createLabel(panelNode, `${this.totalSuns}`, 5, 220, 28, new Color(255, 255, 255, 255), true);
+        // 修改锚点和对齐方式为左对齐，防止数字变大（如1000000）时向左延伸遮挡太阳图标
+        const topSunsTransform = topSunsLabel.node.getComponent(UITransform);
+        if (topSunsTransform) topSunsTransform.setAnchorPoint(0, 0.5);
+        topSunsLabel.horizontalAlign = 0; // LEFT
+
+        // 2. 第一个按钮：消耗小太阳加果篮
+        // 整体往上挪，y 从 -100 改为 -85
+        // 价格从游戏配置读取，默认 20
+        const addCost = this.gameConfig?.toolCosts?.addBasket ?? 20;
+        const btnSuns = this.createNode('BtnSuns', panelNode, 0, -85, 136, 46);
+        btnSuns.on(Node.EventType.TOUCH_END, () => {
+            const lockedBox = this.boxes.find((box) => box.color === 'locked');
+            if (!lockedBox) {
+                if (typeof wx !== 'undefined' && wx.showToast) {
+                    wx.showToast({ title: '无果篮可解锁', icon: 'none' });
+                }
+                return;
+            }
+            if (this.totalSuns < addCost) {
+                this.showSunShortageTip();
+                return;
+            }
+            this.totalSuns -= addCost;
+            localStorage.setItem('totalSuns', this.totalSuns.toString());
+            if (this.sunCountLabel && this.sunCountLabel.isValid) {
+                this.sunCountLabel.string = `${this.totalSuns}`;
+            }
+            this.handleUnlockBox(lockedBox);
+            this.renderBasketUnlockModal();
+        }, this);
+        // 价格数字
+        const costLabel = this.createLabel(panelNode, `${addCost}`, 67, -73, 18, new Color(0, 0, 0, 255), true);
+        const costTransform = costLabel.node.getComponent(UITransform);
+        if (costTransform) costTransform.setAnchorPoint(0, 0.5);
+        costLabel.horizontalAlign = 0; // LEFT
+
+        // 3. 第二个按钮：看广告解锁
+        // 整体往上挪，y 从 -164 改为 -149
+        const btnAd = this.createNode('BtnAd', panelNode, 0, -149, 136, 46);
+        btnAd.on(Node.EventType.TOUCH_END, () => {
+            const lockedBox = this.boxes.find((box) => box.color === 'locked');
+            if (!lockedBox) {
+                if (typeof wx !== 'undefined' && wx.showToast) {
+                    wx.showToast({ title: '无果篮可解锁', icon: 'none' });
+                }
+                return;
+            }
+            this.showAdThen(() => {
+                this.handleUnlockBox(lockedBox);
+                this.renderBasketUnlockModal();
+            }, 'unlock_basket');
+        }, this);
+
+        // 4. 第三个按钮：继续游戏
+        // 整体往上挪，y 从 -228 改为 -213
+        const btnContinue = this.createNode('BtnContinue', panelNode, 0, -213, 136, 46);
+        btnContinue.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode!.removeAllChildren();
+        }, this);
+    }
+
+    /** 小太阳不足提示横条：从屏幕底部升至中间，停顿 2 秒后向上飞出屏幕（不关闭当前弹窗） */
+    private showSunShortageTip() {
+        if (!this.modalLayerNode) return;
+        // 幂等：横幅还在显示中（未飞出销毁）时忽略重复触发，防止连点叠加多个横幅
+        if (this.sunShortageTipNode && this.sunShortageTipNode.isValid) return;
+
+        // 图片宽占满屏幕，高按原图 1000x200（5:1）等比缩放
+        const tipW = this.screenWidth;
+        const tipH = tipW * 0.2;
+        const startY = -this.screenHeight / 2 - tipH;
+        const endY = this.screenHeight / 2 + tipH;
+        const tipNode = this.createNode('SunShortageTip', this.modalLayerNode, 0, startY, tipW, tipH);
+        tipNode.setSiblingIndex(9999);
+        this.sunShortageTipNode = tipNode;
+
+        const sprite = tipNode.addComponent(Sprite);
+        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_sun_shortage/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && sprite && sprite.isValid) {
+                sprite.spriteFrame = sf;
+            }
+        }).catch(() => {});
+
+        // 文案：小太阳数量不足（白色字体，配深色底图）
+        this.createLabel(tipNode, '小太阳数量不足', 0, 0, 24, new Color(255, 255, 255, 255), true);
+
+        // 底部升起（带回弹）→ 停顿 2 秒 → 加速向上飞出屏幕 → 销毁
+        tween(tipNode)
+            .to(0.35, { position: new Vec3(0, 0, 0) }, { easing: 'backOut' })
+            .delay(2.0)
+            .to(0.35, { position: new Vec3(0, endY, 0) }, { easing: 'sineIn' })
+            .call(() => {
+                if (tipNode.isValid) tipNode.destroy();
+                if (this.sunShortageTipNode === tipNode) this.sunShortageTipNode = null;
+            })
+            .start();
+    }
+
+    /** 清空果盘确认弹窗：使用 panel_clear_basket.png（与加果篮面板同尺寸、同布局） */
+    private renderClearBasketModal() {
+        if (!this.modalLayerNode) return;
+        this.modalLayerNode.removeAllChildren();
+
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
+
+        // 与加果篮面板一致：宽 320，高 475
+        const panelW = 320;
+        const panelH = 475;
+        const panelNode = this.createNode('ClearBasketPanel', this.modalLayerNode, 0, 0, panelW, panelH);
+
+        const panelSprite = panelNode.addComponent(Sprite);
+        panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_clear_basket/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && panelSprite && panelSprite.isValid) {
+                panelSprite.spriteFrame = sf;
+            }
+        }).catch(() => {});
+
+        // 阻止点击穿透到遮罩
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 1. 关闭按钮（右上角 X）
+        const closeBtn = this.createNode('CloseBtn', panelNode, panelW / 2 - 30, panelH / 2 - 30, 60, 60);
+        closeBtn.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode!.removeAllChildren();
+        }, this);
+
+        // 顶部太阳图标已在底图中绘制，这里只补数量（位置与加果篮面板一致）
+        const topSunsLabel = this.createLabel(panelNode, `${this.totalSuns}`, 5, 220, 28, new Color(255, 255, 255, 255), true);
+        const topSunsTransform = topSunsLabel.node.getComponent(UITransform);
+        if (topSunsTransform) topSunsTransform.setAnchorPoint(0, 0.5);
+        topSunsLabel.horizontalAlign = 0; // LEFT
+
+        // 清空果盘价格（小太阳），从游戏配置读取，默认 20
+        const clearCost = this.gameConfig?.toolCosts?.clearTray ?? 20;
+        const doClearTray = () => {
+            this.tryConsumeTool('clear', () => {
+                this.tempHoles = [];
+                this.renderTopUI();
+                // 若清空后恰好达成过关条件，过关弹窗优先，不再弹出清空成功图
+                const willWin = !this.gameOver
+                    && this.fallingPlateNodes.size === 0
+                    && !this.plates.some((plate) => plate.state === 'falling')
+                    && this.plates.every((plate) => plate.removed);
+                if (!willWin) {
+                    this.renderClearTraySuccessModal();
+                }
+                this.checkWin();
+            });
+        };
+
+        // 2. 第一个按钮：消耗小太阳清空果盘
+        const btnSuns = this.createNode('BtnSuns', panelNode, 0, -85, 136, 46);
+        btnSuns.on(Node.EventType.TOUCH_END, () => {
+            if (this.totalSuns < clearCost) {
+                this.showSunShortageTip();
+                return;
+            }
+            this.totalSuns -= clearCost;
+            localStorage.setItem('totalSuns', this.totalSuns.toString());
+            if (this.sunCountLabel && this.sunCountLabel.isValid) {
+                this.sunCountLabel.string = `${this.totalSuns}`;
+            }
+            this.modalLayerNode!.removeAllChildren();
+            doClearTray();
+        }, this);
+        // 价格数字（中间太阳标签，位置与加果篮面板一致）
+        const costLabel = this.createLabel(panelNode, `${clearCost}`, 67, -73, 18, new Color(0, 0, 0, 255), true);
+        const costTransform = costLabel.node.getComponent(UITransform);
+        if (costTransform) costTransform.setAnchorPoint(0, 0.5);
+        costLabel.horizontalAlign = 0; // LEFT
+
+        // 3. 第二个按钮：看广告清空
+        const btnAd = this.createNode('BtnAd', panelNode, 0, -149, 136, 46);
+        btnAd.on(Node.EventType.TOUCH_END, () => {
+            this.showAdThen(() => {
+                this.modalLayerNode!.removeAllChildren();
+                doClearTray();
+            }, 'clear_tray');
+        }, this);
+
+        // 4. 第三个按钮：继续游戏
+        const btnContinue = this.createNode('BtnContinue', panelNode, 0, -213, 136, 46);
+        btnContinue.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode!.removeAllChildren();
+        }, this);
+    }
+
+    /** 清空果盘成功弹窗：使用 panel_clear_tray.png，动效与加果篮成功弹窗一致 */
+    private renderClearTraySuccessModal() {
+        if (!this.modalLayerNode) return;
+        this.modalLayerNode.removeAllChildren();
+
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
+
+        // 使用 panel_clear_tray.png，原图 800x1000，按宽度 320 缩放高度 400
+        const panelW = 320;
+        const panelH = 400;
+        const panelNode = this.createNode('ClearTrayPanel', this.modalLayerNode, 0, 0, panelW, panelH);
+
+        const panelSprite = panelNode.addComponent(Sprite);
+        panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_clear_tray/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && panelSprite && panelSprite.isValid) {
+                panelSprite.spriteFrame = sf;
+            }
+        }).catch(() => {});
+
+        // 图片上未绘制按钮，点击任意位置关闭
+        const closeModal = () => {
+            if (this.modalLayerNode) this.modalLayerNode.removeAllChildren();
+        };
+        mask.on(Node.EventType.TOUCH_END, closeModal, this);
+        panelNode.on(Node.EventType.TOUCH_END, closeModal, this);
+
+        // 动态效果：遮罩淡入 + 从小到大三回弹 + 星星爆发 + 上下慢浮动（与加果篮成功弹窗一致）
+        // 1. 遮罩淡入
+        const maskOpacity = mask.addComponent(UIOpacity);
+        maskOpacity.opacity = 0;
+        tween(maskOpacity).to(0.25, { opacity: 150 }).start();
+
+        // 2. 从小到大 → 来回回弹三下（振幅递减）
+        panelNode.setScale(new Vec3(0, 0, 1));
+        tween(panelNode)
+            // 从小到大
+            .to(0.3, { scale: new Vec3(1.15, 1.15, 1) }, { easing: 'backOut' })
+            // 回弹第一下
+            .to(0.12, { scale: new Vec3(0.92, 0.92, 1) }, { easing: 'sineInOut' })
+            .to(0.12, { scale: new Vec3(1.08, 1.08, 1) }, { easing: 'sineInOut' })
+            // 回弹第二下
+            .to(0.11, { scale: new Vec3(0.96, 0.96, 1) }, { easing: 'sineInOut' })
+            .to(0.11, { scale: new Vec3(1.04, 1.04, 1) }, { easing: 'sineInOut' })
+            // 回弹第三下
+            .to(0.1, { scale: new Vec3(0.99, 0.99, 1) }, { easing: 'sineInOut' })
+            .to(0.1, { scale: new Vec3(1, 1, 1) }, { easing: 'sineInOut' })
+            .start();
+
+        // 3. 星星粒子爆发（从中心向外飞散）
+        const starColors = [
+            new Color(255, 215, 0, 255),   // 金色
+            new Color(255, 255, 120, 255), // 亮黄
+            new Color(255, 180, 50, 255),  // 橙黄
+            new Color(255, 255, 255, 255), // 白色
+        ];
+        for (let i = 0; i < 14; i++) {
+            const starSize = 8 + Math.random() * 6;
+            const star = this.createGraphicsNode('Star', this.modalLayerNode!, starSize, starSize, 0, 0);
+            const g = star.getComponent(Graphics)!;
+            const color = starColors[Math.floor(Math.random() * starColors.length)];
+            this.drawStar(g, starSize, color);
+
+            const starOpacity = star.addComponent(UIOpacity);
+
+            const angle = (i / 14) * Math.PI * 2 + Math.random() * 0.6;
+            const distance = 110 + Math.random() * 90;
+            const targetX = Math.cos(angle) * distance;
+            const targetY = Math.sin(angle) * distance;
+            const flyDuration = 0.35 + Math.random() * 0.25;
+
+            star.setScale(new Vec3(0, 0, 1));
+
+            // 缩放 + 飞散 + 旋转
+            tween(star)
+                .to(flyDuration * 0.35, { scale: new Vec3(1.3, 1.3, 1) }, { easing: 'backOut' })
+                .to(flyDuration * 0.65, {
+                    position: new Vec3(targetX, targetY, 0),
+                    scale: new Vec3(0.5, 0.5, 1),
+                    angle: (Math.random() - 0.5) * 720
+                }, { easing: 'quadOut' })
+                .start();
+
+            // 淡出销毁
+            tween(starOpacity)
+                .delay(flyDuration * 0.55)
+                .to(0.2, { opacity: 0 })
+                .call(() => { if (star.isValid) star.destroy(); })
+                .start();
+        }
+
+        // 4. 回弹结束后上下慢慢浮动
+        this.scheduleOnce(() => {
+            if (panelNode && panelNode.isValid) {
+                tween(panelNode)
+                    .repeatForever(
+                        tween()
+                            .to(1.5, { position: new Vec3(0, 5, 0) }, { easing: 'sineInOut' })
+                            .to(1.5, { position: new Vec3(0, -5, 0) }, { easing: 'sineInOut' })
+                    )
+                    .start();
+            }
+        }, 1.0);
+    }
+
+    private renderBasketUnlockModal() {
+        if (!this.modalLayerNode) return;
+        this.modalLayerNode.removeAllChildren();
+
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
+
+        // 使用 panel_basket_unlock.png，宽度 320，高度按原图比例
+        const panelW = 320;
+        const panelH = 454;
+        const panelNode = this.createNode('BasketUnlockPanel', this.modalLayerNode, 0, 0, panelW, panelH);
+
+        const panelSprite = panelNode.addComponent(Sprite);
+        panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        resources.load('ui/panel_basket_unlock/spriteFrame', SpriteFrame, (err, spriteFrame) => {
+            if (!err && spriteFrame && panelSprite && panelSprite.isValid) {
+                panelSprite.spriteFrame = spriteFrame;
+            }
+        });
+
+        // 阻止点击穿透到遮罩
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 动态效果：遮罩淡入 + 弹性弹出 + 星星爆发 + 呼吸浮动
+        // 1. 遮罩淡入
+        const maskOpacity = mask.addComponent(UIOpacity);
+        maskOpacity.opacity = 0;
+        tween(maskOpacity).to(0.25, { opacity: 150 }).start();
+
+        // 2. 弹窗动效：从小到大 → 来回回弹三下（振幅递减）
+        panelNode.setScale(new Vec3(0, 0, 1));
+        tween(panelNode)
+            // 从小到大
+            .to(0.3, { scale: new Vec3(1.15, 1.15, 1) }, { easing: 'backOut' })
+            // 回弹第一下
+            .to(0.12, { scale: new Vec3(0.92, 0.92, 1) }, { easing: 'sineInOut' })
+            .to(0.12, { scale: new Vec3(1.08, 1.08, 1) }, { easing: 'sineInOut' })
+            // 回弹第二下
+            .to(0.11, { scale: new Vec3(0.96, 0.96, 1) }, { easing: 'sineInOut' })
+            .to(0.11, { scale: new Vec3(1.04, 1.04, 1) }, { easing: 'sineInOut' })
+            // 回弹第三下
+            .to(0.1, { scale: new Vec3(0.99, 0.99, 1) }, { easing: 'sineInOut' })
+            .to(0.1, { scale: new Vec3(1, 1, 1) }, { easing: 'sineInOut' })
+            .start();
+
+        // 3. 星星粒子爆发（从中心向外飞散）
+        const starColors = [
+            new Color(255, 215, 0, 255),   // 金色
+            new Color(255, 255, 120, 255), // 亮黄
+            new Color(255, 180, 50, 255),  // 橙黄
+            new Color(255, 255, 255, 255), // 白色
+        ];
+        for (let i = 0; i < 14; i++) {
+            const starSize = 8 + Math.random() * 6;
+            const star = this.createGraphicsNode('Star', this.modalLayerNode!, starSize, starSize, 0, 0);
+            const g = star.getComponent(Graphics)!;
+            const color = starColors[Math.floor(Math.random() * starColors.length)];
+            this.drawStar(g, starSize, color);
+
+            const starOpacity = star.addComponent(UIOpacity);
+
+            const angle = (i / 14) * Math.PI * 2 + Math.random() * 0.6;
+            const distance = 110 + Math.random() * 90;
+            const targetX = Math.cos(angle) * distance;
+            const targetY = Math.sin(angle) * distance;
+            const flyDuration = 0.35 + Math.random() * 0.25;
+
+            star.setScale(new Vec3(0, 0, 1));
+
+            // 缩放 + 飞散 + 旋转
+            tween(star)
+                .to(flyDuration * 0.35, { scale: new Vec3(1.3, 1.3, 1) }, { easing: 'backOut' })
+                .to(flyDuration * 0.65, {
+                    position: new Vec3(targetX, targetY, 0),
+                    scale: new Vec3(0.5, 0.5, 1),
+                    angle: (Math.random() - 0.5) * 720
+                }, { easing: 'quadOut' })
+                .start();
+
+            // 淡出销毁
+            tween(starOpacity)
+                .delay(flyDuration * 0.55)
+                .to(0.2, { opacity: 0 })
+                .call(() => { if (star.isValid) star.destroy(); })
+                .start();
+        }
+
+        // 4. 回弹结束后上下慢慢浮动
+        this.scheduleOnce(() => {
+            if (panelNode && panelNode.isValid) {
+                tween(panelNode)
+                    .repeatForever(
+                        tween()
+                            .to(1.5, { position: new Vec3(0, 5, 0) }, { easing: 'sineInOut' })
+                            .to(1.5, { position: new Vec3(0, -5, 0) }, { easing: 'sineInOut' })
+                    )
+                    .start();
+            }
+        }, 1.0);
+
+        // "太棒了"按钮点击区域
+        const btnAwesome = this.createNode('BtnAwesome', panelNode, 0, -155, 200, 60);
+        btnAwesome.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode!.removeAllChildren();
+        }, this);
+    }
+
+    private renderSettingsModal(show: boolean) {
+        if (!this.modalLayerNode) return;
+        if (!show) {
+            this.modalLayerNode.removeAllChildren();
+            return;
+        }
+
+        this.modalLayerNode.removeAllChildren();
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
+
+        // 背景关闭
+        mask.on(Node.EventType.TOUCH_END, () => {
+            this.renderSettingsModal(false);
+        }, this);
+
+        // 设置面板：使用图片 panel_settings.png
+        // 按照原图内容比例 (1050 x 1699) 设置宽高，避免拉伸变形
+        const panelW = 320;
+        const panelH = 518;
+        const panelNode = this.createNode('SettingsPanel', this.modalLayerNode, 0, 0, panelW, panelH);
+        
+        const panelSprite = panelNode.addComponent(Sprite);
+        panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_settings/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && panelSprite && panelSprite.isValid) {
+                panelSprite.spriteFrame = sf;
+            }
+        }).catch(() => {});
+
+        // 阻止点击穿透到遮罩
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 使用图片上自带的关闭按钮，所以去掉文本的 "X"，只保留一个隐形的点击区域
+        const closeBtnSize = 50;
+        // 精确定位到原图右上角白色 X 号的位置
+        const closeBtn = this.createNode('CloseBtn', panelNode, 135, 239, closeBtnSize, closeBtnSize);
+        closeBtn.on(Node.EventType.TOUCH_END, () => {
+            this.renderSettingsModal(false);
+        }, this);
+
+        // 声音开关：与图上喇叭图标垂直中心对齐（图标实测 cocos y=99）
+        const toggleSound = this.createToggle(panelNode, 0, 99, this.soundEnabled, (isOn) => {
+            this.soundEnabled = isOn;
+            localStorage.setItem('soundEnabled', String(isOn));
+            SoundManager.getInstance()?.setMute(!isOn);
+            if (isOn) {
+                SoundManager.getInstance()?.playBGM();
+            } else {
+                SoundManager.getInstance()?.stopBGM();
+            }
+        });
+
+        // 震动开关：与图上震动图标垂直中心对齐（图标实测 cocos y=15）
+        const toggleVibration = this.createToggle(panelNode, 0, 15, this.vibrationEnabled, (isOn) => {
+            this.vibrationEnabled = isOn;
+            localStorage.setItem('vibrationEnabled', String(isOn));
+            if (isOn) this.triggerVibration('light');
+        });
+
+        // 重新挑战（黄色按钮）：热区中心对齐图上按钮实测位置 y=-74
+        const btnRestart = this.createNode('BtnRestart', panelNode, 0, -74, 150, 54);
+        btnRestart.on(Node.EventType.TOUCH_END, () => {
+            this.renderSettingsModal(false);
+            this.initGame();
+        }, this);
+
+        // 回第一关（蓝色按钮）：热区中心对齐图上按钮实测位置 y=-144
+        const btnFirstLevel = this.createNode('BtnFirstLevel', panelNode, 0, -144, 150, 54);
+        btnFirstLevel.on(Node.EventType.TOUCH_END, () => {
+            this.renderSettingsModal(false);
+            this.currentLevel = 1;
+            saveProgress(this.currentLevel);
+            this.initGame();
+        }, this);
+
+        // 继续游戏（绿色按钮）：热区中心对齐图上按钮实测位置 y=-212
+        const btnContinue = this.createNode('BtnContinue', panelNode, 0, -212, 150, 54);
+        btnContinue.on(Node.EventType.TOUCH_END, () => {
+            this.renderSettingsModal(false);
+        }, this);
+    }
+
+    private createToggle(parent: Node, x: number, y: number, initialState: boolean, onChange: (state: boolean) => void) {
+        const toggleW = 60;
+        const toggleH = 30;
+        // 把开关向右偏移，假设图标在左边，开关在右边对齐
+        const offsetX = 60; 
+        
+        const node = this.createNode('Toggle', parent, x + offsetX, y, toggleW, toggleH);
+        
+        const bgG = this.createGraphicsNode('ToggleBg', node, toggleW, toggleH, 0, 0).getComponent(Graphics)!;
+        const knob = this.createNode('ToggleKnob', node, 0, 0, 26, 26);
+        const knobG = this.createGraphicsNode('KnobVisual', knob, 26, 26, 0, 0).getComponent(Graphics)!;
+
+        let isOn = initialState;
+
+        const updateVisual = () => {
+            bgG.clear();
+            bgG.fillColor = isOn ? new Color(100, 200, 100, 255) : new Color(200, 200, 200, 255);
+            bgG.roundRect(-toggleW / 2, -toggleH / 2, toggleW, toggleH, toggleH / 2);
+            bgG.fill();
+
+            knobG.clear();
+            knobG.fillColor = new Color(255, 255, 255, 255);
+            knobG.circle(0, 0, 13);
+            knobG.fill();
+
+            const targetX = isOn ? (toggleW / 2 - 15) : (-toggleW / 2 + 15);
+            tween(knob).stop();
+            tween(knob).to(0.1, { position: new Vec3(targetX, 0, 0) }).start();
+        };
+
+        updateVisual();
+
+        node.on(Node.EventType.TOUCH_END, () => {
+            isOn = !isOn;
+            updateVisual();
+            onChange(isOn);
+        }, this);
+
+        return node;
     }
 
     private renderModal(config: { title: string; sub: string; button?: string; onConfirm?: () => void; height?: number; secondButton?: string; secondOnConfirm?: () => void; hideClose?: boolean; onCancel?: () => void } | null) {
@@ -1270,27 +1967,27 @@ export class GameManager extends Component {
 
     private getBoxCapacity(): number {
         const level = this.currentLevel;
-        if (level <= 6) return 3;
-        if (level <= 11) return Math.random() < 0.15 ? 4 : 3;
-        if (level <= 16) return Math.random() < 0.35 ? 4 : 3;
-        if (level <= 21) {
-            const r = Math.random();
-            return r < 0.15 ? 5 : (r < 0.50 ? 4 : 3);
+        const ranges = this.gameConfig?.boxCapacity;
+        // 兜底：无配置时返回 3
+        if (!ranges || ranges.length === 0) return 3;
+
+        // 找到当前关卡所在的区间
+        const range = ranges.find(r => level <= r.max) || ranges[ranges.length - 1];
+
+        // 根据区间权重随机选出孔数
+        const entries: { cap: number; weight: number }[] = [];
+        if (range.w3) entries.push({ cap: 3, weight: range.w3 });
+        if (range.w4) entries.push({ cap: 4, weight: range.w4 });
+        if (range.w5) entries.push({ cap: 5, weight: range.w5 });
+        if (range.w6) entries.push({ cap: 6, weight: range.w6 });
+
+        const totalWeight = entries.reduce((sum, e) => sum + e.weight, 0);
+        let r = Math.random() * totalWeight;
+        for (const entry of entries) {
+            r -= entry.weight;
+            if (r <= 0) return entry.cap;
         }
-        if (level <= 27) {
-            const r = Math.random();
-            return r < 0.25 ? 5 : (r < 0.60 ? 4 : 3);
-        }
-        if (level <= 35) {
-            const r = Math.random();
-            return r < 0.10 ? 6 : (r < 0.40 ? 5 : (r < 0.75 ? 4 : 3));
-        }
-        if (level <= 45) {
-            const r = Math.random();
-            return r < 0.15 ? 6 : (r < 0.50 ? 5 : (r < 0.85 ? 4 : 3));
-        }
-        const r = Math.random();
-        return r < 0.25 ? 6 : (r < 0.60 ? 5 : (r < 0.90 ? 4 : 3));
+        return entries[0]?.cap || 3;
     }
 
     private updatePlateGravity(plate: PlateData) {
@@ -1346,60 +2043,126 @@ export class GameManager extends Component {
         this.triggerVibration('heavy');
 
         // 彩虹果特殊处理：可放入任意有空间的果篮
-        // 优化：如果有果篮差一个果子就满了（capacity - length === 1），优先放进去；否则找一个有同色果子最多的未满果篮；否则随便找个有空间的
         const isRainbow = fruit.color === FruitColor.RAINBOW;
         let targetBox: BoxData | undefined;
         
         if (isRainbow) {
-            const activeBoxes = this.boxes.filter((box) => box.color !== 'locked' && box.color !== 'empty' && box.fruits.length < box.capacity);
+            const activeBoxes = this.boxes.filter((box) => box.color !== 'locked' && box.color !== 'empty' && (box.fruits.length + (box.incomingCount || 0)) < box.capacity);
             
             if (activeBoxes.length > 0) {
                 activeBoxes.sort((a, b) => {
-                    const diffA = a.capacity - a.fruits.length;
-                    const diffB = b.capacity - b.fruits.length;
+                    const countA = a.fruits.length + (a.incomingCount || 0);
+                    const countB = b.fruits.length + (b.incomingCount || 0);
+                    const diffA = a.capacity - countA;
+                    const diffB = b.capacity - countB;
                     if (diffA !== diffB) {
-                        return diffA - diffB; // 距离满差距小的排前面
+                        return diffA - diffB;
                     }
-                    return b.fruits.length - a.fruits.length; // 差距相同，装得多的排前面
+                    return countB - countA;
                 });
                 targetBox = activeBoxes[0];
             }
         } else {
-            targetBox = this.boxes.find((box) => box.color === fruit.color && box.fruits.length < box.capacity);
+            targetBox = this.boxes.find((box) => box.color === fruit.color && (box.fruits.length + (box.incomingCount || 0)) < box.capacity);
         }
 
         if (!targetBox) {
-            if (this.tempHoles.length >= this.maxTempHoles) {
+            if ((this.tempHoles.length + this.incomingTempCount) >= this.maxTempHoles) {
                 this.gameOver = true;
-                const btnState = this.getHelpButtonState();
-                this.renderModal({
-                    title: '暂存盘满了',
-                    sub: '果盘已被塞满！看个广告清空果盘继续闯关，\n或者重新开始本关～',
-                    button: '重新开始',
-                    onConfirm: () => {
-                        this.gameOver = false;
-                        this.initGame();
-                    },
-                    secondButton: '看广告复活',
-                    secondOnConfirm: () => {
-                        this.showAdThen(() => {
-                            this.gameOver = false;
-                            this.tempHoles = [];
-                            this.renderTopUI();
-                            this.renderModal(null);
-                        });
-                    },
-                    hideClose: true,
-                    height: 240,
-                });
+                this.renderFailModal();
                 return;
             }
-            this.tempHoles.push(fruit.color);
-        } else {
-            targetBox.fruits.push(fruit.color);
-            
+        }
+
+        // ===== 捕获水果的世界坐标（在从板子上移除之前） =====
+        const pivotNode = this.plateNodes.get(plate.id);
+        let startWorldPos = new Vec3(0, 0, 0);
+        if (pivotNode && pivotNode.isValid) {
+            const visualNode = pivotNode.getChildByName(`PlateVisual_${plate.id}`);
+            if (visualNode) {
+                const fruitContainer = visualNode.getChildByName(`FruitContainer_${fruit.id}`);
+                if (fruitContainer && fruitContainer.isValid) {
+                    startWorldPos = fruitContainer.getWorldPosition();
+                }
+            }
+        }
+
+        fruit.removed = true;
+        this.removedFruits++;
+
+        // 从板子上移除水果视觉节点
+        if (pivotNode && pivotNode.isValid) {
+            const visualNode = pivotNode.getChildByName(`PlateVisual_${plate.id}`);
+            if (visualNode) {
+                const fruitContainer = visualNode.getChildByName(`FruitContainer_${fruit.id}`);
+                if (fruitContainer && fruitContainer.isValid) {
+                    fruitContainer.destroy();
+                }
+            }
+        }
+
+        if (!targetBox) {
+            // 放入暂存盘：飞向第一个空孔位
+            const targetWorldPos = this.getTempTrayWorldPos(this.tempHoles.length + this.incomingTempCount);
+            this.incomingTempCount++;
+            this.trackFlyingFruit(fruit.color);
+
+            // 板子掉落/旋转与飞行动画同时进行
+            this.afterFruitRemoved(plate);
+
+            this.playFruitFlyAnimation(fruit, startWorldPos, targetWorldPos, () => {
+                this.incomingTempCount--;
+                this.untrackFlyingFruit(fruit.color);
+                this.tempHoles.push(fruit.color);
+                this.renderTopUI();
+                this.autoFillFromTemp();
+            });
+            return;
+        }
+
+        const boxIndex = this.boxes.indexOf(targetBox);
+        const slotIndex = targetBox.fruits.length + (targetBox.incomingCount || 0);
+        const targetWorldPos = this.getBoxSlotWorldPos(boxIndex, targetBox.capacity, slotIndex);
+        
+        targetBox.incomingCount = (targetBox.incomingCount || 0) + 1;
+        this.trackFlyingFruit(fruit.color);
+
+        // 板子掉落/旋转与飞行动画同时进行
+        this.afterFruitRemoved(plate);
+
+        this.playFruitFlyAnimation(fruit, startWorldPos, targetWorldPos, () => {
+            targetBox!.incomingCount = Math.max(0, (targetBox!.incomingCount || 0) - 1);
+            this.untrackFlyingFruit(fruit.color);
+
+            // 竞态保护：飞行途中果篮可能被清空换色，飞到后需重新校验目标果篮是否仍匹配
+            const stillMatches = isRainbow
+                ? (targetBox!.color !== 'locked' && targetBox!.color !== 'empty' && (targetBox!.fruits.length + (targetBox!.incomingCount || 0)) < targetBox!.capacity)
+                : (targetBox!.color === fruit.color && (targetBox!.fruits.length + (targetBox!.incomingCount || 0)) < targetBox!.capacity);
+            if (!stillMatches) {
+                // 尝试重新寻找匹配的果篮，找不到则进暂存盘
+                const fallback = isRainbow
+                    ? this.boxes.find((box) => box.color !== 'locked' && box.color !== 'empty' && (box.fruits.length + (box.incomingCount || 0)) < box.capacity)
+                    : this.boxes.find((box) => box.color === fruit.color && (box.fruits.length + (box.incomingCount || 0)) < box.capacity);
+                if (fallback) {
+                    fallback.fruits.push(fruit.color);
+                    this.renderTopUI();
+                    if (this.canClearBox(fallback)) {
+                        this.scheduleBoxClear(fallback, 0.25, true);
+                    }
+                    this.checkAllBoxesForClear();
+                    this.checkWin();
+                } else {
+                    this.tempHoles.push(fruit.color);
+                    this.renderTopUI();
+                    this.autoFillFromTemp();
+                }
+                return;
+            }
+
+            targetBox!.fruits.push(fruit.color);
+
             // ===== 连击判定 =====
-            const COMBO_WINDOW = 1500; // 1.5秒内连续收集算连击
+            const COMBO_WINDOW = 1500;
             const now = Date.now();
             if (this.lastCollectTime > 0 && (now - this.lastCollectTime) < COMBO_WINDOW) {
                 this.comboCount++;
@@ -1407,34 +2170,124 @@ export class GameManager extends Component {
                 this.comboCount = 1;
             }
             this.lastCollectTime = now;
-            
-            // 连击 >=2 时显示飘字
+
             if (this.comboCount >= 2) {
                 const comboInfo = this.getComboInfo(this.comboCount);
                 if (comboInfo.text) {
-                    // 从屏幕中央飘出
                     this.showFloatText(comboInfo.text, 0, 10, comboInfo.color, comboInfo.fontSize);
                 }
             }
-            // ===== 连击判定结束 =====
+
+            this.renderTopUI();
+
+            if (this.canClearBox(targetBox!)) {
+                this.scheduleBoxClear(targetBox!, 0.25, true);
+            }
+
+            // 飞行动画结束后检查所有果篮是否需要消除（替代 afterFruitRemoved 中的 checkAllBoxesForClear）
+            this.checkAllBoxesForClear();
+        });
+    }
+
+    /** 获取暂存盘某个孔位的世界坐标（用于飞行动画终点） */
+    private getTempTrayWorldPos(slotIndex: number): Vec3 {
+        if (this.tempContainerNode && this.tempContainerNode.isValid && this.tempSlotViews.length > 0) {
+            // 孔位布局参数（与 ensureTempSlotViews 一致）
+            const slotRadius = 12;
+            const spacing = slotRadius * 2 + 5;
+            const startX = -spacing * 2;
+            const localX = startX + slotIndex * spacing;
+            
+            // 找到对应孔位节点并转换坐标
+            const slotView = this.tempSlotViews[slotIndex];
+            if (slotView && slotView.node && slotView.node.isValid) {
+                return slotView.node.getWorldPosition();
+            }
+            
+            // 兜底：手动计算
+            const worldPos = new Vec3(localX, 0, 0);
+            const uiTransform = this.tempContainerNode.getComponent(UITransform);
+            if (uiTransform) {
+                uiTransform.convertToWorldSpaceAR(worldPos, worldPos);
+            }
+            return worldPos;
+        }
+        // 兜底：顶部区域中间
+        if (this.topAreaNode && this.topAreaNode.isValid) {
+            return this.topAreaNode.getWorldPosition();
+        }
+        return new Vec3(0, 150, 0);
+    }
+
+    /** 获取果篮某个孔位的世界坐标 */
+    private getBoxSlotWorldPos(boxIndex: number, capacity: number, slotIndex: number): Vec3 {
+        const boxView = this.boxViews[boxIndex];
+        if (!boxView || !boxView.node || !boxView.node.isValid) {
+            return new Vec3(0, 100, 0);
         }
 
-        fruit.removed = true;
-        this.removedFruits++;
-
-        this.renderTopUI();
-
-        if (targetBox && this.canClearBox(targetBox)) {
-            this.scheduleBoxClear(targetBox, 0.25, true);
+        const slotPositions = this.getBoxSlotPositions(capacity);
+        const slotPos = slotPositions[slotIndex];
+        if (!slotPos) {
+            return boxView.node.getWorldPosition();
         }
 
+        // slotPos 是相对于 boxView.node 的本地坐标，需转换为世界坐标
+        const uiTransform = boxView.node.getComponent(UITransform);
+        if (!uiTransform) return boxView.node.getWorldPosition();
+
+        const worldPos = new Vec3(slotPos.x, slotPos.y, 0);
+        uiTransform.convertToWorldSpaceAR(worldPos, worldPos);
+        return worldPos;
+    }
+
+    /** 水果飞行动画：从起始位置飞到目标位置 */
+    private playFruitFlyAnimation(
+        fruit: FruitData,
+        startWorldPos: Vec3,
+        targetWorldPos: Vec3,
+        onComplete: () => void
+    ) {
+        if (!this.rootNode || !this.rootNode.isValid) {
+            onComplete();
+            return;
+        }
+
+        const uiTransform = this.rootNode.getComponent(UITransform);
+        if (!uiTransform) {
+            onComplete();
+            return;
+        }
+
+        const startLocal = uiTransform.convertToNodeSpaceAR(startWorldPos);
+        const targetLocal = uiTransform.convertToNodeSpaceAR(targetWorldPos);
+
+        // 飞行时用稍大的尺寸，更容易看到
+        const flySize = 30;
+        const flyNode = this.createFruitVisual(this.rootNode, startLocal.x, startLocal.y, flySize, fruit.color, false);
+        flyNode.layer = Layers.Enum.UI_2D;
+        // 确保在最上层显示，不被其他 UI 遮挡
+        flyNode.setSiblingIndex(9999);
+
+        flyNode.setScale(0.8, 0.8, 1);
+        tween(flyNode)
+            .to(0.1, { scale: new Vec3(1.15, 1.15, 1) })
+            .to(0.5, { position: new Vec3(targetLocal.x, targetLocal.y, 0), scale: new Vec3(0.5, 0.5, 1) }, { easing: 'sineIn' })
+            .call(() => {
+                if (flyNode.isValid) flyNode.destroy();
+                onComplete();
+            })
+            .start();
+    }
+
+    /** 水果移除后的板子处理（共用逻辑） */
+    private afterFruitRemoved(plate: PlateData) {
+        const pivotNode = this.plateNodes.get(plate.id);
         const remaining = plate.fruits.filter((item) => !item.removed);
         if (remaining.length === 0) {
             plate.state = 'stable';
             plate.supportPlateId = undefined;
             plate.supportY = undefined;
-            const currentAngle = plate.rotation || 0;
-            this.refreshPlateNode(plate, currentAngle);
             this.startPlateFalling(plate);
         } else {
             plate.state = 'stable';
@@ -1442,21 +2295,132 @@ export class GameManager extends Component {
             plate.supportY = undefined;
             const oldRotation = plate.rotation || 0;
             this.updatePlateGravity(plate);
-            const plateNode = this.refreshPlateNode(plate, oldRotation);
 
             if (oldRotation !== (plate.rotation || 0)) {
-                if (plateNode) {
-                    // 旋转动画时间从 0.5 秒延长到 1.2 秒，使用 backOut 缓动让它下垂时有轻微回弹，显得更真实沉重
-                    tween(plateNode).stop();
-                    tween(plateNode)
+                if (pivotNode && pivotNode.isValid) {
+                    const visualNode = pivotNode.getChildByName(`PlateVisual_${plate.id}`);
+                    
+                    if (plate.gravityOrigin) {
+                        // 绕最后一个水果旋转：把 pivot 移到水果位置，反向偏移视觉节点
+                        const offsetX = plate.gravityOrigin.x - plate.w / 2;
+                        const offsetY = plate.h / 2 - plate.gravityOrigin.y;
+                        pivotNode.setPosition(plate.x + offsetX, plate.y + offsetY, 0);
+                        if (visualNode) {
+                            visualNode.setPosition(-offsetX, -offsetY, 0);
+                        }
+                    } else {
+                        // 旋转归零：pivot 回到板子中心
+                        pivotNode.setPosition(plate.x, plate.y, 0);
+                        if (visualNode) {
+                            visualNode.setPosition(0, 0, 0);
+                        }
+                    }
+
+                    tween(pivotNode).stop();
+                    tween(pivotNode)
                         .to(1.2, { angle: plate.rotation || 0 }, { easing: 'backOut' })
                         .start();
                 }
             }
 
-            this.checkAllBoxesForClear();
             this.checkWin();
         }
+    }
+
+    /** 获取小太阳图标的世界坐标（取图片左侧太阳图形中心，而非整张图中心） */
+    private getSunWorldPos(): Vec3 | null {
+        if (!this.sunIconNode || !this.sunIconNode.isValid) return null;
+        const uiTransform = this.sunIconNode.getComponent(UITransform);
+        if (uiTransform) {
+            return uiTransform.convertToWorldSpaceAR(new Vec3(-uiTransform.width * 0.25, 0, 0));
+        }
+        return this.sunIconNode.getWorldPosition();
+    }
+
+    /**
+     * 果篮装满时，播放粒子飞向小太阳的动画
+     * @param boxIndex 果篮索引
+     * @param count 飞行粒子数量（= 果篮孔数）
+     */
+    private playSunCollectAnimation(boxIndex: number, count: number): Promise<void> {
+        return new Promise((resolve) => {
+            const boxView = this.boxViews[boxIndex];
+            if (!boxView || !boxView.node || !boxView.node.isValid) {
+                resolve();
+                return;
+            }
+
+            const sunWorldPos = this.getSunWorldPos();
+            if (!sunWorldPos || !this.rootNode) {
+                resolve();
+                return;
+            }
+
+            const boxWorldPos = boxView.node.getWorldPosition();
+            const uiTransform = this.rootNode.getComponent(UITransform);
+            if (!uiTransform) {
+                resolve();
+                return;
+            }
+
+            // 转换为 rootNode 本地坐标
+            const startLocal = uiTransform.convertToNodeSpaceAR(boxWorldPos);
+            const targetLocal = uiTransform.convertToNodeSpaceAR(sunWorldPos);
+
+            let completed = 0;
+            const particleSize = 8;
+            const goldColor = new Color(255, 220, 50, 255);
+
+            for (let i = 0; i < count; i++) {
+                const delay = i * 0.06; // 每个粒子间隔 60ms
+                this.scheduleOnce(() => {
+                    // 创建金色粒子
+                    const particleNode = new Node(`SunParticle_${i}`);
+                    const particleGraphic = particleNode.addComponent(Graphics);
+                    particleGraphic.fillColor = goldColor;
+                    particleGraphic.circle(0, 0, particleSize);
+                    particleGraphic.fill();
+
+                    // 添加发光外圈
+                    const glowGraphic = particleNode.addComponent(Graphics);
+                    glowGraphic.fillColor = new Color(255, 240, 100, 100);
+                    glowGraphic.circle(0, 0, particleSize + 4);
+                    glowGraphic.fill();
+
+                    particleNode.setPosition(new Vec3(startLocal.x, startLocal.y, 0));
+                    particleNode.layer = Layers.Enum.UI_2D;
+                    this.rootNode!.addChild(particleNode);
+                    particleNode.setSiblingIndex(9999);
+
+                    // 二次贝塞尔曲线飞行：控制点抬高形成明显弧度，同时逐渐缩小
+                    const ctrlX = (startLocal.x + targetLocal.x) / 2;
+                    const ctrlY = Math.max(startLocal.y, targetLocal.y) + 60 + i * 8; // 弧度顶点（每个粒子略错开）
+                    const progress = { t: 0 };
+
+                    tween(progress)
+                        .to(0.4, { t: 1 }, {
+                            onUpdate: () => {
+                                if (!particleNode.isValid) return;
+                                const t = progress.t;
+                                const inv = 1 - t;
+                                const x = inv * inv * startLocal.x + 2 * inv * t * ctrlX + t * t * targetLocal.x;
+                                const y = inv * inv * startLocal.y + 2 * inv * t * ctrlY + t * t * targetLocal.y;
+                                particleNode.setPosition(new Vec3(x, y, 0));
+                                const s = 1.3 - t; // 从 1.3 缩到 0.3
+                                particleNode.setScale(new Vec3(s, s, 1));
+                            }
+                        })
+                        .call(() => {
+                            if (particleNode.isValid) particleNode.destroy();
+                            completed++;
+                            if (completed === count) {
+                                resolve();
+                            }
+                        })
+                        .start();
+                }, delay);
+            }
+        });
     }
 
     private clearBoxAndAssignNewColor(targetBox: BoxData) {
@@ -1464,6 +2428,10 @@ export class GameManager extends Component {
             targetBox.clearScheduled = false;
             targetBox.isSlidingOut = false;
             this.renderBoxes();
+            // 果篮有水果但清理条件暂时不满足，延迟重试防止死盒
+            if (targetBox.fruits.length > 0 && targetBox.color !== 'locked' && targetBox.color !== 'empty') {
+                this.scheduleBoxClear(targetBox, 0.3, false);
+            }
             return;
         }
 
@@ -1475,8 +2443,22 @@ export class GameManager extends Component {
             if (!this.canClearBox(targetBox)) {
                 targetBox.isSlidingOut = false;
                 this.renderBoxes();
+                // 同样延迟重试
+                if (targetBox.fruits.length > 0 && targetBox.color !== 'locked' && targetBox.color !== 'empty') {
+                    this.scheduleBoxClear(targetBox, 0.3, false);
+                }
                 return;
             }
+
+            // 小太阳收集动画与果篮刷新并行执行：先启动动画（捕获果篮当前位置），再立即刷新果篮
+            const boxIndex = this.boxes.indexOf(targetBox);
+            const sunCount = targetBox.fruits.length;
+            this.playSunCollectAnimation(boxIndex, sunCount);
+
+            // 果篮立即刷新（不等太阳动画完成）
+            this.sunsCollectedThisLevel += sunCount;
+            this.totalSuns += sunCount;
+            localStorage.setItem('totalSuns', this.totalSuns.toString());
 
             targetBox.fruits = [];
             targetBox.isSlidingOut = false;
@@ -1496,8 +2478,8 @@ export class GameManager extends Component {
         for (let i = this.tempHoles.length - 1; i >= 0; i--) {
             const color = this.tempHoles[i];
             const targetBox = color === FruitColor.RAINBOW
-                ? this.boxes.find((box) => box.color !== 'locked' && box.color !== 'empty' && box.fruits.length < box.capacity)
-                : this.boxes.find((box) => box.color === color && box.fruits.length < box.capacity);
+                ? this.boxes.find((box) => box.color !== 'locked' && box.color !== 'empty' && (box.fruits.length + (box.incomingCount || 0)) < box.capacity)
+                : this.boxes.find((box) => box.color === color && (box.fruits.length + (box.incomingCount || 0)) < box.capacity);
                 
             if (!targetBox) continue;
             targetBox.fruits.push(color);
@@ -1533,6 +2515,10 @@ export class GameManager extends Component {
         this.tempHoles.forEach((color) => {
             if (color !== FruitColor.RAINBOW) colors.add(color);
         });
+        // 飞行中的水果同样属于剩余水果：飞行窗口期内若不可见，清篮换色会刷出无关颜色
+        this.flyingFruitColors.forEach((color) => {
+            if (color !== FruitColor.RAINBOW) colors.add(color);
+        });
         return Array.from(colors);
     }
 
@@ -1540,15 +2526,50 @@ export class GameManager extends Component {
         return COLORS.indexOf(color as FruitColor) !== -1;
     }
 
-    private getPrimaryBoxFruitFallbackColor(index: number): FruitColor {
+    /** 记录/移除飞行中的水果颜色（发射时记录、落地时移除，含改道分支统一在回调开头移除） */
+    private trackFlyingFruit(color: FruitColor) {
+        this.flyingFruitColors.push(color);
+    }
+    private untrackFlyingFruit(color: FruitColor) {
+        const idx = this.flyingFruitColors.indexOf(color);
+        if (idx >= 0) this.flyingFruitColors.splice(idx, 1);
+    }
+
+    /** 仅剩彩虹果时检查：无普通颜色但存在彩虹果（盘上/暂存区/飞行中） */
+    private hasOnlyRainbowRemaining(): boolean {
+        if (this.getRemainingColors().length > 0) return false;
+        if (this.tempHoles.some((c) => c === FruitColor.RAINBOW)) return true;
+        if (this.flyingFruitColors.some((c) => c === FruitColor.RAINBOW)) return true;
+        for (const plate of this.plates) {
+            if (plate.removed) continue;
+            if (plate.fruits.some((fruit) => !fruit.removed && fruit.color === FruitColor.RAINBOW)) return true;
+        }
+        return false;
+    }
+
+    /** 彩虹果保底：随机选一个未被占用的颜色（彩虹果可入任意篮，不能让它无篮可入） */
+    private pickRainbowFallbackColor(usedColors: Set<FruitColor>): FruitColor | null {
+        const available = COLORS.filter((color) => !usedColors.has(color));
+        return available.length > 0 ? available[Math.floor(Math.random() * available.length)] : null;
+    }
+
+    private getPrimaryBoxFruitFallbackColor(index: number): BoxColor {
         const remaining = this.getRemainingColors();
-        const otherPrimary = index === 0 ? this.boxes[1] : this.boxes[0];
-        const otherColor = otherPrimary && this.isValidPrimaryBoxFruitColor(otherPrimary.color)
-            ? otherPrimary.color
-            : null;
-        const candidate = remaining.find((color) => color !== otherColor);
+        // 全局不允许同色果篮：排除其他所有篮子已占用的颜色
+        const usedByOthers = new Set(
+            this.boxes
+                .filter((_, idx) => idx !== index)
+                .map((box) => box.color)
+                .filter((color): color is FruitColor => this.isValidPrimaryBoxFruitColor(color))
+        );
+        const candidate = remaining.find((color) => !usedByOthers.has(color));
         if (candidate) return candidate;
-        return COLORS[index] || FruitColor.YELLOW;
+        // 例外：仅剩彩虹果时随机分配颜色（彩虹果可入任意篮，否则死局）
+        if (this.hasOnlyRainbowRemaining()) {
+            const rainbowColor = this.pickRainbowFallbackColor(usedByOthers);
+            if (rainbowColor) return rainbowColor;
+        }
+        return 'empty';
     }
 
     private updateBoxColor(box: BoxData, color: BoxColor) {
@@ -1591,13 +2612,17 @@ export class GameManager extends Component {
             weights.set(color, (weights.get(color) || 0) + weight);
         };
 
-        // 5的倍数关卡为挑战关卡，系统不再全力帮忙
-        const isChallenge = this.currentLevel % 5 === 0;
-        const tempWeight   = isChallenge ? 10  : 20;
-        const clickWeight  = isChallenge ? 20  : 30;
-        const blockWeight  = isChallenge ? 60  : 60;
+        const config = this.gameConfig;
+        const interval = config?.challengeInterval || 5;
+        const isChallenge = this.currentLevel % interval === 0;
+        const wt = isChallenge ? (config?.challengeWeights) : (config?.normalWeights);
+        const tempWeight   = wt?.temp  || 20;
+        const clickWeight  = wt?.click || 30;
+        const blockWeight  = wt?.block || 60;
 
         this.tempHoles.forEach((color) => addWeight(color, tempWeight));
+        // 飞行中的水果按“即将可分配”给权重：保证清篮换色优先匹配它们的颜色
+        this.flyingFruitColors.forEach((color) => addWeight(color, clickWeight));
         this.plates.forEach((plate) => {
             if (plate.removed) return;
             plate.fruits.forEach((fruit) => {
@@ -1614,26 +2639,52 @@ export class GameManager extends Component {
             .map(([color]) => color);
     }
 
+    /** 统计某颜色当前可操作的水果数（可点击 + 暂存区 + 飞行中） */
+    private getActionableCount(color: FruitColor): number {
+        let count = 0;
+        this.tempHoles.forEach((tempColor) => {
+            if (tempColor === color) count++;
+        });
+        this.flyingFruitColors.forEach((flyColor) => {
+            if (flyColor === color) count++;
+        });
+        this.plates.forEach((plate) => {
+            if (plate.removed) return;
+            plate.fruits.forEach((fruit) => {
+                if (fruit.removed || fruit.color !== color) return;
+                if (!this.isFruitBlocked(plate, fruit)) count++;
+            });
+        });
+        return count;
+    }
+
     private pickRefreshColor(targetBox: BoxData): BoxColor {
         const currentColors = this.boxes
             .filter((box) => box !== targetBox && box.color !== 'locked' && box.color !== 'empty')
             .map((box) => box.color as FruitColor);
 
         const preferred = this.getPreferredRefreshColors();
-        const preferredAvailable = preferred.filter((color) => currentColors.indexOf(color) === -1);
-        if (preferredAvailable.length > 0) {
-            return preferredAvailable[0];
+        // 优先：有可点击/暂存/飞行水果的颜色（保证刷出来能填）
+        const actionable = preferred.filter((color) =>
+            currentColors.indexOf(color) === -1 && this.getActionableCount(color) > 0
+        );
+        if (actionable.length > 0) {
+            return actionable[0];
         }
 
+        // 其次：游戏区剩余且未被占用的颜色
         const remaining = this.getRemainingColors().filter((color) => currentColors.indexOf(color) === -1);
         if (remaining.length > 0) {
             return remaining[0];
         }
 
-        if (preferred.length > 0) {
-            return preferred[0];
+        // 无可分配颜色时返回空篮：不允许同色果篮，也不凭空刷出游戏区没有的颜色
+        // 例外：仅剩彩虹果时随机分配颜色（彩虹果可入任意篮，否则死局）
+        if (this.hasOnlyRainbowRemaining()) {
+            const used = new Set(currentColors);
+            const rainbowColor = this.pickRainbowFallbackColor(used);
+            if (rainbowColor) return rainbowColor;
         }
-
         return 'empty';
     }
 
@@ -1648,11 +2699,14 @@ export class GameManager extends Component {
             return available[0];
         }
 
-        const fallback = COLORS.filter((color) => color !== duplicateColor && activeColors.indexOf(color) === -1);
-        if (fallback.length > 0) {
-            return fallback[0];
+        // 游戏区没有未占用的颜色：返回空篮，不同色、不凭空刷色
+        // 例外：仅剩彩虹果时随机分配颜色
+        if (this.hasOnlyRainbowRemaining()) {
+            const used = new Set(activeColors);
+            used.add(duplicateColor);
+            const rainbowColor = this.pickRainbowFallbackColor(used);
+            if (rainbowColor) return rainbowColor;
         }
-
         return 'empty';
     }
 
@@ -1703,8 +2757,15 @@ export class GameManager extends Component {
     private canClearBox(box: BoxData) {
         if (!this.isValidPrimaryBoxFruitColor(box.color) || box.fruits.length === 0) return false;
         if (!box.fruits.every((fruit) => fruit === box.color || fruit === FruitColor.RAINBOW)) return false;
+        // 有水果正在飞向该果篮时不能清除，否则飞行中的水果会落入换色后的果篮
+        if ((box.incomingCount || 0) > 0) return false;
 
         if (box.fruits.length === box.capacity) return true;
+
+        // 有水果仍在飞行途中时禁止提前清篮：飞行中的水果不计入剩余统计（已从盘子移除、尚未入篮/入暂存区），
+        // 尤其是彩虹果会被计入所有果篮的剩余量，飞行窗口期内统计偏小会导致误判提前清篮。
+        // 满员清篮（上方判断）不依赖统计，不受影响；飞行落地后的检查会重新触发，不会漏清。
+        if (this.hasFlyingFruits()) return false;
 
         // 如果包含彩虹果，它也可以作为该颜色的一部分被清除
         // 这里计算真正的该颜色剩余量加上剩余的彩虹果数量，来判断是否能提前清除
@@ -1714,8 +2775,14 @@ export class GameManager extends Component {
         return false;
     }
 
+    /** 是否有水果正在飞行途中（去向果篮或暂存区），飞行中的水果不计入剩余统计 */
+    private hasFlyingFruits(): boolean {
+        if (this.incomingTempCount > 0) return true;
+        return this.boxes.some((box) => (box.incomingCount || 0) > 0);
+    }
+
     private scheduleBoxClear(box: BoxData, delay: number, withSuccessVibration: boolean = false) {
-        if (box.clearScheduled || !this.canClearBox(box)) return;
+        if (box.clearScheduled || box.isSlidingOut || !this.canClearBox(box)) return;
 
         box.clearScheduled = true;
         this.scheduleOnce(() => {
@@ -1739,14 +2806,19 @@ export class GameManager extends Component {
         }
 
         const remaining = this.getRemainingColors();
-        const used = new Set(active.map((box) => box.color as FruitColor));
-        const fillColors = remaining.filter((color) => !used.has(color));
 
         for (let i = 0; i < 2; i++) {
             const box = this.boxes[i];
             if (this.isValidPrimaryBoxFruitColor(box.color)) continue;
-            const color = fillColors.shift() || remaining[0] || COLORS[i] || FruitColor.YELLOW;
-            this.updateBoxColor(box, color);
+            // 只允许游戏区剩余且未被任何果篮占用的颜色；没有则为空篮：不同色、不凭空刷色
+            const usedByOthers = new Set(
+                this.boxes
+                    .filter((_, idx) => idx !== i)
+                    .map((item) => item.color)
+                    .filter((color): color is FruitColor => this.isValidPrimaryBoxFruitColor(color))
+            );
+            const color = remaining.find((item) => !usedByOthers.has(item));
+            this.updateBoxColor(box, color || 'empty');
             box.fruits = [];
             box.capacity = this.getNextCapacityForColor(box.color, box);
         }
@@ -1776,21 +2848,31 @@ export class GameManager extends Component {
     private handleUnlockBox(targetBox: BoxData) {
         if (this.gameOver || targetBox.color !== 'locked') return;
 
-        const remaining = this.getRemainingColors();
-        const active = this.boxes.filter((box) => box.color !== 'locked' && box.color !== 'empty').map((box) => box.color);
-        let available = remaining.filter((color) => active.indexOf(color) === -1);
-        if (available.length === 0) {
-            available = COLORS.filter((color) => active.indexOf(color) === -1);
-        }
+        // 解锁果篮优先匹配暂存区水果颜色：暂存区有任一水果即可作为候选，解锁后立即自动填入
+        const usedColors = new Set(
+            this.boxes
+                .filter((box) => box !== targetBox)
+                .map((box) => box.color)
+                .filter((color): color is FruitColor => this.isValidPrimaryBoxFruitColor(color))
+        );
+        const tempColorCounts = new Map<FruitColor, number>();
+        this.tempHoles.forEach((color) => {
+            if (color !== FruitColor.RAINBOW && !usedColors.has(color)) {
+                tempColorCounts.set(color, (tempColorCounts.get(color) || 0) + 1);
+            }
+        });
+        // 暂存区颜色按数量降序，优先选最多的
+        const tempSorted = Array.from(tempColorCounts.entries()).sort((a, b) => b[1] - a[1]);
 
-        if (available.length > 0) {
-            const nextColor = available[Math.floor(Math.random() * available.length)];
-            this.updateBoxColor(targetBox, nextColor);
-            targetBox.capacity = this.getNextCapacityForColor(nextColor, targetBox);
-            targetBox.isNew = true;
-            this.renderTopUI();
-            this.autoFillFromTemp();
-        }
+        const nextColor: BoxColor = tempSorted.length > 0
+            ? tempSorted[0][0]
+            : this.pickRefreshColor(targetBox);
+
+        this.updateBoxColor(targetBox, nextColor);
+        targetBox.capacity = this.getNextCapacityForColor(nextColor, targetBox);
+        targetBox.isNew = true;
+        this.renderTopUI();
+        this.autoFillFromTemp();
     }
 
     private useTool(type: 'add' | 'clear') {
@@ -1809,75 +2891,24 @@ export class GameManager extends Component {
                 return;
             }
             
-            const btnState = this.getHelpButtonState();
-            this.renderModal({
-                title: '解锁果篮',
-                sub: '看一段广告即可解锁新果篮，\n或者求助群友帮忙～',
-                button: '看广告解锁',
-                onConfirm: () => {
-                    this.showAdThen(() => {
-                        this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
-                    });
-                },
-                secondButton: btnState.text,
-                secondOnConfirm: () => {
-                    if (btnState.disabled) return;
-                    this.doShareForReward('unlock', () => {
-                        this.tryConsumeTool(type, () => this.handleUnlockBox(lockedBox));
-                    });
-                },
-                height: 250,
-            });
+            this.renderAddBasketModal();
             return;
         }
 
-        if (this.tempHoles.length === 0) {
-            this.renderModal({
-                title: '提示',
-                sub: '果盘中没有果子',
-                button: '知道了',
-                height: 170,
-                onConfirm: () => {}
-            });
-            return;
-        }
-
-        const btnState = this.getHelpButtonState();
-        this.renderModal({
-            title: '清空果盘',
-            sub: '看一段广告即可清空暂存的果子，\n或者求助群友帮忙～',
-            button: '看广告清空',
-            onConfirm: () => {
-                this.showAdThen(() => {
-                    this.tryConsumeTool(type, () => {
-                        this.tempHoles = [];
-                        this.renderTopUI();
-                        this.checkWin();
-                    });
-                });
-            },
-            secondButton: btnState.text,
-            secondOnConfirm: () => {
-                if (btnState.disabled) return;
-                this.doShareForReward('clear', () => {
-                    this.tryConsumeTool(type, () => {
-                        this.tempHoles = [];
-                        this.renderTopUI();
-                        this.checkWin();
-                    });
-                });
-            },
-            height: 250,
-        });
+        // 不校验果盘是否有水果，直接弹窗，让用户可以继续往下操作
+        this.renderClearBasketModal();
     }
 
-    private showAdThen(callback: () => void) {
+    private showAdThen(callback: () => void, scene?: string) {
         const adManager = AdManager.getInstance();
         if (!adManager) {
             callback();
             return;
         }
         adManager.showRewardedAd().then(() => {
+            if (scene) {
+                reportEvent(scene);
+            }
             callback();
         }).catch(() => {
         });
@@ -1905,17 +2936,71 @@ export class GameManager extends Component {
         if (!allRemoved || this.tempHoles.length > 0) return;
 
         this.gameOver = true;
-        this.renderModal({
-            title: '通关成功',
-            sub: `太棒了，你已完成第 ${this.currentLevel} 关`,
-            button: '下一关',
-            height: 200,
-            onConfirm: () => {
-                this.currentLevel++;
-                saveProgress(this.currentLevel);
-                this.initGame();
+        // 延迟 1 秒弹出过关弹窗：等待最后一次小太阳收集动画完成并累加，保证弹窗数量取值正确
+        this.showSuccessModalAfterSettle(1.0);
+    }
+
+    /** 延迟弹出过关弹窗；若仍有果篮在滑出/待清除（小太阳未累加完），继续等待 */
+    private showSuccessModalAfterSettle(delay: number) {
+        this.scheduleOnce(() => {
+            const settling = this.boxes.some((box) => box.isSlidingOut || box.clearScheduled);
+            if (settling) {
+                this.showSuccessModalAfterSettle(0.3);
+            } else {
+                this.renderSuccessModal();
             }
-        });
+        }, delay);
+    }
+
+    private renderSuccessModal() {
+        if (!this.modalLayerNode) return;
+        
+        // 小太阳已在果篮清除时实时累加，这里无需重复
+
+        this.modalLayerNode.removeAllChildren();
+
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
+
+        // 成功弹窗：使用图片 panel_success.png
+        // 按照原图内容比例 (440 x 625) 设置宽高，避免拉伸变形
+        const panelW = 320;
+        const panelH = 454;
+        const panelNode = this.createNode('SuccessPanel', this.modalLayerNode, 0, 0, panelW, panelH);
+        
+        const panelSprite = panelNode.addComponent(Sprite);
+        panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_success/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && panelSprite && panelSprite.isValid) {
+                panelSprite.spriteFrame = sf;
+            }
+        }).catch(() => {});
+
+        // 阻止点击穿透到遮罩
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 动态填充 第几关
+        // 动态生成完整的"第 X 关"文字，在灰色背景框居中显示
+        this.createLabel(panelNode, `第 ${this.currentLevel} 关`, 0, 32, 40, new Color(0, 0, 0, 255), true);
+
+        // 动态填充小太阳数量，黑色字体
+        // 改为左对齐，防止数字过大向左挤压
+        const successSunsLabel = this.createLabel(panelNode, `x ${this.totalSuns}`, 0, -73, 40, new Color(0, 0, 0, 255), true);
+        const successSunsTransform = successSunsLabel.node.getComponent(UITransform);
+        if (successSunsTransform) successSunsTransform.setAnchorPoint(0, 0.5);
+        successSunsLabel.horizontalAlign = 0; // LEFT
+
+        // 下一关点击区域（隐形按钮）
+        // 调整坐标和大小，使其覆盖底部的按钮区域
+        const btnNextLevel = this.createNode('BtnNextLevel', panelNode, 0, -150, 220, 70);
+        btnNextLevel.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode?.removeAllChildren();
+            this.currentLevel++;
+            saveProgress(this.currentLevel);
+            this.initGame();
+        }, this);
     }
 
     private readonly FRUIT_BLOCK_COVERAGE = 0.3;
@@ -2131,25 +3216,47 @@ export class GameManager extends Component {
 
         const plateNode = this.createNode(`PlateVisual_${plate.id}`, pivotNode, -offsetX, -offsetY, plate.w, plate.h);
 
-        const shadow = this.createGraphicsNode('Shadow', plateNode, plate.w + 6, plate.h + 6, 6, -6);
-        this.drawPlateShape(shadow.getComponent(Graphics)!, plate.type, plate.w + 6, plate.h + 6, new Color(130, 110, 75, 120), 24, 0);
+        // 使用 Sprite 显示板子底图 (九宫格拉伸)
+        const bgSprite = plateNode.addComponent(Sprite);
+        bgSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        bgSprite.type = Sprite.Type.SLICED;
+        
+        // 随机生成浅色、偏蓝主题的半透明颜色
+        // R: 100-200, G: 180-240, B: 220-255
+        const r = 100 + Math.random() * 100;
+        const g = 180 + Math.random() * 60;
+        const b = 220 + Math.random() * 35;
+        bgSprite.color = new Color(r, g, b, 230); // 230 为半透明 (约 90% 不透明度)
 
+        if (this.plateSpriteFrame) {
+            bgSprite.spriteFrame = this.plateSpriteFrame;
+        } else {
+            resources.load('ui/plate/spriteFrame', SpriteFrame, (err, sf) => {
+                if (!err && sf && bgSprite && bgSprite.isValid) {
+                    bgSprite.spriteFrame = sf;
+                }
+            });
+        }
+
+        // 保留这两个变量名以防后续逻辑引用，但不绘制任何东西
+        const shadow = this.createGraphicsNode('Shadow', plateNode, plate.w, plate.h, 0, 0);
+        shadow.active = false;
         const face = this.createGraphicsNode('Face', plateNode, plate.w, plate.h, 0, 0);
-        this.drawPlateShape(face.getComponent(Graphics)!, plate.type, plate.w, plate.h, FACE_COLORS[plate.color], 22, 5, new Color(225, 210, 180, 200));
+        face.active = false;
 
         plate.fruits.filter((fruit) => !fruit.removed).forEach((fruit) => {
-            const fruitIconSize = 34;
+            // 将板子上的水果大小缩小至原来的 2/3 (34 * 2/3 ≈ 22.6, 取 23)
+            const fruitVisualSize = 23;
+            // 点击热区放大到 40x40，方便手指点按
+            const fruitTouchSize = 40;
             const localX = -plate.w / 2 + fruit.x;
             const localY = plate.h / 2 - fruit.y;
 
-            const fruitContainer = this.createNode(`FruitContainer_${fruit.id}`, plateNode, localX, localY, fruitIconSize, fruitIconSize);
+            const fruitContainer = this.createNode(`FruitContainer_${fruit.id}`, plateNode, localX, localY, fruitTouchSize, fruitTouchSize);
 
-            const holeShadow = this.createGraphicsNode('Hole', fruitContainer, fruitIconSize, fruitIconSize, 0, 0);
-            this.drawCircle(holeShadow.getComponent(Graphics)!, fruitIconSize / 2, new Color(80, 60, 30, 60), 0);
-
-            const fruitNode = this.createFruitVisual(fruitContainer, 0, 0, fruitIconSize, fruit.color, true);
+            const fruitNode = this.createFruitVisual(fruitContainer, 0, 0, fruitVisualSize, fruit.color, true);
             if (interactive) {
-                fruitNode.on(Node.EventType.TOUCH_END, (e) => {
+                fruitContainer.on(Node.EventType.TOUCH_END, (e) => {
                     e.propagationStopped = true;
                     this.handleFruitClick(plate, fruit);
                 }, this);
@@ -2161,6 +3268,26 @@ export class GameManager extends Component {
 
     private refreshPlateNode(plate: PlateData, angleOverride?: number) {
         if (!this.boardContentNode || plate.removed) return null;
+        
+        const pivotNode = this.plateNodes.get(plate.id);
+        if (pivotNode && pivotNode.isValid) {
+            pivotNode.angle = angleOverride ?? (plate.rotation || 0);
+            const plateNode = pivotNode.getChildByName(`PlateVisual_${plate.id}`);
+            if (plateNode) {
+                // 移除已经被消去的水果节点，避免整个板子重新生成导致的闪烁
+                plate.fruits.forEach((fruit) => {
+                    if (fruit.removed) {
+                        const fruitContainer = plateNode.getChildByName(`FruitContainer_${fruit.id}`);
+                        if (fruitContainer && fruitContainer.isValid) {
+                            fruitContainer.destroy();
+                        }
+                    }
+                });
+            }
+            return pivotNode;
+        }
+
+        // 降级：如果找不到现有的节点，则重新创建
         this.destroyPlateNode(plate.id);
         return this.createPlateNode(this.boardContentNode, plate, true, angleOverride);
     }
@@ -2203,30 +3330,32 @@ export class GameManager extends Component {
         // boxHeight 约为 120，中心点 0 是整个果篮（含提手）的中心
         // 有效盛放区域的中心大概在 Y = +5 左右
         if (capacity === 4) {
+            // 4孔上下分散
             return [
-                { x: -18, y: 18 },
-                { x: 18, y: 18 },
-                { x: -18, y: -8 },
-                { x: 18, y: -8 }
+                { x: -18, y: 24 },
+                { x: 18, y: 24 },
+                { x: -18, y: -10 },
+                { x: 18, y: -10 }
             ];
         }
         if (capacity === 5) {
             return [
-                { x: -20, y: 22 },
-                { x: 20, y: 22 },
-                { x: -20, y: -10 },
-                { x: 20, y: -10 },
-                { x: 0, y: 6 }
+                { x: -22, y: 28 },
+                { x: 22, y: 28 },
+                { x: 0, y: 6 },
+                { x: -18, y: -16 },
+                { x: 18, y: -16 }
             ];
         }
         if (capacity === 6) {
+            // 两个两个竖着排列，3行2列，适当留出间隔
             return [
-                { x: -16, y: 28 },
-                { x: -16, y: 4 },
-                { x: -16, y: -20 },
-                { x: 16, y: 28 },
-                { x: 16, y: 4 },
-                { x: 16, y: -20 }
+                { x: -16, y: 32 },
+                { x: 16, y: 32 },
+                { x: -16, y: 8 },
+                { x: 16, y: 8 },
+                { x: -16, y: -16 },
+                { x: 16, y: -16 }
             ];
         }
         return [
@@ -2257,30 +3386,48 @@ export class GameManager extends Component {
             const bodySprite = bodyNode.addComponent(Sprite);
             bodySprite.sizeMode = Sprite.SizeMode.CUSTOM;
 
-            // 锁状态的 X 覆盖层
+            // 锁状态的覆盖层 (不再画 X)
             const lockOverlayNode = this.createGraphicsNode('LockOverlay', boxNode, boxWidth, boxHeight, 0, 0);
             const lockOverlay = lockOverlayNode.getComponent(Graphics)!;
             lockOverlayNode.active = false;
 
-            // 中心水果图标 (半透明)
-            // 对齐中间孔位的中心点
+            // 中心水果图标 (半透明) - 用户要求去掉，隐藏
             const iconNode = this.createNode('FruitIcon', boxNode, 0, boxHeight * 0.08, 48, 48);
             const fruitIcon = iconNode.addComponent(Sprite);
             fruitIcon.sizeMode = Sprite.SizeMode.CUSTOM;
-            fruitIcon.color = new Color(255, 255, 255, 70); // 更透明，不抢夺底色
+            fruitIcon.color = new Color(255, 255, 255, 70);
+            iconNode.active = false;
             
-            // 底部中文标签 (精准对齐底部的白色标签框，往下挪)
-            const nameLabel = this.createLabel(boxNode, '', 0, -boxHeight / 2 + boxHeight * 0.15, 15, new Color(90, 60, 30, 255), true);
+            // 底部中文标签 (白色，字号变小)
+            const nameLabel = this.createLabel(boxNode, '', 0, -boxHeight / 2 + boxHeight * 0.15, 12, new Color(255, 255, 255, 255), true);
 
-            // 解锁文字：颜色改为深棕色，放在白色标签框的位置
-            const lockLabel = this.createLabel(boxNode, '解锁', 0, -boxHeight / 2 + boxHeight * 0.15, 15, new Color(90, 60, 30, 255), true);
+            // 解锁文字：图二样式 "解锁果篮"
+            const lockLabel = this.createLabel(boxNode, '解 锁\n果 篮', 0, 0, 18, new Color(255, 255, 255, 255), true);
+            const lockOutline = lockLabel.node.addComponent(LabelOutline);
+            if (lockOutline) {
+                lockOutline.color = new Color(30, 100, 30, 255); // 深绿色描边
+                lockOutline.width = 2;
+            }
+            lockLabel.lineHeight = 28; // 增加行间距使其上下更分散
             lockLabel.node.active = false;
 
             const slots: BoxSlotView[] = allSlotPositions.map((pos, slotIndex) => {
                 const slotNode = this.createNode(`SlotWrap_${slotIndex}`, boxNode, pos.x, pos.y, 24, 24);
-                const holeNode = this.createGraphicsNode(`Slot_${slotIndex}`, slotNode, 24, 24, 0, 0);
+                
+                // 给果篮的孔位也加上 Sprite 结构
+                const holeNode = this.createNode(`Slot_${slotIndex}`, slotNode, 0, 0, 26.4, 26.4); // 24 * 1.1 = 26.4
+                const holeSprite = holeNode.addComponent(Sprite);
+                holeSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+                resources.load('ui/hole/spriteFrame', SpriteFrame, (err, sf) => {
+                    if (!err && sf && holeSprite && holeSprite.isValid) {
+                        holeSprite.spriteFrame = sf;
+                    }
+                });
+                // 暂时保留 Graphics，以防其他地方报错，但不画东西
+                const holeGraphics = holeNode.addComponent(Graphics);
+                
                 const fruitHost = this.createNode(`FruitHost_${slotIndex}`, slotNode, 0, 0, 24, 24);
-                return { node: slotNode, hole: holeNode.getComponent(Graphics)!, fruitHost };
+                return { node: slotNode, hole: holeGraphics, fruitHost };
             });
 
             boxNode.on(Node.EventType.TOUCH_END, () => {
@@ -2302,24 +3449,57 @@ export class GameManager extends Component {
     private ensureTempSlotViews() {
         if (!this.tempContainerNode) return;
 
-        if (!this.tempBgGraphics) {
-            const containerW = this.screenWidth - 154;
-            const containerH = 30;
-            const bgNode = this.createGraphicsNode('TempBg', this.tempContainerNode, containerW, containerH, 0, 0);
-            this.tempBgGraphics = bgNode.getComponent(Graphics)!;
-        }
-
         if (this.tempSlotViews.length === this.maxTempHoles) return;
 
         const slotRadius = 12;
         const spacing = slotRadius * 2 + 5;
-        const startX = -spacing * 2;
+        const startX = -spacing * 2 - 15; // 孔位整体左移 15
+
+        // 小太阳图标 + 数量（在暂存区孔位右侧）
+        if (!this.sunCountLabel) {
+            const sunX = startX + this.maxTempHoles * spacing + 55; // 小太阳右移，与孔位拉开间距
+            // 新图 200x100（2:1），左侧太阳、右侧浅绿色数字底区
+            const iconH = 36; // 图标放大
+            const iconW = iconH * 2;
+            const sunNode = this.createNode('SunIcon', this.tempContainerNode, sunX, 0, iconW, iconH);
+            this.sunIconNode = sunNode;
+            const sunSprite = sunNode.addComponent(Sprite);
+            sunSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+            resources.load('ui/sun/spriteFrame', SpriteFrame, (err, sf) => {
+                if (!err && sf && sunSprite && sunSprite.isValid) {
+                    sunSprite.spriteFrame = sf;
+                }
+            });
+
+            // 数字居中显示在图片右侧浅绿色区域内（该区域中心约在图片宽度 74.5% 处）
+            const greenCenterOffsetX = (0.745 - 0.5) * iconW;
+            const labelNode = this.createNode('SunCount', this.tempContainerNode, sunX + greenCenterOffsetX, 0, iconW * 0.5, iconH);
+            this.sunCountLabel = labelNode.addComponent(Label);
+            this.sunCountLabel.fontSize = 17;
+            this.sunCountLabel.lineHeight = iconH;
+            this.sunCountLabel.color = new Color(46, 110, 30, 255);
+            this.sunCountLabel.string = `${this.totalSuns}`;
+            const labelTransform = labelNode.getComponent(UITransform);
+            if (labelTransform) labelTransform.setAnchorPoint(0.5, 0.5);
+            this.sunCountLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+            this.sunCountLabel.verticalAlign = Label.VerticalAlign.CENTER;
+            this.sunCountLabel.overflow = Label.Overflow.SHRINK;
+        }
         while (this.tempSlotViews.length < this.maxTempHoles) {
             const index = this.tempSlotViews.length;
             const slotNode = this.createNode(`TempSlotWrap_${index}`, this.tempContainerNode, startX + index * spacing, 0, slotRadius * 2, slotRadius * 2);
-            const holeNode = this.createGraphicsNode(`TempSlot_${index}`, slotNode, slotRadius * 2, slotRadius * 2, 0, 0);
-            const hole = holeNode.getComponent(Graphics)!;
-            this.drawCircle(hole, slotRadius, new Color(170, 155, 120, 255), 0);
+            
+            // 使用 Sprite 显示 hole 图
+            const holeNode = this.createNode(`TempSlot_${index}`, slotNode, 0, 0, slotRadius * 2.2, slotRadius * 2.2);
+            const holeSprite = holeNode.addComponent(Sprite);
+            holeSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+            resources.load('ui/hole/spriteFrame', SpriteFrame, (err, sf) => {
+                if (!err && sf && holeSprite && holeSprite.isValid) {
+                    holeSprite.spriteFrame = sf;
+                }
+            });
+            const hole = holeNode.addComponent(Graphics); // 保留 component 引用以兼容旧代码结构，但不绘制
+            
             const fruitHost = this.createNode(`TempFruitHost_${index}`, slotNode, 0, 0, slotRadius * 2, slotRadius * 2);
             this.tempSlotViews.push({ node: slotNode, hole, fruitHost });
         }
@@ -2343,19 +3523,34 @@ export class GameManager extends Component {
             const x = startX + index * (buttonWidth + gap);
             const btnNode = this.createNode(`ToolBtn_${tool.key}`, this.toolContainerNode!, x, 0, buttonWidth, buttonHeight);
 
-            const shadow = this.createGraphicsNode('Shadow', btnNode, buttonWidth + 6, buttonHeight + 6, 0, -2);
-            this.drawRoundedRect(shadow.getComponent(Graphics)!, buttonWidth + 6, buttonHeight + 6, new Color(180, 195, 160, 255), 18);
+            // 使用 Sprite 显示按钮背景
+            const btnSprite = btnNode.addComponent(Sprite);
+            btnSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+            btnSprite.type = Sprite.Type.SLICED;
+            const imageName = tool.key === 'add' ? 'btn_add_basket' : 'btn_clear_tray';
+            resources.load(`ui/${imageName}/spriteFrame`, SpriteFrame, (err, sf) => {
+                if (!err && sf && btnSprite && btnSprite.isValid) {
+                    btnSprite.spriteFrame = sf;
+                }
+            });
 
-            const body = this.createGraphicsNode('Body', btnNode, buttonWidth, buttonHeight, 0, 0);
-            this.drawRoundedRect(body.getComponent(Graphics)!, buttonWidth, buttonHeight, new Color(100, 155, 85, 255), 16, 5, new Color(145, 190, 120, 255));
+            // 恢复图标和文字显示
+            const iconLabel = this.createLabel(btnNode, tool.icon, 0, 10, 28, new Color(255, 255, 255, 255), false, 32);
+            
+            // 底部文字
+            const textLabel = this.createLabel(btnNode, tool.label, 0, -22, 14, new Color(255, 255, 255, 255), true);
+            const outline = textLabel.node.addComponent(LabelOutline);
+            if (outline) {
+                outline.color = new Color(50, 100, 150, 255); // 深蓝色描边
+                outline.width = 1.5;
+            }
 
-            const iconLabel = this.createLabel(btnNode, tool.icon, 0, 8, 28, new Color(255, 255, 255, 255), false, 32);
-            iconLabel.enableWrapText = false;
-            this.createLabel(btnNode, tool.label, 0, -22, 15, new Color(255, 255, 255, 255), true);
-
+            // 右上角的加号角标 (暂时隐藏，根据用户需求去掉)
             const badgeNode = this.createGraphicsNode('Badge', btnNode, 26, 26, badgeX, badgeY);
+            badgeNode.active = false;
             const badge = badgeNode.getComponent(Graphics)!;
             const badgeLabel = this.createLabel(btnNode, '+', badgeX, badgeY, 18, new Color(255, 255, 255, 255), true);
+            badgeLabel.node.active = false;
 
             btnNode.on(Node.EventType.TOUCH_END, () => {
                 this.useTool(tool.key);
@@ -2455,6 +3650,7 @@ export class GameManager extends Component {
     }
 
     private triggerVibration(type: 'light' | 'heavy' | 'success' = 'light') {
+        if (!this.vibrationEnabled) return;
         const platformApi = (globalThis as any).wx || (globalThis as any).tt;
         if (platformApi && typeof platformApi.vibrateShort === 'function') {
             try {
@@ -2584,6 +3780,43 @@ export class GameManager extends Component {
         }
     }
 
+    /** 绘制五角星 */
+    private drawStar(graphics: Graphics, size: number, fill: Color) {
+        graphics.clear();
+        graphics.fillColor = fill;
+        const spikes = 5;
+        const outerRadius = size / 2;
+        const innerRadius = size / 4;
+        graphics.moveTo(0, -outerRadius);
+        for (let i = 0; i < spikes * 2; i++) {
+            const radius = i % 2 === 0 ? innerRadius : outerRadius;
+            const angle = (i * Math.PI) / spikes - Math.PI / 2;
+            graphics.lineTo(Math.cos(angle) * radius, Math.sin(angle) * radius);
+        }
+        graphics.close();
+        graphics.fill();
+    }
+
+    /** 绘制小太阳（圆心 + 光芒） */
+    private drawSun(graphics: Graphics, radius: number, color: Color) {
+        graphics.clear();
+        graphics.fillColor = color;
+        graphics.strokeColor = color;
+        // 中心圆
+        graphics.circle(0, 0, radius);
+        graphics.fill();
+        // 8 条光芒
+        graphics.lineWidth = 1.5;
+        const rayInner = radius * 1.3;
+        const rayOuter = radius * 1.9;
+        for (let i = 0; i < 8; i++) {
+            const angle = (i * Math.PI) / 4;
+            graphics.moveTo(Math.cos(angle) * rayInner, Math.sin(angle) * rayInner);
+            graphics.lineTo(Math.cos(angle) * rayOuter, Math.sin(angle) * rayOuter);
+            graphics.stroke();
+        }
+    }
+
     private drawPlateShape(graphics: Graphics, type: 'circle' | 'rect', width: number, height: number, fill: Color, radius: number, lineWidth: number, stroke?: Color) {
         graphics.clear();
         if (type === 'circle') {
@@ -2659,11 +3892,11 @@ export class GameManager extends Component {
             }
             sprite.sizeMode = Sprite.SizeMode.CUSTOM;
             
-            resources.load(`avatar/Avatars${i+1}/spriteFrame`, SpriteFrame, (err, spriteFrame) => {
-                if (!err && spriteFrame) {
+            BundleManager.getInstance().loadAsset<SpriteFrame>(`avatar/Avatars${i+1}/spriteFrame`, SpriteFrame).then((spriteFrame) => {
+                if (spriteFrame) {
                     sprite.spriteFrame = spriteFrame;
                 }
-            });
+            }).catch(() => {});
         }
 
         // 提示文本：请输入你的果园代号
@@ -2763,11 +3996,17 @@ export class GameManager extends Component {
             const avatarNames = ['Avatars1', 'Avatars2', 'Avatars3', 'Avatars4', 'Avatars5', 'Avatars6'];
             let loaded = 0;
             avatarNames.forEach((name) => {
-                resources.load(`avatar/${name}/spriteFrame`, SpriteFrame, (err, spriteFrame) => {
+                BundleManager.getInstance().loadAsset<SpriteFrame>(`avatar/${name}/spriteFrame`, SpriteFrame).then((spriteFrame) => {
                     loaded++;
-                    if (!err && spriteFrame) {
+                    if (spriteFrame) {
                         this.defaultAvatarFrames.push(spriteFrame);
                     }
+                    if (loaded === avatarNames.length) {
+                        this.defaultAvatarsLoaded = true;
+                        resolve();
+                    }
+                }).catch(() => {
+                    loaded++;
                     if (loaded === avatarNames.length) {
                         this.defaultAvatarsLoaded = true;
                         resolve();
@@ -2806,9 +4045,20 @@ export class GameManager extends Component {
     private async loadFruitSprites(): Promise<void> {
         if (this.fruitsLoaded) return;
         return new Promise((resolve) => {
-            const fruitNames = ['Red Apple', 'Lemon', 'Peach', 'Orange', 'Pear', 'Eggplant', 'Сorn', 'Carrot', 'Rainbow Fruit'];
+            // 所有水果从 resources 主包加载
+            const regularFruits = ['Red Apple', 'Lemon', 'Peach', 'Orange', 'Pear', 'Eggplant', 'Сorn', 'Carrot', 'Rainbow Fruit'];
+            const totalCount = regularFruits.length;
             let loaded = 0;
-            fruitNames.forEach((name) => {
+
+            const tryResolve = () => {
+                if (loaded === totalCount) {
+                    this.fruitsLoaded = true;
+                    console.log(`[Fruit] loaded ${this.fruitSprites.size}/${totalCount} fruit sprites`);
+                    resolve();
+                }
+            };
+
+            regularFruits.forEach((name) => {
                 resources.load(`fruits/${name}/spriteFrame`, SpriteFrame, (err, spriteFrame) => {
                     loaded++;
                     if (!err && spriteFrame) {
@@ -2816,45 +4066,56 @@ export class GameManager extends Component {
                     } else {
                         console.warn(`[Fruit] failed to load ${name}:`, err);
                     }
-                    if (loaded === fruitNames.length) {
-                        this.fruitsLoaded = true;
-                        console.log(`[Fruit] loaded ${this.fruitSprites.size}/${fruitNames.length} fruit sprites`);
-                        resolve();
-                    }
+                    tryResolve();
                 });
             });
         });
     }
 
-    /** 加载灰度果篮底图（用于运行时动态染色） */
+    /** 加载灰度果篮底图和板子底图（用于运行时动态染色） */
     private async loadBasketBase(): Promise<void> {
-        if (this.basketSpriteFrame) return;
         return new Promise((resolve) => {
-            resources.load('baskets/basket_base/spriteFrame', SpriteFrame, (err, spriteFrame) => {
-                if (!err && spriteFrame) {
-                    this.basketSpriteFrame = spriteFrame;
-                    console.log('[Basket] loaded grayscale basket base');
-                } else {
-                    console.warn('[Basket] failed to load basket base, fallback to drawing:', err);
-                }
-                resolve();
-            });
+            let loaded = 0;
+            const checkDone = () => {
+                loaded++;
+                if (loaded === 2) resolve();
+            };
+            
+            if (!this.basketSpriteFrame) {
+                resources.load('ui/basket/spriteFrame', SpriteFrame, (err, spriteFrame) => {
+                    if (!err && spriteFrame) {
+                        this.basketSpriteFrame = spriteFrame;
+                    }
+                    checkDone();
+                });
+            } else {
+                checkDone();
+            }
+
+            if (!this.plateSpriteFrame) {
+                resources.load('ui/plate/spriteFrame', SpriteFrame, (err, spriteFrame) => {
+                    if (!err && spriteFrame) {
+                        this.plateSpriteFrame = spriteFrame;
+                    }
+                    checkDone();
+                });
+            } else {
+                checkDone();
+            }
         });
     }
 
     /** 预加载分享卡片图片（转换为本地可访问路径） */
     private preloadShareImages() {
         if (typeof wx === 'undefined') return;
-        // 所有分享场景统一用摘呀摘呀摘这张图
-        resources.load('share/摘呀摘呀摘', ImageAsset, (err, asset) => {
-            if (!err && asset) {
-                const url = asset.nativeUrl;
-                this.shareImageUrls['unlock'] = url;
-                this.shareImageUrls['revive'] = url;
-                this.shareImageUrls['win'] = url;
-                this.shareImageUrls['clear'] = url;
-            }
-        });
+        // 所有分享场景统一用摘呀摘呀摘这张图（从分包加载）
+        BundleManager.getInstance().loadAsset<ImageAsset>('share/摘呀摘呀摘', ImageAsset).then((asset) => {
+            const url = asset.nativeUrl;
+            this.shareImageUrls['unlock'] = url;
+            this.shareImageUrls['revive'] = url;
+            this.shareImageUrls['win'] = url;
+            this.shareImageUrls['clear'] = url;
+        }).catch(() => {});
 
         // 开启右上角三个点的分享菜单
         wx.showShareMenu({
@@ -3252,7 +4513,6 @@ export class GameManager extends Component {
         this.tempSlotViews = [];
         this.toolViews = [];
         this.setupLayout();
-        this.initGame();
         this.renderAll();
     }
 }

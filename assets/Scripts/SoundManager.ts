@@ -28,7 +28,8 @@ export class SoundManager extends Component {
             if (platform && platform.createInnerAudioContext) {
                 this.innerAudio = platform.createInnerAudioContext();
                 this.innerAudio.loop = true;
-                this.innerAudio.volume = this.bgmVolume;
+                const storedSound = localStorage.getItem('soundEnabled');
+                this.innerAudio.volume = storedSound === 'false' ? 0 : this.bgmVolume;
                 this.innerAudio.autoplay = false;
                 this.innerAudio.src = 'bgm.mp3';
                 this.innerAudio.onError((err: any) => {
@@ -59,6 +60,15 @@ export class SoundManager extends Component {
             }
         } catch (e) {
             console.warn('BGM stop failed:', e);
+        }
+    }
+
+    setMute(isMuted: boolean) {
+        if (!this.innerAudio) return;
+        try {
+            this.innerAudio.volume = isMuted ? 0 : this.bgmVolume;
+        } catch (e) {
+            console.warn('Set mute failed:', e);
         }
     }
 

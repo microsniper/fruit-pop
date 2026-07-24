@@ -292,6 +292,95 @@ export const saveProgress = async (levelNum: number): Promise<void> => {
   }
 }
 
+// ========== 游戏配置 ==========
+
+export interface GameConfigWeights {
+  temp: number
+  click: number
+  block: number
+}
+
+export interface GameConfigCapacityRange {
+  max: number
+  w3?: number
+  w4?: number
+  w5?: number
+  w6?: number
+}
+
+export interface GameConfigToolCosts {
+  addBasket: number
+  clearTray: number
+}
+
+export interface GameConfig {
+  challengeInterval: number
+  normalWeights: GameConfigWeights
+  challengeWeights: GameConfigWeights
+  boxCapacity: GameConfigCapacityRange[]
+  toolCosts: GameConfigToolCosts
+}
+
+/** 缓存的游戏配置 */
+let cachedGameConfig: GameConfig | null = null
+
+export const fetchGameConfig = async (): Promise<GameConfig> => {
+  try {
+    if (cachedGameConfig) {
+      return cachedGameConfig
+    }
+
+    let hasToken = false;
+    if (platform) {
+        hasToken = !!token || !!platform.getStorageSync('token');
+    } else {
+        hasToken = !!token || !!localStorage.getItem('token');
+    }
+    if (!hasToken) {
+      await loginAndGetProgress()
+    }
+
+    const res = await request<GameConfig>({
+      url: '/api/game/config',
+      method: 'POST',
+      data: {
+        gameType: GameTypeEnum.FRUIT_PICKING
+      }
+    })
+    cachedGameConfig = res.data
+    console.log('[API] game config loaded:', cachedGameConfig)
+    return cachedGameConfig
+  } catch (e) {
+    console.error('[API] fetch game config failed, using default:', e)
+    return getDefaultGameConfig()
+  }
+}
+
+/** 兜底：代码内置默认配置 */
+export const getDefaultGameConfig = (): GameConfig => {
+  return {
+    challengeInterval: 5,
+    normalWeights: { temp: 20, click: 30, block: 60 },
+    challengeWeights: { temp: 10, click: 20, block: 60 },
+    toolCosts: { addBasket: 20, clearTray: 20 },
+    boxCapacity: [
+      { max: 6,  w3: 100 },
+      { max: 11, w3: 85,  w4: 15 },
+      { max: 16, w3: 65,  w4: 35 },
+      { max: 21, w3: 50,  w4: 35,  w5: 15 },
+      { max: 27, w3: 40,  w4: 35,  w5: 25 },
+      { max: 35, w3: 25,  w4: 35,  w5: 30,  w6: 10 },
+      { max: 45, w3: 15,  w4: 35,  w5: 35,  w6: 15 },
+      { max: 999, w3: 10, w4: 30,  w5: 35,  w6: 25 }
+    ]
+  }
+}
+
+/** 获取当前缓存的游戏配置（不发起网络请求） */
+export const getGameConfig = (): GameConfig => {
+  return cachedGameConfig || getDefaultGameConfig()
+}
+
 export interface RankItem {
   rank: number
   userId: number
@@ -382,6 +471,19 @@ export const updateProfile = async (nickname: string, avatarUrl: string): Promis
  * 消耗一次当天的分享奖励次数
  * 如果后端返回 HTTP 403 或者业务 code 表明超限，会进入 catch 或返回 false
  */
+/**
+ * 埋点上报（异步，不等待结果）
+ */
+export const reportEvent = (scene: string) => {
+  request({
+    url: '/api/game/event/report',
+    method: 'POST',
+    data: { scene }
+  }).catch(() => {
+    // 埋点失败不影响游戏
+  });
+}
+
 export const consumeShareCount = async (): Promise<{ success: boolean, isLimit: boolean }> => {
   try {
     const res = await request({

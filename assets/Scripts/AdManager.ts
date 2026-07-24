@@ -83,13 +83,8 @@ export class AdManager extends Component {
                     this.isAdReady = false;
                 })
                 .catch(() => {
-                    this.rewardedVideoAd.load()
-                        .then(() => this.rewardedVideoAd.show())
-                        .catch(() => {
-                            this.pendingResolve = null;
-                            this.pendingReject = null;
-                            resolve();
-                        });
+                    // show() 失败时静默处理，由 onClose 决定实际结果
+                    // 避免在用户关闭广告时触发 operateWXDataForAd 错误
                 });
         });
     }
