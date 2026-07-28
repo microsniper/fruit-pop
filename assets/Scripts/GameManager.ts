@@ -684,6 +684,9 @@ export class GameManager extends Component {
         this.tempBgGraphics = null;
         this.tempSlotViews = [];
         this.toolViews = [];
+        // 重建布局时太阳/设置排行榜按钮的旧节点已销毁，置空引用触发重建
+        this.sunCountLabel = null;
+        this.sunIconNode = null;
 
         this.rootNode = new Node('GameRoot');
         this.rootNode.layer = Layers.Enum.UI_2D;
@@ -803,32 +806,7 @@ export class GameManager extends Component {
         badge.setSiblingIndex(0);
         this.drawRoundedRect(badge.getComponent(Graphics)!, 130, 44, new Color(130, 160, 90, 255), 22);
 
-        const rankBtnX = -this.screenWidth / 2 + 50;
-        const settingsBtnNode = this.createNode('SettingsBtn', this.topAreaNode, rankBtnX, topInnerY + 16, 38, 38);
-        
-        const settingsSprite = settingsBtnNode.addComponent(Sprite);
-        settingsSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        resources.load('ui/btn_settings/spriteFrame', SpriteFrame, (err, sf) => {
-            if (!err && sf && settingsSprite && settingsSprite.isValid) {
-                settingsSprite.spriteFrame = sf;
-            }
-        });
-
-        settingsBtnNode.on(Node.EventType.TOUCH_END, () => {
-            this.renderSettingsModal(true);
-        }, this);
-
-        // 排行榜按钮（设置按钮右边）
-        const rankBtnX2 = rankBtnX + 48;
-        const rankBtnNode = this.createNode('RankBtn', this.topAreaNode, rankBtnX2, topInnerY + 16, 38, 38);
-        this.createLabel(rankBtnNode, '🏆', 0, 0, 28, new Color(255, 255, 255, 255), true);
-        rankBtnNode.on(Node.EventType.TOUCH_END, () => {
-            this.handleRankButtonClick();
-        }, this);
-
-        // 未授权用户：在排行榜按钮上叠加微信原生授权按钮，
-        // 点击即由微信自动串起「官方隐私弹窗 → 昵称头像授权弹窗」
-        this.setupRankAuthOverlay(rankBtnNode);
+        // 设置+排行榜按钮已移至暂存区左侧（ensureTempSlotViews），与小太阳对称
 
         this.progressLabel = null;
     }
@@ -3321,7 +3299,7 @@ export class GameManager extends Component {
         const bgSprite = plateNode.addComponent(Sprite);
         bgSprite.sizeMode = Sprite.SizeMode.CUSTOM;
         bgSprite.type = Sprite.Type.SLICED;
-        
+
         // 随机生成浅色、偏蓝主题的半透明颜色
         // R: 100-200, G: 180-240, B: 220-255
         const r = 100 + Math.random() * 100;
@@ -3562,6 +3540,33 @@ export class GameManager extends Component {
             // 新图 200x100（2:1），左侧太阳、右侧浅绿色数字底区
             const iconH = 36; // 图标放大
             const iconW = iconH * 2;
+
+            // 设置+排行榜按钮（btn_settings.png 160x80 整图，2:1），放在暂存区左侧、与小太阳镜像对称
+            const comboX = -sunX;
+            const comboBtnNode = this.createNode('SettingsRankBtn', this.tempContainerNode, comboX, 0, iconW, iconH);
+            const comboSprite = comboBtnNode.addComponent(Sprite);
+            comboSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+            resources.load('ui/btn_settings/spriteFrame', SpriteFrame, (err, sf) => {
+                if (!err && sf && comboSprite.isValid) {
+                    comboSprite.spriteFrame = sf;
+                }
+            });
+
+            // 图片背景不透明不切分，用左右两个透明热区分别响应点击
+            const settingsHit = this.createNode('SettingsHit', comboBtnNode, -iconW / 4, 0, iconW / 2, iconH);
+            settingsHit.on(Node.EventType.TOUCH_END, () => {
+                this.renderSettingsModal(true);
+            }, this);
+
+            const rankHit = this.createNode('RankHit', comboBtnNode, iconW / 4, 0, iconW / 2, iconH);
+            rankHit.on(Node.EventType.TOUCH_END, () => {
+                this.handleRankButtonClick();
+            }, this);
+
+            // 未授权用户：在排行榜热区上叠加微信原生授权按钮，
+            // 点击即由微信自动串起「官方隐私弹窗 → 昵称头像授权弹窗」
+            this.setupRankAuthOverlay(rankHit);
+
             const sunNode = this.createNode('SunIcon', this.tempContainerNode, sunX, 0, iconW, iconH);
             this.sunIconNode = sunNode;
             const sunSprite = sunNode.addComponent(Sprite);
@@ -4394,7 +4399,7 @@ export class GameManager extends Component {
 
     private renderRankPage(list: RankItem[], myRank: RankItem | null) {
         this.closeRankPage();
-        // 排行榜页会销毁主界面，原生授权按钮一并销毁（返回时随 buildStaticTopUI 重建）
+        // 排行榜页会销毁主界面，原生授权按钮一并销毁（返回时随 ensureTempSlotViews 重建）
         this.destroyRankAuthOverlay();
         if (this.rootNode) {
             this.rootNode.removeAllChildren();
@@ -4413,6 +4418,9 @@ export class GameManager extends Component {
         this.boxViews = [];
         this.tempSlotViews = [];
         this.toolViews = [];
+        // 太阳/设置排行榜按钮随主界面销毁，置空以便返回游戏时重建
+        this.sunCountLabel = null;
+        this.sunIconNode = null;
 
         const pageW = this.screenWidth;
         const pageH = this.screenHeight;
