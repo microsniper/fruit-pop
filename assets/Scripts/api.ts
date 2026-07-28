@@ -46,6 +46,7 @@ const SECRET_KEY = "X9vP2xL5mN8qR1sT4wY7zB0cJ3fH6gD9";
 
 let token: string | null = null;
 let currentLevel = 1;
+let dailyRewardClaimable = false;
 
 try {
     if (platform) {
@@ -84,12 +85,16 @@ const request = async <T = any>(options: any, isRetry: boolean = false): Promise
       headers['X-Sign'] = md5(strToSign);
 
       if (!platform) {
+          const controller = new AbortController();
+          const timeoutId = setTimeout(() => controller.abort(), 15000);
           fetch(BASE_URL + options.url, {
               method: options.method || 'GET',
               headers: headers,
-              body: options.data ? JSON.stringify(options.data) : undefined
+              body: options.data ? JSON.stringify(options.data) : undefined,
+              signal: controller.signal
           })
           .then(async res => {
+              clearTimeout(timeoutId);
               if (res.status === 401) {
                   reject({ status: 401, message: 'Unauthorized' });
                   return;
@@ -106,7 +111,14 @@ const request = async <T = any>(options: any, isRetry: boolean = false): Promise
                   reject(new Error(data.message || '请求失败'))
               }
           })
-          .catch(reject);
+          .catch(err => {
+              clearTimeout(timeoutId);
+              if (err.name === 'AbortError') {
+                  reject(new Error('请求超时'));
+              } else {
+                  reject(err);
+              }
+          });
           return;
       }
 
@@ -115,6 +127,7 @@ const request = async <T = any>(options: any, isRetry: boolean = false): Promise
         ...options,
         url: BASE_URL + options.url,
         header: headers,
+        timeout: 15000,
         success: (res: any) => {
           if (res.statusCode === 401) {
             reject({ status: 401, message: 'Unauthorized' });
@@ -183,7 +196,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
         console.log('[API] wx.login success, code:', code);
     }
 
-    const res = await request<{ token: string; openid: string; source: SourceEnum; hasProfile: boolean; isNewUser: boolean; progress: { gameType: GameTypeEnum; levelNum: number } }>({
+    const res = await request<{ token: string; openid: string; source: SourceEnum; hasProfile: boolean; isNewUser: boolean; dailyRewardClaimable: boolean; progress: { gameType: GameTypeEnum; levelNum: number } }>({
       url: '/api/game/login',
       method: 'POST',
       data: {
@@ -192,8 +205,9 @@ export const loginAndGetProgress = async (): Promise<number> => {
         source: currentSource
       }
     });
-    console.log('[API] login response, levelNum:', res.data?.progress?.levelNum, 'hasProfile:', res.data?.hasProfile, 'isNewUser:', res.data?.isNewUser);
+    console.log('[API] login response, levelNum:', res.data?.progress?.levelNum, 'hasProfile:', res.data?.hasProfile, 'isNewUser:', res.data?.isNewUser, 'dailyRewardClaimable:', res.data?.dailyRewardClaimable);
     token = res.data.token;
+    dailyRewardClaimable = res.data?.dailyRewardClaimable ?? false;
     if (token) {
         if (platform) {
             platform.setStorageSync('token', token);
@@ -236,7 +250,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
                 const loginRes = await new Promise<any>((resolve, reject) => {
                     loginFunc({ success: resolve, fail: reject });
                 });
-                const res = await request<{ token: string; hasProfile: boolean; progress: { levelNum: number } }>({
+                const res = await request<{ token: string; hasProfile: boolean; dailyRewardClaimable: boolean; progress: { levelNum: number } }>({
                     url: '/api/game/login',
                     method: 'POST',
                     data: {
@@ -250,6 +264,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
                     platform.setStorageSync('token', token);
                     platform.setStorageSync('hasProfile', res.data?.hasProfile);
                 }
+                dailyRewardClaimable = res.data?.dailyRewardClaimable ?? false;
                 const serverLevel = res.data.progress?.levelNum || 1;
                 setLocalLevel(serverLevel);
                 console.log('[API] fallback success, level:', serverLevel);
@@ -319,6 +334,7 @@ export interface GameConfig {
   challengeWeights: GameConfigWeights
   boxCapacity: GameConfigCapacityRange[]
   toolCosts: GameConfigToolCosts
+  dailyLoginReward: number
 }
 
 /** 缓存的游戏配置 */
@@ -363,6 +379,7 @@ export const getDefaultGameConfig = (): GameConfig => {
     normalWeights: { temp: 20, click: 30, block: 60 },
     challengeWeights: { temp: 10, click: 20, block: 60 },
     toolCosts: { addBasket: 20, clearTray: 20 },
+    dailyLoginReward: 200,
     boxCapacity: [
       { max: 6,  w3: 100 },
       { max: 11, w3: 85,  w4: 15 },
@@ -379,6 +396,18 @@ export const getDefaultGameConfig = (): GameConfig => {
 /** 获取当前缓存的游戏配置（不发起网络请求） */
 export const getGameConfig = (): GameConfig => {
   return cachedGameConfig || getDefaultGameConfig()
+}
+
+/** 今日是否可领取每日登录奖励 */
+export const isDailyRewardClaimable = (): boolean => dailyRewardClaimable;
+
+/** 领取每日登录奖励 */
+export const claimDailyReward = async (): Promise<{ success: boolean; amount: number }> => {
+  const res = await request<{ success: boolean; amount: number }>({
+    url: '/api/game/daily-reward/claim',
+    method: 'POST'
+  })
+  return res.data
 }
 
 export interface RankItem {

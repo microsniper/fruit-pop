@@ -1,5 +1,5 @@
-import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources, ImageAsset, ScrollView, EditBox, LabelOutline, UIOpacity } from 'cc';
-import { saveProgress, loginAndGetProgress, fetchRank, RankItem, consumeShareCount, hasUserProfile, updateProfile, reportEvent, fetchGameConfig, GameConfig } from './api';
+import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, view, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources, ImageAsset, ScrollView, LabelOutline, UIOpacity, assetManager, Texture2D } from 'cc';
+import { saveProgress, loginAndGetProgress, fetchRank, RankItem, consumeShareCount, hasUserProfile, updateProfile, reportEvent, fetchGameConfig, GameConfig, getGameConfig, isDailyRewardClaimable, claimDailyReward } from './api';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
 import { BundleManager } from './BundleManager';
@@ -222,6 +222,8 @@ export class GameManager extends Component {
     private toolContainerNode: Node | null = null;
     private modalLayerNode: Node | null = null;
     private rankPageNode: Node | null = null;
+    /** 覆盖在排行榜按钮上的微信原生授权按钮（createUserInfoButton） */
+    private rankAuthBtn: any = null;
     private defaultAvatarsLoaded = false;
     private defaultAvatarFrames: SpriteFrame[] = [];
     private fruitSprites: Map<string, SpriteFrame> = new Map();
@@ -304,11 +306,9 @@ export class GameManager extends Component {
     async start() {
         this.setupLayout();
 
-        if (typeof wx !== 'undefined' && typeof wx.onNeedPrivacyAuthorization === 'function') {
-            wx.onNeedPrivacyAuthorization((resolve: any) => {
-                resolve({ buttonId: 'agree', event: 'agree' });
-            });
-        }
+        // 注意：不要注册 wx.onNeedPrivacyAuthorization 自动同意，
+        // 否则微信官方隐私弹窗不会出现，且违反微信隐私规范。
+        // 由 wx.requirePrivacyAuthorize 触发微信官方的隐私弹窗。
 
         // 恢复小太阳数量
         const storedSuns = localStorage.getItem('totalSuns');
@@ -337,6 +337,7 @@ export class GameManager extends Component {
         const delay = Math.max(0, 2.0 - elapsed);
         this.scheduleOnce(() => {
             this.hideLoadingOverlay();
+            this.scheduleOnce(() => this.showDailyRewardIfNeeded(), 0.35);
             this.scheduleOnce(() => this.showTutorialIfNeeded(), 0.35);
         }, delay);
     }
@@ -368,6 +369,92 @@ export class GameManager extends Component {
 
     private showRainbowTutorial() {
         this.renderCommonTip('🌈 彩虹果！', '彩虹果是万能果实！\n✨ 它可以放入任意果篮，无视颜色\n哪里有空位就能去哪里\n\n合理利用彩虹果，轻松过关～');
+    }
+
+    /** 每日登录奖励弹窗 */
+    private showDailyRewardIfNeeded() {
+        if (!isDailyRewardClaimable()) return;
+        const amount = getGameConfig()?.dailyLoginReward ?? 200;
+        this.renderDailyRewardModal(amount);
+    }
+
+    private renderDailyRewardModal(amount: number) {
+        if (!this.modalLayerNode) return;
+        this.modalLayerNode.removeAllChildren();
+
+        // 遮罩
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
+
+        // 面板：复用 panel_common_tip 尺寸
+        const panelW = 310;
+        const panelNode = this.createNode('DailyRewardPanel', this.modalLayerNode, 0, 0, panelW, panelW * 461 / 421);
+        const panelTransform = panelNode.getComponent(UITransform)!;
+        const sprite = panelNode.addComponent(Sprite);
+        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_common_tip/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && sprite && sprite.isValid) {
+                sprite.spriteFrame = sf;
+                const rect = sf.rect;
+                if (rect && rect.width > 0) {
+                    panelTransform.setContentSize(panelW, panelW * rect.height / rect.width);
+                }
+            }
+        }).catch(() => {});
+
+        // 阻止点击穿透
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 标题
+        this.createLabel(panelNode, '🎁 每日登录领好礼', 0, 0.183 * panelTransform.height, 25, new Color(96, 64, 32, 255), true);
+
+        // 内容
+        const contentNode = this.createNode('RewardContent', panelNode, 0, -0.10 * panelTransform.height, panelW * 0.80, panelTransform.height * 0.435);
+        const contentLabel = contentNode.addComponent(Label);
+        contentLabel.string = `今日登录奖励\n+${amount} 小太阳☀️`;
+        contentLabel.fontSize = 20;
+        contentLabel.lineHeight = 32;
+        contentLabel.color = new Color(96, 64, 32, 255);
+        contentLabel.isBold = true;
+        contentLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+        contentLabel.verticalAlign = Label.VerticalAlign.CENTER;
+        contentLabel.overflow = Label.Overflow.SHRINK;
+
+        // 领取按钮
+        const btnClaim = this.createNode('BtnClaim', panelNode, 0, -0.415 * panelTransform.height, panelW * 0.5, 56);
+        const btnLabel = this.createLabel(btnClaim, '领取', 0, 0, 22, new Color(255, 255, 255, 255), true);
+        btnClaim.on(Node.EventType.TOUCH_END, () => {
+            // 禁用按钮防止重复点击
+            btnClaim.off(Node.EventType.TOUCH_END);
+            btnLabel.color = new Color(180, 180, 180, 255);
+
+            claimDailyReward().then((res) => {
+                if (res.success && res.amount > 0) {
+                    this.totalSuns += res.amount;
+                    if (typeof wx !== 'undefined' && wx.setStorageSync) {
+                        wx.setStorageSync('totalSuns', this.totalSuns.toString());
+                    } else {
+                        localStorage.setItem('totalSuns', this.totalSuns.toString());
+                    }
+                    if (this.sunCountLabel && this.sunCountLabel.isValid) {
+                        this.sunCountLabel.string = `${this.totalSuns}`;
+                    }
+                }
+                this.modalLayerNode!.removeAllChildren();
+            }).catch(() => {
+                // 领取失败，恢复按钮
+                btnLabel.color = new Color(255, 255, 255, 255);
+                btnClaim.on(Node.EventType.TOUCH_END, () => {
+                    // 重试
+                });
+            });
+        }, this);
+
+        // 从小到大弹出
+        panelNode.setScale(new Vec3(0.6, 0.6, 1));
+        tween(panelNode).to(0.25, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
     }
 
     private showChallengeTip() {
@@ -731,6 +818,18 @@ export class GameManager extends Component {
             this.renderSettingsModal(true);
         }, this);
 
+        // 排行榜按钮（设置按钮右边）
+        const rankBtnX2 = rankBtnX + 48;
+        const rankBtnNode = this.createNode('RankBtn', this.topAreaNode, rankBtnX2, topInnerY + 16, 38, 38);
+        this.createLabel(rankBtnNode, '🏆', 0, 0, 28, new Color(255, 255, 255, 255), true);
+        rankBtnNode.on(Node.EventType.TOUCH_END, () => {
+            this.handleRankButtonClick();
+        }, this);
+
+        // 未授权用户：在排行榜按钮上叠加微信原生授权按钮，
+        // 点击即由微信自动串起「官方隐私弹窗 → 昵称头像授权弹窗」
+        this.setupRankAuthOverlay(rankBtnNode);
+
         this.progressLabel = null;
     }
 
@@ -784,13 +883,10 @@ export class GameManager extends Component {
         this.ensurePrimaryBoxes();
         this.renderAll();
 
-        // 关卡含彩虹果且首次出现时，弹出提示
-        if (!rainbowIntroduced) {
-            const hasRainbowInLevel = this.plates.some(p => p.fruits?.some(s => !s.removed && s.color === FruitColor.RAINBOW));
-            if (hasRainbowInLevel) {
-                rainbowIntroduced = true;
-                this.scheduleOnce(() => this.showRainbowTutorial(), 0.5);
-            }
+        // 彩虹果提示：仅第 6 关弹出（彩虹果从第 6 关开始出现）
+        if (this.currentLevel === 6 && !rainbowIntroduced) {
+            rainbowIntroduced = true;
+            this.scheduleOnce(() => this.showRainbowTutorial(), 0.5);
         }
 
         // 挑战关卡，弹出挑战提示
@@ -1366,11 +1462,11 @@ export class GameManager extends Component {
 
         const panelSprite = panelNode.addComponent(Sprite);
         panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        resources.load('ui/panel_basket_unlock/spriteFrame', SpriteFrame, (err, spriteFrame) => {
-            if (!err && spriteFrame && panelSprite && panelSprite.isValid) {
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_basket_unlock/spriteFrame', SpriteFrame).then((spriteFrame) => {
+            if (spriteFrame && panelSprite && panelSprite.isValid) {
                 panelSprite.spriteFrame = spriteFrame;
             }
-        });
+        }).catch(() => {});
 
         // 阻止点击穿透到遮罩
         panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
@@ -1463,6 +1559,8 @@ export class GameManager extends Component {
 
     private renderSettingsModal(show: boolean) {
         if (!this.modalLayerNode) return;
+        // 设置弹窗打开期间隐藏排行榜上的原生授权按钮，避免误拦截点击
+        this.setRankAuthOverlayVisible(!show);
         if (!show) {
             this.modalLayerNode.removeAllChildren();
             return;
@@ -2911,6 +3009,9 @@ export class GameManager extends Component {
             }
             callback();
         }).catch(() => {
+            if (scene) {
+                reportEvent(scene + '_skip');
+            }
         });
     }
 
@@ -3831,163 +3932,146 @@ export class GameManager extends Component {
     }
 
     private handleRankButtonClick() {
+        // 非微信环境或无 wx api：直接进排行榜
+        if (typeof wx === 'undefined') {
+            this.loadAndShowRank();
+            return;
+        }
+        // 已有档案：直接进排行榜
         if (hasUserProfile()) {
             this.loadAndShowRank();
-        } else {
-            this.showProfilePanel();
+            return;
+        }
+        // 未授权时点击本应被原生授权按钮拦截，走到这里说明原生按钮创建失败。
+        // 兜底：曾授权过则直接取用户信息，否则提示需要授权（不放行进榜）
+        wx.getSetting({
+            success: (settingRes: any) => {
+                const authSetting = settingRes.authSetting || {};
+                if (authSetting['scope.userInfo'] === true) {
+                    wx.getUserInfo({
+                        success: (userRes: any) => {
+                            this.saveAndEnterRank(userRes.userInfo);
+                        },
+                        fail: () => {
+                            this.showAuthRequiredToast();
+                        }
+                    });
+                } else {
+                    this.showAuthRequiredToast();
+                }
+            },
+            fail: () => {
+                this.showAuthRequiredToast();
+            }
+        });
+    }
+
+    private showAuthRequiredToast() {
+        if (typeof wx !== 'undefined' && typeof wx.showToast === 'function') {
+            wx.showToast({ title: '授权后才能查看排行榜', icon: 'none' });
         }
     }
 
-    private showProfilePanel() {
-        if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+    /**
+     * 在排行榜按钮位置叠加透明的微信原生授权按钮。
+     * 点击后微信自动串起「官方隐私弹窗 → 昵称头像授权弹窗」，
+     * 任一步取消都不进入排行榜。
+     * 坐标换算：节点世界包围盒 → view 缩放/视口偏移 → 屏幕逻辑像素，全设备通用。
+     */
+    private setupRankAuthOverlay(targetNode: Node) {
+        if (typeof wx === 'undefined' || typeof wx.createUserInfoButton !== 'function') return;
+        if (hasUserProfile()) return;
+        this.destroyRankAuthOverlay();
 
-        const page = this.createNode('ProfilePage', this.modalLayerNode, 0, 0, this.screenWidth, this.screenHeight);
-        
-        // 黑色半透明背景
-        const maskNode = this.createGraphicsNode('Mask', page, this.screenWidth, this.screenHeight, 0, 0);
-        const g = maskNode.getComponent(Graphics)!;
-        g.fillColor = new Color(0, 0, 0, 180);
-        g.fillRect(-this.screenWidth/2, -this.screenHeight/2, this.screenWidth, this.screenHeight);
+        // 延迟一帧：等待节点世界变换更新后再取包围盒，否则可能拿到零值
+        this.scheduleOnce(() => {
+            if (!targetNode || !targetNode.isValid) return;
+            const uiTf = targetNode.getComponent(UITransform);
+            if (!uiTf) return;
 
-        // 面板背景
-        const panelW = 320;
-        const panelH = 420;
-        const panel = this.createNode('Panel', page, 0, 0, panelW, panelH);
-        const panelBg = this.createGraphicsNode('PanelBg', panel, panelW, panelH, 0, 0);
-        this.drawRoundedRect(panelBg.getComponent(Graphics)!, panelW, panelH, new Color(245, 235, 210, 255), 20);
+            const box = uiTf.getBoundingBoxToWorld();
+            const vpRect = view.getViewportRect();
+            const sx = view.getScaleX();
+            const sy = view.getScaleY();
+            const dpr = screen.devicePixelRatio || 1;
+            const sysInfo = wx.getSystemInfoSync();
 
-        // 标题
-        this.createLabel(panel, '🍎 建立果园档案 🍎', 0, panelH/2 - 40, 24, new Color(120, 80, 40, 255), true);
-        this.createLabel(panel, '请选择你的专属形象', 0, panelH/2 - 80, 14, new Color(140, 100, 60, 255), false);
+            const pad = 4; // 略微扩大点击热区
+            const left = (box.xMin * sx + vpRect.x) / dpr - pad;
+            const top = sysInfo.windowHeight - (box.yMax * sy + vpRect.y) / dpr - pad;
+            const btnW = (box.width * sx) / dpr + pad * 2;
+            const btnH = (box.height * sy) / dpr + pad * 2;
+            console.log('[Auth] rankAuthBtn rect:', JSON.stringify({ left, top, width: btnW, height: btnH, windowW: sysInfo.windowWidth, windowH: sysInfo.windowHeight }));
 
-        // 头像网格 (使用 ProfileManager 脚本管理)
-        const profileManager = page.addComponent('ProfileManager') as any;
+            try {
+                const button = wx.createUserInfoButton({
+                    type: 'text',
+                    text: '',
+                    style: {
+                        left,
+                        top,
+                        width: btnW,
+                        height: btnH,
+                        backgroundColor: 'transparent',
+                        color: 'transparent',
+                        textAlign: 'center',
+                        fontSize: 0,
+                    },
+                });
 
-        const avatarLayout = this.createNode('AvatarLayout', panel, 0, 40, 240, 160);
-        profileManager.avatarLayout = avatarLayout;
+                button.onTap((res: any) => {
+                    console.log('[Auth] rankAuthBtn onTap:', JSON.stringify(res));
+                    if (res && res.userInfo && res.userInfo.nickName && res.userInfo.nickName !== '微信用户') {
+                        // 授权成功：销毁原生按钮，保存并进榜
+                        this.destroyRankAuthOverlay();
+                        this.saveAndEnterRank(res.userInfo);
+                    } else {
+                        // 用户在隐私弹窗或授权弹窗中取消：不进榜，按钮保留供下次点击
+                        console.log('[Auth] auth cancelled or anonymous userInfo:', res && res.errMsg);
+                        this.showAuthRequiredToast();
+                    }
+                });
 
-        const startX = -75;
-        const startY = 40;
-        const spacingX = 75;
-        const spacingY = 75;
-
-        for (let i = 0; i < 6; i++) {
-            const row = Math.floor(i / 3);
-            const col = i % 3;
-            const x = startX + col * spacingX;
-            const y = startY - row * spacingY;
-            
-            const avatarNode = this.createNode(`Avatar${i+1}`, avatarLayout, x, y, 55, 55);
-            
-            const avatarBg = this.createGraphicsNode('Bg', avatarNode, 55, 55, 0, 0);
-            this.drawRoundedRect(avatarBg.getComponent(Graphics)!, 55, 55, new Color(255, 255, 255, 255), 10);
-            
-            const spriteNode = this.createNode('Img', avatarNode, 0, 0, 45, 45);
-            const sprite = spriteNode.addComponent(Sprite);
-            // 强制设置宽高和尺寸模式，防止原图撑爆
-            const uiTransform = spriteNode.getComponent(UITransform);
-            if (uiTransform) {
-                uiTransform.setContentSize(45, 45);
+                this.rankAuthBtn = button;
+            } catch (e) {
+                console.warn('[Auth] createUserInfoButton failed:', e);
             }
-            sprite.sizeMode = Sprite.SizeMode.CUSTOM;
-            
-            BundleManager.getInstance().loadAsset<SpriteFrame>(`avatar/Avatars${i+1}/spriteFrame`, SpriteFrame).then((spriteFrame) => {
-                if (spriteFrame) {
-                    sprite.spriteFrame = spriteFrame;
-                }
-            }).catch(() => {});
-        }
+        }, 0);
+    }
 
-        // 提示文本：请输入你的果园代号
-        this.createLabel(panel, '请输入你的果园代号', 0, -85, 14, new Color(140, 100, 60, 255), false);
-        
-        const editBoxNode = this.createNode('NameEditBox', panel, -25, -130, 160, 40);
-        const editBg = this.createGraphicsNode('EditBg', editBoxNode, 160, 40, 0, 0);
-        this.drawRoundedRect(editBg.getComponent(Graphics)!, 160, 40, new Color(255, 255, 255, 255), 8);
-        const editMask = editBoxNode.addComponent(Mask);
-        editMask.type = Mask.Type.GRAPHICS_RECT;
-        
-        const editBox = editBoxNode.addComponent(EditBox);
-        
-        // 禁掉 EditBox 可能残留的默认 Label，避免左侧出现 "label" 之类的占位文本。
-        const autoLabel = editBoxNode.getComponent(Label);
-        if (autoLabel) {
-            autoLabel.string = '';
-            autoLabel.enabled = false;
+    private destroyRankAuthOverlay() {
+        if (this.rankAuthBtn) {
+            try {
+                this.rankAuthBtn.destroy();
+            } catch { }
+            this.rankAuthBtn = null;
         }
-        editBoxNode.children.forEach((child) => {
-            if (child === editBg) return;
-            const childLabel = child.getComponent(Label);
-            if (childLabel) {
-                childLabel.string = '';
-                child.active = false;
+    }
+
+    /** 显示/隐藏排行榜上的原生授权按钮（弹窗打开期间需隐藏，防止透明按钮误拦截点击） */
+    private setRankAuthOverlayVisible(visible: boolean) {
+        if (!this.rankAuthBtn) return;
+        try {
+            if (visible) {
+                this.rankAuthBtn.show();
+            } else {
+                this.rankAuthBtn.hide();
             }
-        });
-        
-        // 手动接管显示层，确保昵称和 placeholder 在输入框里稳定居中显示。
-        const textNode = this.createNode('TEXT_LABEL', editBoxNode, 0, -5, 144, 36);
-        const textLabel = textNode.addComponent(Label);
-        textLabel.color = new Color(80, 55, 30, 255);
-        textLabel.fontSize = 18;
-        textLabel.lineHeight = 36;
-        textLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
-        textLabel.verticalAlign = Label.VerticalAlign.CENTER;
-        textLabel.overflow = Label.Overflow.CLAMP;
-        textLabel.string = '';
-        
-        const placeholderNode = this.createNode('PLACEHOLDER_LABEL', editBoxNode, 0, -5, 144, 36);
-        const placeholderLabel = placeholderNode.addComponent(Label);
-        placeholderLabel.color = new Color(180, 180, 180, 255);
-        placeholderLabel.fontSize = 18;
-        placeholderLabel.lineHeight = 36;
-        placeholderLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
-        placeholderLabel.verticalAlign = Label.VerticalAlign.CENTER;
-        placeholderLabel.overflow = Label.Overflow.CLAMP;
-        placeholderLabel.string = '';
+        } catch { }
+    }
 
-        editBox.textLabel = textLabel;
-        editBox.placeholderLabel = placeholderLabel;
-        editBox.placeholder = '点击输入代号';
-        editBox.string = ''; // 强制清空 EditBox 的默认 string（Cocos 会默认生成 'label'）
-        
-        profileManager.nameEditBox = editBox;
-        
-        // 随机按钮
-        const diceBtn = this.createNode('DiceBtn', panel, 85, -130, 40, 40);
-        const diceBg = this.createGraphicsNode('DiceBg', diceBtn, 40, 40, 0, 0);
-        this.drawRoundedRect(diceBg.getComponent(Graphics)!, 40, 40, new Color(200, 200, 200, 255), 8);
-        this.createLabel(diceBtn, '🎲', 0, 0, 20, new Color(255, 255, 255, 255), true);
-        diceBtn.on(Node.EventType.TOUCH_END, () => {
-            profileManager.onRandomName();
-        });
-
-        // 提示文本
-        const tipLabelNode = this.createLabel(panel, '', 0, -165, 14, new Color(255, 80, 80, 255), true);
-        tipLabelNode.string = '';
-        profileManager.tipLabel = tipLabelNode;
-
-        // 保存按钮
-        const saveBtn = this.createNode('SaveBtn', panel, 0, -210, 160, 48);
-        const saveBg = this.createGraphicsNode('SaveBg', saveBtn, 160, 48, 0, 0);
-        this.drawRoundedRect(saveBg.getComponent(Graphics)!, 160, 48, new Color(100, 180, 80, 255), 24);
-        this.createLabel(saveBtn, '✅ 开启排行', 0, 0, 18, new Color(255, 255, 255, 255), true);
-        
-        saveBtn.on(Node.EventType.TOUCH_END, () => {
-            profileManager.onSaveClicked();
-        });
-
-        // 关闭按钮
-        const closeBtn = this.createNode('CloseBtn', panel, panelW/2 - 20, panelH/2 - 20, 40, 40);
-        this.createLabel(closeBtn, '✖', 0, 0, 20, new Color(150, 150, 150, 255), true);
-        closeBtn.on(Node.EventType.TOUCH_END, () => {
-            page.destroy();
-        }, this);
-
-        profileManager.show(() => {
-            page.destroy();
-            this.loadAndShowRank();
-        });
+    private async saveAndEnterRank(userInfo: any) {
+        const nickname = ((userInfo.nickName || '') as string).trim() || '微信玩家';
+        const avatarUrl = ((userInfo.avatarUrl || '') as string).trim();
+        const result = await updateProfile(nickname, avatarUrl);
+        if (!result.success) {
+            // 保存失败：把后端原因直接提示出来，便于真机排查；不阻塞进榜
+            console.warn('保存微信头像昵称失败:', result.message);
+            if (typeof wx !== 'undefined' && typeof wx.showToast === 'function') {
+                wx.showToast({ title: result.message || '保存失败，请重试', icon: 'none' });
+            }
+        }
+        this.loadAndShowRank();
     }
 
     private async loadDefaultAvatars(): Promise<void> {
@@ -4247,12 +4331,32 @@ export class GameManager extends Component {
         node.parent = maskNode;
         node.setPosition(0, 0, 0);
         
-        // 优先用 avatarUrl 解析对应的默认头像，解析失败则随机兜底
+        const url = (avatarUrl || '').trim();
+        
+        // 远程微信头像
+        if (url.startsWith('http')) {
+            this.setDefaultAvatarFrame(sprite); // 先给默认图，加载成功后替换
+            assetManager.loadRemote<ImageAsset>(url, { ext: '.png' }, (err, imageAsset) => {
+                if (!err && imageAsset && sprite.isValid) {
+                    const texture = new Texture2D();
+                    texture.image = imageAsset;
+                    const spriteFrame = new SpriteFrame();
+                    spriteFrame.texture = texture;
+                    sprite.spriteFrame = spriteFrame;
+                }
+            });
+        } else {
+            // 默认头像
+            this.setDefaultAvatarFrame(sprite, url);
+        }
+        return maskNode;
+    }
+
+    private setDefaultAvatarFrame(sprite: Sprite, avatarUrl?: string) {
         const frame = this.getDefaultAvatarFrame(avatarUrl || '') || this.getRandomDefaultAvatar();
         if (frame) {
             sprite.spriteFrame = frame;
         }
-        return maskNode;
     }
 
     private async loadAndShowRank() {
@@ -4280,8 +4384,18 @@ export class GameManager extends Component {
         if (this.bottomAreaNode) this.bottomAreaNode.active = true;
     }
 
+    /** 榜单展示昵称：未授权用户按 userId 生成稳定的随机玩家名 */
+    private getRankDisplayName(item: RankItem): string {
+        const nick = (item.nickname || '').trim();
+        if (nick) return nick.substring(0, 8);
+        const seed = Number(item.userId) || 0;
+        return `玩家${(seed * 73 + 1357) % 9000 + 1000}`;
+    }
+
     private renderRankPage(list: RankItem[], myRank: RankItem | null) {
         this.closeRankPage();
+        // 排行榜页会销毁主界面，原生授权按钮一并销毁（返回时随 buildStaticTopUI 重建）
+        this.destroyRankAuthOverlay();
         if (this.rootNode) {
             this.rootNode.removeAllChildren();
         }
@@ -4371,7 +4485,7 @@ export class GameManager extends Component {
             this.createLabel(this.rankPageNode, `${config.rank}`, itemX, badgeY, 12 * config.scale, new Color(255, 255, 255, 255), true);
 
             // 昵称
-            const nick = (item.nickname || '玩家').substring(0, 8);
+            const nick = this.getRankDisplayName(item);
             this.createLabel(this.rankPageNode, nick, itemX, badgeY - 20, 14, new Color(80, 100, 70, 255), config.rank === 1);
 
             // 关卡数 (高亮颜色)
@@ -4488,7 +4602,7 @@ export class GameManager extends Component {
             this.createAvatarSpriteNode(this.rankPageNode, avatarX, myCardY, avatarSize, myRank.avatarUrl);
 
             // 昵称
-            const nick = (myRank.nickname || '玩家').substring(0, 8);
+            const nick = this.getRankDisplayName(myRank);
             const nickLabel = this.createLabel(this.rankPageNode, nick, avatarX + 30, myCardY, 18, new Color(255, 255, 255, 255), true);
             nickLabel.horizontalAlign = 0; // LEFT
             nickLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
