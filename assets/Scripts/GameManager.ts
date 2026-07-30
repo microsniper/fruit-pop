@@ -1,8 +1,10 @@
-import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, view, ResolutionPolicy, Layers, Sprite, SpriteFrame, resources, ImageAsset, ScrollView, LabelOutline, UIOpacity, assetManager, Texture2D } from 'cc';
-import { saveProgress, loginAndGetProgress, fetchRank, RankItem, consumeShareCount, hasUserProfile, updateProfile, reportEvent, fetchGameConfig, GameConfig, getGameConfig, isDailyRewardClaimable, claimDailyReward } from './api';
+import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, Layers, Sprite, SpriteFrame, resources, ImageAsset, LabelOutline, UIOpacity } from 'cc';
+import { saveProgress, loginAndGetProgress, consumeShareCount, reportEvent, fetchGameConfig, GameConfig, getGameConfig } from './api';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
 import { BundleManager } from './BundleManager';
+import { HomePage } from './HomePage';
+import { RankPage } from './RankPage';
 
 // @ts-ignore
 const { ccclass } = _decorator;
@@ -189,15 +191,15 @@ let challengeTipShown = false;
 
 @ccclass('GameManager')
 export class GameManager extends Component {
-    private rootNode: Node | null = null;
-    private currentLevel = 1;
+    public rootNode: Node | null = null;
+    public currentLevel = 1;
     private maxTempHoles = 5;
     /** 飞行中的水果颜色：让选色统计池在飞行窗口期也能看见未落地水果，避免清篮换色刷出无关颜色导致死局 */
     private flyingFruitColors: FruitColor[] = [];
     private totalFruits = 0;
     private removedFruits = 0;
     private sunsCollectedThisLevel = 0;
-    private totalSuns = 0;
+    public totalSuns = 0;
     /** 小太阳不足提示横幅节点：用于幂等控制，显示期间忽略重复触发 */
     private sunShortageTipNode: Node | null = null;
     private gameOver = false;
@@ -210,22 +212,22 @@ export class GameManager extends Component {
     private plates: PlateData[] = [];
     private tools = { add: 0, clear: 1 };
 
-    private topAreaNode: Node | null = null;
-    private boardAreaNode: Node | null = null;
+    public topAreaNode: Node | null = null;
+    public boardAreaNode: Node | null = null;
     private boardContentNode: Node | null = null;
     private boardEffectNode: Node | null = null;
-    private bottomAreaNode: Node | null = null;
+    public bottomAreaNode: Node | null = null;
     private boxesContainerNode: Node | null = null;
-    private tempContainerNode: Node | null = null;
-    private sunCountLabel: Label | null = null;
-    private sunIconNode: Node | null = null;
+    public tempContainerNode: Node | null = null;
+    public sunCountLabel: Label | null = null;
+    public sunIconNode: Node | null = null;
     private toolContainerNode: Node | null = null;
-    private modalLayerNode: Node | null = null;
-    private rankPageNode: Node | null = null;
-    /** 覆盖在排行榜按钮上的微信原生授权按钮（createUserInfoButton） */
-    private rankAuthBtn: any = null;
-    private defaultAvatarsLoaded = false;
-    private defaultAvatarFrames: SpriteFrame[] = [];
+    public modalLayerNode: Node | null = null;
+    /** 首页与排行榜页：逻辑已拆到独立文件，通过 gm 引用协作 */
+    public readonly homePage = new HomePage(this);
+    public readonly rankPage = new RankPage(this);
+    /** 新手引导/奖励弹窗是否已触发过（改为首次进入无限模式时触发） */
+    private welcomeFlowShown = false;
     private fruitSprites: Map<string, SpriteFrame> = new Map();
     private fruitsLoaded = false;
     /** 灰度果篮底图，运行时动态染色 */
@@ -254,10 +256,10 @@ export class GameManager extends Component {
         return { disabled: false, text: '求助群友' };
     }
 
-    private soundEnabled: boolean = true;
-    private vibrationEnabled: boolean = true;
+    public soundEnabled: boolean = true;
+    public vibrationEnabled: boolean = true;
     
-    private getTodayStr(): string {
+    public getTodayStr(): string {
         const d = new Date();
         return `${d.getFullYear()}${d.getMonth() + 1}${d.getDate()}`;
     }
@@ -296,8 +298,8 @@ export class GameManager extends Component {
     private tempSlotViews: TempSlotView[] = [];
     private toolViews: ToolView[] = [];
 
-    private screenWidth = 0;
-    private screenHeight = 0;
+    public screenWidth = 0;
+    public screenHeight = 0;
     private topHeight = 0;
     private boardHeight = 0;
     private bottomHeight = 0;
@@ -337,8 +339,8 @@ export class GameManager extends Component {
         const delay = Math.max(0, 2.0 - elapsed);
         this.scheduleOnce(() => {
             this.hideLoadingOverlay();
-            this.scheduleOnce(() => this.showDailyRewardIfNeeded(), 0.35);
-            this.scheduleOnce(() => this.showTutorialIfNeeded(), 0.35);
+            // 先进首页选择模式，新手引导/奖励弹窗延后到首次进入无限模式时再弹
+            this.homePage.render();
         }, delay);
     }
 
@@ -358,103 +360,107 @@ export class GameManager extends Component {
         scene.addChild(adNode);
     }
 
-    private showTutorialIfNeeded() {
-        if (this.currentLevel !== 1) return;
-        if (tutorialShown) return;
+    private showTutorialIfNeeded(onClose?: () => void) {
+        if (this.currentLevel !== 1 || tutorialShown) {
+            if (onClose) onClose();
+            return;
+        }
 
         tutorialShown = true;
 
-        this.renderCommonTip('🎉 欢迎来到果园', '🍎 点击果子 → 投入同色果篮\n🧺 凑满果篮 → 自动清空继续\n🪵 板子清空 → 掉落露出新果子\n\n没合适果篮？先放果盘暂存！');
+        this.renderCommonTip('🎉 欢迎来到果园', '🍎 点击果子 → 投入同色果篮\n🧺 凑满果篮 → 自动清空继续\n🪵 板子清空 → 掉落露出新果子\n\n没合适果篮？先放果盘暂存！', onClose);
     }
 
     private showRainbowTutorial() {
         this.renderCommonTip('🌈 彩虹果！', '彩虹果是万能果实！\n✨ 它可以放入任意果篮，无视颜色\n哪里有空位就能去哪里\n\n合理利用彩虹果，轻松过关～');
     }
 
-    /** 每日登录奖励弹窗 */
-    private showDailyRewardIfNeeded() {
-        if (!isDailyRewardClaimable()) return;
-        const amount = getGameConfig()?.dailyLoginReward ?? 200;
-        this.renderDailyRewardModal(amount);
-    }
-
-    private renderDailyRewardModal(amount: number) {
-        if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
-
-        // 遮罩
-        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
-        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
-
-        // 面板：复用 panel_common_tip 尺寸
-        const panelW = 310;
-        const panelNode = this.createNode('DailyRewardPanel', this.modalLayerNode, 0, 0, panelW, panelW * 461 / 421);
-        const panelTransform = panelNode.getComponent(UITransform)!;
-        const sprite = panelNode.addComponent(Sprite);
-        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_common_tip/spriteFrame', SpriteFrame).then((sf) => {
-            if (sf && sprite && sprite.isValid) {
-                sprite.spriteFrame = sf;
-                const rect = sf.rect;
-                if (rect && rect.width > 0) {
-                    panelTransform.setContentSize(panelW, panelW * rect.height / rect.width);
-                }
+    /**
+     * 每日奖励领取成功动画：多个金色太阳粒子从宝箱中心沿贝塞尔弧线飞向顶部太阳图标，
+     * 逐个到达时计数从 startSuns 滚动增加到 startSuns+amount，太阳图标同步 punch 缩放。
+     * 全部到达后回调 onComplete（关闭弹窗）。
+     */
+    public playDailyRewardSunFly(startWorldPos: Vec3, startSuns: number, amount: number, onComplete: () => void) {
+        const layer = this.modalLayerNode;
+        const sunWorldPos = this.getSunWorldPos();
+        const layerTransform = layer?.getComponent(UITransform);
+        if (!layer || !sunWorldPos || !layerTransform) {
+            // 顶部太阳图标不可用时直接更新数字并结束
+            if (this.sunCountLabel && this.sunCountLabel.isValid) {
+                this.sunCountLabel.string = `${startSuns + amount}`;
             }
-        }).catch(() => {});
+            onComplete();
+            return;
+        }
 
-        // 阻止点击穿透
-        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
-            e.propagationStopped = true;
-        }, this);
+        const startLocal = layerTransform.convertToNodeSpaceAR(startWorldPos);
+        const targetLocal = layerTransform.convertToNodeSpaceAR(sunWorldPos);
 
-        // 标题
-        this.createLabel(panelNode, '🎁 每日登录领好礼', 0, 0.183 * panelTransform.height, 25, new Color(96, 64, 32, 255), true);
+        const count = 10;
+        const particleSize = 9;
+        const goldColor = new Color(255, 220, 50, 255);
+        let arrived = 0;
 
-        // 内容
-        const contentNode = this.createNode('RewardContent', panelNode, 0, -0.10 * panelTransform.height, panelW * 0.80, panelTransform.height * 0.435);
-        const contentLabel = contentNode.addComponent(Label);
-        contentLabel.string = `今日登录奖励\n+${amount} 小太阳☀️`;
-        contentLabel.fontSize = 20;
-        contentLabel.lineHeight = 32;
-        contentLabel.color = new Color(96, 64, 32, 255);
-        contentLabel.isBold = true;
-        contentLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
-        contentLabel.verticalAlign = Label.VerticalAlign.CENTER;
-        contentLabel.overflow = Label.Overflow.SHRINK;
+        for (let i = 0; i < count; i++) {
+            const delay = i * 0.06;
+            this.scheduleOnce(() => {
+                if (!layer.isValid) return;
+                // 金色太阳粒子（圆点+发光外圈，与果篮收集动画同款）
+                const particleNode = new Node(`RewardSun_${i}`);
+                const glowGraphic = particleNode.addComponent(Graphics);
+                glowGraphic.fillColor = new Color(255, 240, 100, 100);
+                glowGraphic.circle(0, 0, particleSize + 4);
+                glowGraphic.fill();
+                const particleGraphic = particleNode.addComponent(Graphics);
+                particleGraphic.fillColor = goldColor;
+                particleGraphic.circle(0, 0, particleSize);
+                particleGraphic.fill();
 
-        // 领取按钮
-        const btnClaim = this.createNode('BtnClaim', panelNode, 0, -0.415 * panelTransform.height, panelW * 0.5, 56);
-        const btnLabel = this.createLabel(btnClaim, '领取', 0, 0, 22, new Color(255, 255, 255, 255), true);
-        btnClaim.on(Node.EventType.TOUCH_END, () => {
-            // 禁用按钮防止重复点击
-            btnClaim.off(Node.EventType.TOUCH_END);
-            btnLabel.color = new Color(180, 180, 180, 255);
+                particleNode.setPosition(new Vec3(startLocal.x, startLocal.y, 0));
+                particleNode.layer = Layers.Enum.UI_2D;
+                layer.addChild(particleNode);
+                particleNode.setSiblingIndex(9999);
 
-            claimDailyReward().then((res) => {
-                if (res.success && res.amount > 0) {
-                    this.totalSuns += res.amount;
-                    if (typeof wx !== 'undefined' && wx.setStorageSync) {
-                        wx.setStorageSync('totalSuns', this.totalSuns.toString());
-                    } else {
-                        localStorage.setItem('totalSuns', this.totalSuns.toString());
-                    }
-                    if (this.sunCountLabel && this.sunCountLabel.isValid) {
-                        this.sunCountLabel.string = `${this.totalSuns}`;
-                    }
-                }
-                this.modalLayerNode!.removeAllChildren();
-            }).catch(() => {
-                // 领取失败，恢复按钮
-                btnLabel.color = new Color(255, 255, 255, 255);
-                btnClaim.on(Node.EventType.TOUCH_END, () => {
-                    // 重试
-                });
-            });
-        }, this);
+                // 二次贝塞尔曲线飞行：控制点抬高形成弧度，每个粒子略错开
+                const ctrlX = (startLocal.x + targetLocal.x) / 2 + (i % 2 === 0 ? 40 : -40);
+                const ctrlY = Math.max(startLocal.y, targetLocal.y) + 60 + i * 8;
+                const progress = { t: 0 };
 
-        // 从小到大弹出
-        panelNode.setScale(new Vec3(0.6, 0.6, 1));
-        tween(panelNode).to(0.25, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+                tween(progress)
+                    .to(0.5, { t: 1 }, {
+                        onUpdate: () => {
+                            if (!particleNode.isValid) return;
+                            const t = progress.t;
+                            const inv = 1 - t;
+                            const x = inv * inv * startLocal.x + 2 * inv * t * ctrlX + t * t * targetLocal.x;
+                            const y = inv * inv * startLocal.y + 2 * inv * t * ctrlY + t * t * targetLocal.y;
+                            particleNode.setPosition(new Vec3(x, y, 0));
+                            const s = 1.3 - t; // 从 1.3 缩到 0.3
+                            particleNode.setScale(new Vec3(s, s, 1));
+                        }
+                    })
+                    .call(() => {
+                        if (particleNode.isValid) particleNode.destroy();
+                        arrived++;
+                        // 计数随粒子到达滚动增加
+                        if (this.sunCountLabel && this.sunCountLabel.isValid) {
+                            this.sunCountLabel.string = `${startSuns + Math.round(amount * arrived / count)}`;
+                        }
+                        // 太阳图标 punch 缩放
+                        if (this.sunIconNode && this.sunIconNode.isValid) {
+                            this.sunIconNode.setScale(new Vec3(1, 1, 1));
+                            tween(this.sunIconNode)
+                                .to(0.08, { scale: new Vec3(1.25, 1.25, 1) })
+                                .to(0.08, { scale: new Vec3(1, 1, 1) })
+                                .start();
+                        }
+                        if (arrived === count) {
+                            onComplete();
+                        }
+                    })
+                    .start();
+            }, delay);
+        }
     }
 
     private showChallengeTip() {
@@ -465,7 +471,7 @@ export class GameManager extends Component {
      * 通用提示弹窗：panel_common_tip.png（标题“提示”与“知道了”按钮已画在图里）
      * 内容文案写在白色面板区域，点“知道了”关闭。新手/彩虹果/挑战关提示共用。
      */
-    private renderCommonTip(title: string, content: string, onConfirm?: () => void) {
+    public renderCommonTip(title: string, content: string, onConfirm?: () => void) {
         if (!this.modalLayerNode) return;
         this.modalLayerNode.removeAllChildren();
 
@@ -531,9 +537,9 @@ export class GameManager extends Component {
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
 
-        // 面板：原图 2000x2000，trim 后可见区约 1048x1888（1:1.8），宽 280，高按可见区等比校正
+        // 面板：新版立体风 640x1029（已裁紧），宽 280，高按原图等比
         const panelW = 280;
-        const panelNode = this.createNode('FailPanel', this.modalLayerNode, 0, 0, panelW, panelW * 1888 / 1048);
+        const panelNode = this.createNode('FailPanel', this.modalLayerNode, 0, 0, panelW, panelW * 1029 / 640);
         const panelTransform = panelNode.getComponent(UITransform)!;
         const sprite = panelNode.addComponent(Sprite);
         sprite.sizeMode = Sprite.SizeMode.CUSTOM;
@@ -557,21 +563,24 @@ export class GameManager extends Component {
             }
             const pw = panelTransform.width;
             const ph = panelTransform.height;
-            // 可见区比例坐标 → 面板本地坐标（比例基于可见区 1048x1888 像素分析）
+            // 可见区比例坐标 → 面板本地坐标（比例基于新图 640x1029 像素分析）
             const px = (fx: number) => (fx - 0.5) * pw;
             const py = (fy: number) => (0.5 - fy) * ph;
 
-            // 顶部太阳数量：太阳图标右侧，白色左对齐（背景为遮罩深色）
-            const sunsLabel = this.createLabel(panelNode, `${this.totalSuns}`, px(0.50), py(0.038), 28, new Color(255, 255, 255, 255), true);
+            // 顶部太阳数量：太阳右侧留白条内，浅色底用深棕字，左对齐
+            const sunsLabel = this.createLabel(panelNode, `${this.totalSuns}`, px(0.36), py(0.247), 24, new Color(110, 75, 45, 255), true);
             const sunsTransform = sunsLabel.node.getComponent(UITransform);
             if (sunsTransform) sunsTransform.setAnchorPoint(0, 0.5);
             sunsLabel.horizontalAlign = 0; // LEFT
 
-            // “历史最好成绩”下方空白：第 X 关（X 为当前关数）
-            this.createLabel(panelNode, `第 ${this.currentLevel} 关`, 0, py(0.45), 26, new Color(50, 50, 50, 255), true);
+            // “历史最好成绩”下方白色留白块：第 X 关（X 为当前关数）
+            this.createLabel(panelNode, `第 ${this.currentLevel} 关`, 0, py(0.511), 26, new Color(50, 50, 50, 255), true);
 
-            // 重新挑战（黄按钮热区）：挑战失败，清零小太阳后重开当前关卡
-            const btnRetry = this.createNode('BtnRetry', panelNode, 0, py(0.747), pw * 0.48, ph * 0.095);
+            // 橙钮上方空隙的红色小字提示（与加果篮/清空果盘弹窗底图里的红字提示同款观感）
+            this.createLabel(panelNode, '重新挑战会清空小太阳哦', 0, py(0.618), 13, new Color(215, 60, 50, 255), true);
+
+            // 重新挑战（橙黄按钮热区）：挑战失败，清零小太阳后重开当前关卡
+            const btnRetry = this.createNode('BtnRetry', panelNode, 0, py(0.694), pw * 0.60, ph * 0.10);
             btnRetry.on(Node.EventType.TOUCH_END, () => {
                 this.gameOver = false;
                 this.totalSuns = 0;
@@ -581,7 +590,7 @@ export class GameManager extends Component {
             }, this);
 
             // 继续游戏（蓝按钮热区）：唤起广告，看完后清空暂存区
-            const btnContinue = this.createNode('BtnContinue', panelNode, 0, py(0.901), pw * 0.50, ph * 0.105);
+            const btnContinue = this.createNode('BtnContinue', panelNode, 0, py(0.853), pw * 0.60, ph * 0.10);
             btnContinue.on(Node.EventType.TOUCH_END, () => {
                 this.showAdThen(() => {
                     this.gameOver = false;
@@ -593,7 +602,7 @@ export class GameManager extends Component {
         }).catch(() => {});
     }
 
-    private showLoadingOverlay() {
+    public showLoadingOverlay() {
         const scene = director.getScene();
         if (!scene || !this.rootNode) return;
 
@@ -632,7 +641,7 @@ export class GameManager extends Component {
         subtitle.getComponent(Label)!.horizontalAlign = 1;
     }
 
-    private hideLoadingOverlay() {
+    public hideLoadingOverlay() {
         if (!this.loadingNode || !this.loadingNode.isValid) return;
 
         tween(this.loadingNode)
@@ -757,8 +766,8 @@ export class GameManager extends Component {
         const topBg = this.createNode('TopBg', topBgClip, 0, 0, this.screenWidth, this.topHeight);
         const topBgSprite = topBg.addComponent(Sprite);
         topBgSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        resources.load('ui/bg_top/spriteFrame', SpriteFrame, (err, sf) => {
-            if (!err && sf && topBgSprite && topBgSprite.isValid) {
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/bg_top/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && topBgSprite && topBgSprite.isValid) {
                 topBgSprite.spriteFrame = sf;
                 // 等比缩放填满区域（cover-fit），居中裁切，避免变形
                 const rect = sf.rect;
@@ -770,7 +779,7 @@ export class GameManager extends Component {
                     bgTransform.setContentSize(rect.width * scale, rect.height * scale);
                 }
             }
-        });
+        }).catch(() => {});
 
         this.boardAreaNode = this.createNode('BoardArea', this.rootNode, 0, boardY, this.screenWidth, this.boardHeight);
         const boardMask = this.boardAreaNode.addComponent(Mask);
@@ -800,9 +809,11 @@ export class GameManager extends Component {
 
         const topInnerY = this.topHeight / 2 - 42 - TOP_CONTENT_OFFSET;
 
-        this.levelBadgeLabel = this.createLabel(this.topAreaNode, '第 1 关', 0, topInnerY + 8, 22, new Color(255, 255, 255, 255), true);
+        // 往上抬 16px，避免徽章底边被下方果篮卡片行遮挡
+        const badgeY = topInnerY + 24;
+        this.levelBadgeLabel = this.createLabel(this.topAreaNode, '第 1 关', 0, badgeY, 22, new Color(255, 255, 255, 255), true);
 
-        const badge = this.createGraphicsNode('LevelBadgeBg', this.topAreaNode, 130, 44, 0, topInnerY + 8);
+        const badge = this.createGraphicsNode('LevelBadgeBg', this.topAreaNode, 130, 44, 0, badgeY);
         badge.setSiblingIndex(0);
         this.drawRoundedRect(badge.getComponent(Graphics)!, 130, 44, new Color(130, 160, 90, 255), 22);
 
@@ -1008,11 +1019,11 @@ export class GameManager extends Component {
                     holeSprite = slotView.hole.node.addComponent(Sprite);
                 }
                 holeSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-                resources.load('ui/hole/spriteFrame', SpriteFrame, (err, sf) => {
-                    if (!err && sf && holeSprite && holeSprite.isValid) {
+                BundleManager.getInstance().loadAsset<SpriteFrame>('ui/hole/spriteFrame', SpriteFrame).then((sf) => {
+                    if (sf && holeSprite && holeSprite.isValid) {
                         holeSprite.spriteFrame = sf;
                     }
-                });
+                }).catch(() => {});
                 const holeTransform = slotView.hole.node.getComponent(UITransform);
                 if (holeTransform) {
                     // 圆的直径是半径的2倍，再加上一点边距，所以乘以 2.2
@@ -1101,10 +1112,9 @@ export class GameManager extends Component {
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
 
-        // 使用 panel_add_basket.png
-        // 图片实际内容大约是 1190x1768，按照宽度 320 缩放，高度约为 475
+        // 使用 panel_add_basket.png（新版立体风 640x1036），按照宽度 320 缩放，高度约为 518
         const panelW = 320;
-        const panelH = 475;
+        const panelH = 518;
         const panelNode = this.createNode('AddBasketPanel', this.modalLayerNode, 0, 0, panelW, panelH);
         
         const panelSprite = panelNode.addComponent(Sprite);
@@ -1120,24 +1130,24 @@ export class GameManager extends Component {
             e.propagationStopped = true;
         }, this);
 
-        // 1. 关闭按钮（右上角 X）
-        const closeBtn = this.createNode('CloseBtn', panelNode, panelW / 2 - 30, panelH / 2 - 30, 60, 60);
+        // 1. 关闭按钮（右上角 X，新图 X 中心约在 (137, 236)）
+        const closeBtn = this.createNode('CloseBtn', panelNode, panelW / 2 - 23, panelH / 2 - 23, 60, 60);
         closeBtn.on(Node.EventType.TOUCH_END, () => {
             this.modalLayerNode!.removeAllChildren();
         }, this);
 
-        // 顶部太阳图标已在底图中绘制，这里只补数量
-        const topSunsLabel = this.createLabel(panelNode, `${this.totalSuns}`, 5, 220, 28, new Color(255, 255, 255, 255), true);
+        // 顶部太阳图标已在底图中绘制，这里只补数量（新图太阳右侧是白色留白条，用深棕字）
+        const topSunsLabel = this.createLabel(panelNode, `${this.totalSuns}`, -46, 133, 24, new Color(110, 75, 45, 255), true);
         // 修改锚点和对齐方式为左对齐，防止数字变大（如1000000）时向左延伸遮挡太阳图标
         const topSunsTransform = topSunsLabel.node.getComponent(UITransform);
         if (topSunsTransform) topSunsTransform.setAnchorPoint(0, 0.5);
         topSunsLabel.horizontalAlign = 0; // LEFT
 
-        // 2. 第一个按钮：消耗小太阳加果篮
-        // 整体往上挪，y 从 -100 改为 -85
+        // 2. 第一个按钮：消耗小太阳加果篮（橙色按钮）
         // 价格从游戏配置读取，默认 20
         const addCost = this.gameConfig?.toolCosts?.addBasket ?? 20;
-        const btnSuns = this.createNode('BtnSuns', panelNode, 0, -85, 136, 46);
+        // 热区覆盖橙色按钮+右侧绿色价格标签整行
+        const btnSuns = this.createNode('BtnSuns', panelNode, 16, -90, 222, 48);
         btnSuns.on(Node.EventType.TOUCH_END, () => {
             const lockedBox = this.boxes.find((box) => box.color === 'locked');
             if (!lockedBox) {
@@ -1158,15 +1168,14 @@ export class GameManager extends Component {
             this.handleUnlockBox(lockedBox);
             this.renderBasketUnlockModal();
         }, this);
-        // 价格数字
-        const costLabel = this.createLabel(panelNode, `${addCost}`, 67, -73, 18, new Color(0, 0, 0, 255), true);
+        // 价格数字（绿色标签内太阳右侧留白处）
+        const costLabel = this.createLabel(panelNode, `${addCost}`, 91, -88, 18, new Color(0, 0, 0, 255), true);
         const costTransform = costLabel.node.getComponent(UITransform);
         if (costTransform) costTransform.setAnchorPoint(0, 0.5);
         costLabel.horizontalAlign = 0; // LEFT
 
-        // 3. 第二个按钮：看广告解锁
-        // 整体往上挪，y 从 -164 改为 -149
-        const btnAd = this.createNode('BtnAd', panelNode, 0, -149, 136, 46);
+        // 3. 第二个按钮：看广告解锁（蓝色按钮）
+        const btnAd = this.createNode('BtnAd', panelNode, -5, -149, 180, 48);
         btnAd.on(Node.EventType.TOUCH_END, () => {
             const lockedBox = this.boxes.find((box) => box.color === 'locked');
             if (!lockedBox) {
@@ -1181,9 +1190,8 @@ export class GameManager extends Component {
             }, 'unlock_basket');
         }, this);
 
-        // 4. 第三个按钮：继续游戏
-        // 整体往上挪，y 从 -228 改为 -213
-        const btnContinue = this.createNode('BtnContinue', panelNode, 0, -213, 136, 46);
+        // 4. 第三个按钮：继续游戏（绿色按钮）
+        const btnContinue = this.createNode('BtnContinue', panelNode, -5, -209, 180, 48);
         btnContinue.on(Node.EventType.TOUCH_END, () => {
             this.modalLayerNode!.removeAllChildren();
         }, this);
@@ -1235,9 +1243,9 @@ export class GameManager extends Component {
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
 
-        // 与加果篮面板一致：宽 320，高 475
+        // panel_clear_basket.png（新版立体风 640x983），按宽 320 缩放，高约 492
         const panelW = 320;
-        const panelH = 475;
+        const panelH = 492;
         const panelNode = this.createNode('ClearBasketPanel', this.modalLayerNode, 0, 0, panelW, panelH);
 
         const panelSprite = panelNode.addComponent(Sprite);
@@ -1254,13 +1262,13 @@ export class GameManager extends Component {
         }, this);
 
         // 1. 关闭按钮（右上角 X）
-        const closeBtn = this.createNode('CloseBtn', panelNode, panelW / 2 - 30, panelH / 2 - 30, 60, 60);
+        const closeBtn = this.createNode('CloseBtn', panelNode, panelW / 2 - 22, panelH / 2 - 26, 60, 60);
         closeBtn.on(Node.EventType.TOUCH_END, () => {
             this.modalLayerNode!.removeAllChildren();
         }, this);
 
-        // 顶部太阳图标已在底图中绘制，这里只补数量（位置与加果篮面板一致）
-        const topSunsLabel = this.createLabel(panelNode, `${this.totalSuns}`, 5, 220, 28, new Color(255, 255, 255, 255), true);
+        // 顶部太阳图标已在底图中绘制，这里只补数量（新图太阳右侧是白色留白条，用深棕字）
+        const topSunsLabel = this.createLabel(panelNode, `${this.totalSuns}`, -58, 149, 24, new Color(110, 75, 45, 255), true);
         const topSunsTransform = topSunsLabel.node.getComponent(UITransform);
         if (topSunsTransform) topSunsTransform.setAnchorPoint(0, 0.5);
         topSunsLabel.horizontalAlign = 0; // LEFT
@@ -1283,8 +1291,8 @@ export class GameManager extends Component {
             });
         };
 
-        // 2. 第一个按钮：消耗小太阳清空果盘
-        const btnSuns = this.createNode('BtnSuns', panelNode, 0, -85, 136, 46);
+        // 2. 第一个按钮：消耗小太阳清空果盘（橙色按钮，热区覆盖右侧绿色价格标签整行）
+        const btnSuns = this.createNode('BtnSuns', panelNode, 18, -70, 250, 48);
         btnSuns.on(Node.EventType.TOUCH_END, () => {
             if (this.totalSuns < clearCost) {
                 this.showSunShortageTip();
@@ -1298,14 +1306,14 @@ export class GameManager extends Component {
             this.modalLayerNode!.removeAllChildren();
             doClearTray();
         }, this);
-        // 价格数字（中间太阳标签，位置与加果篮面板一致）
-        const costLabel = this.createLabel(panelNode, `${clearCost}`, 67, -73, 18, new Color(0, 0, 0, 255), true);
+        // 价格数字（绿色标签内太阳右侧留白处）
+        const costLabel = this.createLabel(panelNode, `${clearCost}`, 72, -68, 18, new Color(0, 0, 0, 255), true);
         const costTransform = costLabel.node.getComponent(UITransform);
         if (costTransform) costTransform.setAnchorPoint(0, 0.5);
         costLabel.horizontalAlign = 0; // LEFT
 
-        // 3. 第二个按钮：看广告清空
-        const btnAd = this.createNode('BtnAd', panelNode, 0, -149, 136, 46);
+        // 3. 第二个按钮：看广告清空（蓝色按钮）
+        const btnAd = this.createNode('BtnAd', panelNode, -6, -132, 210, 48);
         btnAd.on(Node.EventType.TOUCH_END, () => {
             this.showAdThen(() => {
                 this.modalLayerNode!.removeAllChildren();
@@ -1313,8 +1321,8 @@ export class GameManager extends Component {
             }, 'clear_tray');
         }, this);
 
-        // 4. 第三个按钮：继续游戏
-        const btnContinue = this.createNode('BtnContinue', panelNode, 0, -213, 136, 46);
+        // 4. 第三个按钮：继续游戏（绿色按钮）
+        const btnContinue = this.createNode('BtnContinue', panelNode, -6, -199, 212, 48);
         btnContinue.on(Node.EventType.TOUCH_END, () => {
             this.modalLayerNode!.removeAllChildren();
         }, this);
@@ -1537,8 +1545,6 @@ export class GameManager extends Component {
 
     private renderSettingsModal(show: boolean) {
         if (!this.modalLayerNode) return;
-        // 设置弹窗打开期间隐藏排行榜上的原生授权按钮，避免误拦截点击
-        this.setRankAuthOverlayVisible(!show);
         if (!show) {
             this.modalLayerNode.removeAllChildren();
             return;
@@ -1553,10 +1559,10 @@ export class GameManager extends Component {
             this.renderSettingsModal(false);
         }, this);
 
-        // 设置面板：使用图片 panel_settings.png
-        // 按照原图内容比例 (1050 x 1699) 设置宽高，避免拉伸变形
+        // 设置面板：使用图片 panel_settings.png（新版立体风 640x993）
+        // 按宽 320 缩放（scale 0.5），高约 496
         const panelW = 320;
-        const panelH = 518;
+        const panelH = 496;
         const panelNode = this.createNode('SettingsPanel', this.modalLayerNode, 0, 0, panelW, panelH);
         
         const panelSprite = panelNode.addComponent(Sprite);
@@ -1572,16 +1578,16 @@ export class GameManager extends Component {
             e.propagationStopped = true;
         }, this);
 
-        // 使用图片上自带的关闭按钮，所以去掉文本的 "X"，只保留一个隐形的点击区域
-        const closeBtnSize = 50;
-        // 精确定位到原图右上角白色 X 号的位置
-        const closeBtn = this.createNode('CloseBtn', panelNode, 135, 239, closeBtnSize, closeBtnSize);
+        // 使用图片上自带的关闭按钮，只保留一个隐形的点击区域
+        const closeBtnSize = 60;
+        // 新图右上红色 X 钮实测中心 (133, 194)
+        const closeBtn = this.createNode('CloseBtn', panelNode, 133, 194, closeBtnSize, closeBtnSize);
         closeBtn.on(Node.EventType.TOUCH_END, () => {
             this.renderSettingsModal(false);
         }, this);
 
-        // 声音开关：与图上喇叭图标垂直中心对齐（图标实测 cocos y=99）
-        const toggleSound = this.createToggle(panelNode, 0, 99, this.soundEnabled, (isOn) => {
+        // 声音开关：与图上喇叭图标垂直中心对齐（新图实测 cocos y=113，开关落在内嵌条右侧留白区）
+        const toggleSound = this.createToggle(panelNode, 0, 113, this.soundEnabled, (isOn) => {
             this.soundEnabled = isOn;
             localStorage.setItem('soundEnabled', String(isOn));
             SoundManager.getInstance()?.setMute(!isOn);
@@ -1592,37 +1598,40 @@ export class GameManager extends Component {
             }
         });
 
-        // 震动开关：与图上震动图标垂直中心对齐（图标实测 cocos y=15）
-        const toggleVibration = this.createToggle(panelNode, 0, 15, this.vibrationEnabled, (isOn) => {
+        // 震动开关：与图上震动图标垂直中心对齐（新图实测 cocos y=38）
+        const toggleVibration = this.createToggle(panelNode, 0, 38, this.vibrationEnabled, (isOn) => {
             this.vibrationEnabled = isOn;
             localStorage.setItem('vibrationEnabled', String(isOn));
             if (isOn) this.triggerVibration('light');
         });
 
-        // 重新挑战（黄色按钮）：热区中心对齐图上按钮实测位置 y=-74
-        const btnRestart = this.createNode('BtnRestart', panelNode, 0, -74, 150, 54);
+        // 重新挑战（橙黄按钮）：热区中心对齐新图实测位置 (-5, -51)
+        const btnRestart = this.createNode('BtnRestart', panelNode, -5, -51, 200, 52);
         btnRestart.on(Node.EventType.TOUCH_END, () => {
             this.renderSettingsModal(false);
+            this.ensureGameUI();
             this.initGame();
         }, this);
 
-        // 回第一关（蓝色按钮）：热区中心对齐图上按钮实测位置 y=-144
-        const btnFirstLevel = this.createNode('BtnFirstLevel', panelNode, 0, -144, 150, 54);
+        // 回第一关（蓝色按钮）：热区中心对齐新图实测位置 (-6, -110)
+        const btnFirstLevel = this.createNode('BtnFirstLevel', panelNode, -6, -110, 200, 52);
         btnFirstLevel.on(Node.EventType.TOUCH_END, () => {
             this.renderSettingsModal(false);
             this.currentLevel = 1;
             saveProgress(this.currentLevel);
+            this.ensureGameUI();
             this.initGame();
         }, this);
 
-        // 继续游戏（绿色按钮）：热区中心对齐图上按钮实测位置 y=-212
-        const btnContinue = this.createNode('BtnContinue', panelNode, 0, -212, 150, 54);
+        // 返回主页（绿色按钮）：热区中心对齐新图实测位置 (-5, -186)
+        const btnContinue = this.createNode('BtnContinue', panelNode, -5, -186, 204, 56);
         btnContinue.on(Node.EventType.TOUCH_END, () => {
             this.renderSettingsModal(false);
+            this.homePage.render();
         }, this);
     }
 
-    private createToggle(parent: Node, x: number, y: number, initialState: boolean, onChange: (state: boolean) => void) {
+    public createToggle(parent: Node, x: number, y: number, initialState: boolean, onChange: (state: boolean) => void) {
         const toggleW = 60;
         const toggleH = 30;
         // 把开关向右偏移，假设图标在左边，开关在右边对齐
@@ -2975,7 +2984,7 @@ export class GameManager extends Component {
         this.renderClearBasketModal();
     }
 
-    private showAdThen(callback: () => void, scene?: string) {
+    public showAdThen(callback: () => void, scene?: string) {
         const adManager = AdManager.getInstance();
         if (!adManager) {
             callback();
@@ -3263,7 +3272,7 @@ export class GameManager extends Component {
             .start();
     }
 
-    private createNode(name: string, parent: Node, x: number, y: number, width: number, height: number) {
+    public createNode(name: string, parent: Node, x: number, y: number, width: number, height: number) {
         const node = new Node(name);
         node.layer = Layers.Enum.UI_2D;
         const transform = node.addComponent(UITransform);
@@ -3310,11 +3319,11 @@ export class GameManager extends Component {
         if (this.plateSpriteFrame) {
             bgSprite.spriteFrame = this.plateSpriteFrame;
         } else {
-            resources.load('ui/plate/spriteFrame', SpriteFrame, (err, sf) => {
-                if (!err && sf && bgSprite && bgSprite.isValid) {
+            BundleManager.getInstance().loadAsset<SpriteFrame>('ui/plate/spriteFrame', SpriteFrame).then((sf) => {
+                if (sf && bgSprite && bgSprite.isValid) {
                     bgSprite.spriteFrame = sf;
                 }
-            });
+            }).catch(() => {});
         }
 
         // 保留这两个变量名以防后续逻辑引用，但不绘制任何东西
@@ -3497,11 +3506,11 @@ export class GameManager extends Component {
                 const holeNode = this.createNode(`Slot_${slotIndex}`, slotNode, 0, 0, 26.4, 26.4); // 24 * 1.1 = 26.4
                 const holeSprite = holeNode.addComponent(Sprite);
                 holeSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-                resources.load('ui/hole/spriteFrame', SpriteFrame, (err, sf) => {
-                    if (!err && sf && holeSprite && holeSprite.isValid) {
+                BundleManager.getInstance().loadAsset<SpriteFrame>('ui/hole/spriteFrame', SpriteFrame).then((sf) => {
+                    if (sf && holeSprite && holeSprite.isValid) {
                         holeSprite.spriteFrame = sf;
                     }
-                });
+                }).catch(() => {});
                 // 暂时保留 Graphics，以防其他地方报错，但不画东西
                 const holeGraphics = holeNode.addComponent(Graphics);
                 
@@ -3532,64 +3541,53 @@ export class GameManager extends Component {
 
         const slotRadius = 12;
         const spacing = slotRadius * 2 + 5;
-        const startX = -spacing * 2 - 15; // 孔位整体左移 15
+        const startX = -spacing * 2; // 5 个孔整体居中（span 为 spacing*4，起点 = -spacing*2）
 
         // 小太阳图标 + 数量（在暂存区孔位右侧）
         if (!this.sunCountLabel) {
             const sunX = startX + this.maxTempHoles * spacing + 55; // 小太阳右移，与孔位拉开间距
-            // 新图 200x100（2:1），左侧太阳、右侧浅绿色数字底区
+            // 新图 250x100（2.5:1），左侧太阳、右侧加宽的数字底框
             const iconH = 36; // 图标放大
-            const iconW = iconH * 2;
+            const iconW = iconH * 2.5;
 
-            // 设置+排行榜按钮（btn_settings.png 160x80 整图，2:1），放在暂存区左侧、与小太阳镜像对称
-            const comboX = -sunX;
-            const comboBtnNode = this.createNode('SettingsRankBtn', this.tempContainerNode, comboX, 0, iconW, iconH);
-            const comboSprite = comboBtnNode.addComponent(Sprite);
-            comboSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-            resources.load('ui/btn_settings/spriteFrame', SpriteFrame, (err, sf) => {
-                if (!err && sf && comboSprite.isValid) {
-                    comboSprite.spriteFrame = sf;
+            // 设置按钮（btn_gear.png，分包），放在暂存区左侧、与小太阳镜像对称
+            // 排行榜入口已移到首页，游戏内不再放排行榜按钮
+            const gearX = -sunX;
+            const gearBtnNode = this.createNode('SettingsBtn', this.tempContainerNode, gearX, 0, iconH, iconH);
+            const gearSprite = gearBtnNode.addComponent(Sprite);
+            gearSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+            BundleManager.getInstance().loadAsset<SpriteFrame>('ui/btn_gear/spriteFrame', SpriteFrame).then((sf) => {
+                if (sf && gearSprite.isValid) {
+                    gearSprite.spriteFrame = sf;
                 }
-            });
-
-            // 图片背景不透明不切分，用左右两个透明热区分别响应点击
-            const settingsHit = this.createNode('SettingsHit', comboBtnNode, -iconW / 4, 0, iconW / 2, iconH);
-            settingsHit.on(Node.EventType.TOUCH_END, () => {
+            }).catch(() => {});
+            gearBtnNode.on(Node.EventType.TOUCH_END, () => {
                 this.renderSettingsModal(true);
             }, this);
-
-            const rankHit = this.createNode('RankHit', comboBtnNode, iconW / 4, 0, iconW / 2, iconH);
-            rankHit.on(Node.EventType.TOUCH_END, () => {
-                this.handleRankButtonClick();
-            }, this);
-
-            // 未授权用户：在排行榜热区上叠加微信原生授权按钮，
-            // 点击即由微信自动串起「官方隐私弹窗 → 昵称头像授权弹窗」
-            this.setupRankAuthOverlay(rankHit);
 
             const sunNode = this.createNode('SunIcon', this.tempContainerNode, sunX, 0, iconW, iconH);
             this.sunIconNode = sunNode;
             const sunSprite = sunNode.addComponent(Sprite);
             sunSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-            resources.load('ui/sun/spriteFrame', SpriteFrame, (err, sf) => {
-                if (!err && sf && sunSprite && sunSprite.isValid) {
+            BundleManager.getInstance().loadAsset<SpriteFrame>('ui/sun/spriteFrame', SpriteFrame).then((sf) => {
+                if (sf && sunSprite && sunSprite.isValid) {
                     sunSprite.spriteFrame = sf;
                 }
-            });
+            }).catch(() => {});
 
-            // 数字居中显示在图片右侧浅绿色区域内（该区域中心约在图片宽度 74.5% 处）
-            const greenCenterOffsetX = (0.745 - 0.5) * iconW;
-            const labelNode = this.createNode('SunCount', this.tempContainerNode, sunX + greenCenterOffsetX, 0, iconW * 0.5, iconH);
+            // 数字靠左显示在底框内部（内部左缘实测在图宽 42% 处），左锚点+不缩放，数字变大时向右撑
+            const boxLeftOffsetX = (0.42 - 0.5) * iconW + 6; // 内部左缘再留 6px 内边距
+            const labelNode = this.createNode('SunCount', this.tempContainerNode, sunX + boxLeftOffsetX, 0, iconW * 0.5, iconH);
             this.sunCountLabel = labelNode.addComponent(Label);
             this.sunCountLabel.fontSize = 17;
             this.sunCountLabel.lineHeight = iconH;
             this.sunCountLabel.color = new Color(46, 110, 30, 255);
             this.sunCountLabel.string = `${this.totalSuns}`;
             const labelTransform = labelNode.getComponent(UITransform);
-            if (labelTransform) labelTransform.setAnchorPoint(0.5, 0.5);
-            this.sunCountLabel.horizontalAlign = Label.HorizontalAlign.CENTER;
+            if (labelTransform) labelTransform.setAnchorPoint(0, 0.5);
+            this.sunCountLabel.horizontalAlign = Label.HorizontalAlign.LEFT;
             this.sunCountLabel.verticalAlign = Label.VerticalAlign.CENTER;
-            this.sunCountLabel.overflow = Label.Overflow.SHRINK;
+            this.sunCountLabel.overflow = Label.Overflow.NONE;
         }
         while (this.tempSlotViews.length < this.maxTempHoles) {
             const index = this.tempSlotViews.length;
@@ -3599,11 +3597,11 @@ export class GameManager extends Component {
             const holeNode = this.createNode(`TempSlot_${index}`, slotNode, 0, 0, slotRadius * 2.2, slotRadius * 2.2);
             const holeSprite = holeNode.addComponent(Sprite);
             holeSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-            resources.load('ui/hole/spriteFrame', SpriteFrame, (err, sf) => {
-                if (!err && sf && holeSprite && holeSprite.isValid) {
+            BundleManager.getInstance().loadAsset<SpriteFrame>('ui/hole/spriteFrame', SpriteFrame).then((sf) => {
+                if (sf && holeSprite && holeSprite.isValid) {
                     holeSprite.spriteFrame = sf;
                 }
-            });
+            }).catch(() => {});
             const hole = holeNode.addComponent(Graphics); // 保留 component 引用以兼容旧代码结构，但不绘制
             
             const fruitHost = this.createNode(`TempFruitHost_${index}`, slotNode, 0, 0, slotRadius * 2, slotRadius * 2);
@@ -3634,11 +3632,11 @@ export class GameManager extends Component {
             btnSprite.sizeMode = Sprite.SizeMode.CUSTOM;
             btnSprite.type = Sprite.Type.SLICED;
             const imageName = tool.key === 'add' ? 'btn_add_basket' : 'btn_clear_tray';
-            resources.load(`ui/${imageName}/spriteFrame`, SpriteFrame, (err, sf) => {
-                if (!err && sf && btnSprite && btnSprite.isValid) {
+            BundleManager.getInstance().loadAsset<SpriteFrame>(`ui/${imageName}/spriteFrame`, SpriteFrame).then((sf) => {
+                if (sf && btnSprite && btnSprite.isValid) {
                     btnSprite.spriteFrame = sf;
                 }
-            });
+            }).catch(() => {});
 
             // 恢复图标和文字显示
             const iconLabel = this.createLabel(btnNode, tool.icon, 0, 10, 28, new Color(255, 255, 255, 255), false, 32);
@@ -3672,13 +3670,13 @@ export class GameManager extends Component {
         });
     }
 
-    private createGraphicsNode(name: string, parent: Node, width: number, height: number, x: number, y: number) {
+    public createGraphicsNode(name: string, parent: Node, width: number, height: number, x: number, y: number) {
         const node = this.createNode(name, parent, x, y, width, height);
         node.addComponent(Graphics);
         return node;
     }
 
-    private createLabel(parent: Node, text: string, x: number, y: number, fontSize: number, color: Color, bold = false, lineHeight?: number) {
+    public createLabel(parent: Node, text: string, x: number, y: number, fontSize: number, color: Color, bold = false, lineHeight?: number) {
         const node = this.createNode('Label', parent, x, y, 200, 60);
         const label = node.addComponent(Label);
         label.string = text;
@@ -3755,7 +3753,7 @@ export class GameManager extends Component {
         return node;
     }
 
-    private triggerVibration(type: 'light' | 'heavy' | 'success' = 'light') {
+    public triggerVibration(type: 'light' | 'heavy' | 'success' = 'light') {
         if (!this.vibrationEnabled) return;
         const platformApi = (globalThis as any).wx || (globalThis as any).tt;
         if (platformApi && typeof platformApi.vibrateShort === 'function') {
@@ -3860,7 +3858,7 @@ export class GameManager extends Component {
         return fruitNode;
     }
 
-    private drawRoundedRect(graphics: Graphics, width: number, height: number, fill: Color, radius: number, lineWidth = 0, stroke?: Color) {
+    public drawRoundedRect(graphics: Graphics, width: number, height: number, fill: Color, radius: number, lineWidth = 0, stroke?: Color) {
         graphics.clear();
         graphics.fillColor = fill;
         graphics.roundRect(-width / 2, -height / 2, width, height, radius);
@@ -3873,7 +3871,7 @@ export class GameManager extends Component {
         }
     }
 
-    private drawCircle(graphics: Graphics, radius: number, fill: Color, lineWidth = 0, stroke?: Color) {
+    public drawCircle(graphics: Graphics, radius: number, fill: Color, lineWidth = 0, stroke?: Color) {
         graphics.clear();
         graphics.fillColor = fill;
         graphics.circle(0, 0, radius);
@@ -3936,175 +3934,6 @@ export class GameManager extends Component {
         return BOX_COLORS[color] || new Color(200, 200, 200, 255);
     }
 
-    private handleRankButtonClick() {
-        // 非微信环境或无 wx api：直接进排行榜
-        if (typeof wx === 'undefined') {
-            this.loadAndShowRank();
-            return;
-        }
-        // 已有档案：直接进排行榜
-        if (hasUserProfile()) {
-            this.loadAndShowRank();
-            return;
-        }
-        // 未授权时点击本应被原生授权按钮拦截，走到这里说明原生按钮创建失败。
-        // 兜底：曾授权过则直接取用户信息，否则提示需要授权（不放行进榜）
-        wx.getSetting({
-            success: (settingRes: any) => {
-                const authSetting = settingRes.authSetting || {};
-                if (authSetting['scope.userInfo'] === true) {
-                    wx.getUserInfo({
-                        success: (userRes: any) => {
-                            this.saveAndEnterRank(userRes.userInfo);
-                        },
-                        fail: () => {
-                            this.showAuthRequiredToast();
-                        }
-                    });
-                } else {
-                    this.showAuthRequiredToast();
-                }
-            },
-            fail: () => {
-                this.showAuthRequiredToast();
-            }
-        });
-    }
-
-    private showAuthRequiredToast() {
-        if (typeof wx !== 'undefined' && typeof wx.showToast === 'function') {
-            wx.showToast({ title: '授权后才能查看排行榜', icon: 'none' });
-        }
-    }
-
-    /**
-     * 在排行榜按钮位置叠加透明的微信原生授权按钮。
-     * 点击后微信自动串起「官方隐私弹窗 → 昵称头像授权弹窗」，
-     * 任一步取消都不进入排行榜。
-     * 坐标换算：节点世界包围盒 → view 缩放/视口偏移 → 屏幕逻辑像素，全设备通用。
-     */
-    private setupRankAuthOverlay(targetNode: Node) {
-        if (typeof wx === 'undefined' || typeof wx.createUserInfoButton !== 'function') return;
-        if (hasUserProfile()) return;
-        this.destroyRankAuthOverlay();
-
-        // 延迟一帧：等待节点世界变换更新后再取包围盒，否则可能拿到零值
-        this.scheduleOnce(() => {
-            if (!targetNode || !targetNode.isValid) return;
-            const uiTf = targetNode.getComponent(UITransform);
-            if (!uiTf) return;
-
-            const box = uiTf.getBoundingBoxToWorld();
-            const vpRect = view.getViewportRect();
-            const sx = view.getScaleX();
-            const sy = view.getScaleY();
-            const dpr = screen.devicePixelRatio || 1;
-            const sysInfo = wx.getSystemInfoSync();
-
-            const pad = 4; // 略微扩大点击热区
-            const left = (box.xMin * sx + vpRect.x) / dpr - pad;
-            const top = sysInfo.windowHeight - (box.yMax * sy + vpRect.y) / dpr - pad;
-            const btnW = (box.width * sx) / dpr + pad * 2;
-            const btnH = (box.height * sy) / dpr + pad * 2;
-            console.log('[Auth] rankAuthBtn rect:', JSON.stringify({ left, top, width: btnW, height: btnH, windowW: sysInfo.windowWidth, windowH: sysInfo.windowHeight }));
-
-            try {
-                const button = wx.createUserInfoButton({
-                    type: 'text',
-                    text: '',
-                    style: {
-                        left,
-                        top,
-                        width: btnW,
-                        height: btnH,
-                        backgroundColor: 'transparent',
-                        color: 'transparent',
-                        textAlign: 'center',
-                        fontSize: 0,
-                    },
-                });
-
-                button.onTap((res: any) => {
-                    console.log('[Auth] rankAuthBtn onTap:', JSON.stringify(res));
-                    if (res && res.userInfo && res.userInfo.nickName && res.userInfo.nickName !== '微信用户') {
-                        // 授权成功：销毁原生按钮，保存并进榜
-                        this.destroyRankAuthOverlay();
-                        this.saveAndEnterRank(res.userInfo);
-                    } else {
-                        // 用户在隐私弹窗或授权弹窗中取消：不进榜，按钮保留供下次点击
-                        console.log('[Auth] auth cancelled or anonymous userInfo:', res && res.errMsg);
-                        this.showAuthRequiredToast();
-                    }
-                });
-
-                this.rankAuthBtn = button;
-            } catch (e) {
-                console.warn('[Auth] createUserInfoButton failed:', e);
-            }
-        }, 0);
-    }
-
-    private destroyRankAuthOverlay() {
-        if (this.rankAuthBtn) {
-            try {
-                this.rankAuthBtn.destroy();
-            } catch { }
-            this.rankAuthBtn = null;
-        }
-    }
-
-    /** 显示/隐藏排行榜上的原生授权按钮（弹窗打开期间需隐藏，防止透明按钮误拦截点击） */
-    private setRankAuthOverlayVisible(visible: boolean) {
-        if (!this.rankAuthBtn) return;
-        try {
-            if (visible) {
-                this.rankAuthBtn.show();
-            } else {
-                this.rankAuthBtn.hide();
-            }
-        } catch { }
-    }
-
-    private async saveAndEnterRank(userInfo: any) {
-        const nickname = ((userInfo.nickName || '') as string).trim() || '微信玩家';
-        const avatarUrl = ((userInfo.avatarUrl || '') as string).trim();
-        const result = await updateProfile(nickname, avatarUrl);
-        if (!result.success) {
-            // 保存失败：把后端原因直接提示出来，便于真机排查；不阻塞进榜
-            console.warn('保存微信头像昵称失败:', result.message);
-            if (typeof wx !== 'undefined' && typeof wx.showToast === 'function') {
-                wx.showToast({ title: result.message || '保存失败，请重试', icon: 'none' });
-            }
-        }
-        this.loadAndShowRank();
-    }
-
-    private async loadDefaultAvatars(): Promise<void> {
-        if (this.defaultAvatarsLoaded) return;
-        return new Promise((resolve) => {
-            const avatarNames = ['Avatars1', 'Avatars2', 'Avatars3', 'Avatars4', 'Avatars5', 'Avatars6'];
-            let loaded = 0;
-            avatarNames.forEach((name) => {
-                BundleManager.getInstance().loadAsset<SpriteFrame>(`avatar/${name}/spriteFrame`, SpriteFrame).then((spriteFrame) => {
-                    loaded++;
-                    if (spriteFrame) {
-                        this.defaultAvatarFrames.push(spriteFrame);
-                    }
-                    if (loaded === avatarNames.length) {
-                        this.defaultAvatarsLoaded = true;
-                        resolve();
-                    }
-                }).catch(() => {
-                    loaded++;
-                    if (loaded === avatarNames.length) {
-                        this.defaultAvatarsLoaded = true;
-                        resolve();
-                    }
-                });
-            });
-        });
-    }
-
     /** FruitColor → 水果图片文件名映射 */
     private FRUIT_MAP: Record<string, string> = {
         'red': 'Red Apple',
@@ -4134,9 +3963,9 @@ export class GameManager extends Component {
     private async loadFruitSprites(): Promise<void> {
         if (this.fruitsLoaded) return;
         return new Promise((resolve) => {
-            // 所有水果从 resources 主包加载
-            const regularFruits = ['Red Apple', 'Lemon', 'Peach', 'Orange', 'Pear', 'Eggplant', 'Сorn', 'Carrot', 'Rainbow Fruit'];
-            const totalCount = regularFruits.length;
+            // 普通水果从 resources 主包加载，彩虹果从分包加载
+            const regularFruits = ['Red Apple', 'Lemon', 'Peach', 'Orange', 'Pear', 'Eggplant', 'Сorn', 'Carrot'];
+            const totalCount = regularFruits.length + 1;
             let loaded = 0;
 
             const tryResolve = () => {
@@ -4158,6 +3987,19 @@ export class GameManager extends Component {
                     tryResolve();
                 });
             });
+
+            // 彩虹果（222K 大图）已挪到分包，分包启动时已后台预载
+            BundleManager.getInstance().loadAsset<SpriteFrame>('fruits/Rainbow Fruit/spriteFrame', SpriteFrame).then((spriteFrame) => {
+                loaded++;
+                if (spriteFrame) {
+                    this.fruitSprites.set('Rainbow Fruit', spriteFrame);
+                }
+                tryResolve();
+            }).catch((err) => {
+                loaded++;
+                console.warn('[Fruit] failed to load Rainbow Fruit:', err);
+                tryResolve();
+            });
         });
     }
 
@@ -4171,23 +4013,23 @@ export class GameManager extends Component {
             };
             
             if (!this.basketSpriteFrame) {
-                resources.load('ui/basket/spriteFrame', SpriteFrame, (err, spriteFrame) => {
-                    if (!err && spriteFrame) {
+                BundleManager.getInstance().loadAsset<SpriteFrame>('ui/basket/spriteFrame', SpriteFrame).then((spriteFrame) => {
+                    if (spriteFrame) {
                         this.basketSpriteFrame = spriteFrame;
                     }
                     checkDone();
-                });
+                }).catch(() => checkDone());
             } else {
                 checkDone();
             }
 
             if (!this.plateSpriteFrame) {
-                resources.load('ui/plate/spriteFrame', SpriteFrame, (err, spriteFrame) => {
-                    if (!err && spriteFrame) {
+                BundleManager.getInstance().loadAsset<SpriteFrame>('ui/plate/spriteFrame', SpriteFrame).then((spriteFrame) => {
+                    if (spriteFrame) {
                         this.plateSpriteFrame = spriteFrame;
                     }
                     checkDone();
-                });
+                }).catch(() => checkDone());
             } else {
                 checkDone();
             }
@@ -4305,106 +4147,39 @@ export class GameManager extends Component {
         return this.fruitSprites.get(fruitName) || null;
     }
 
-    /** 根据 avatarUrl 解析默认头像索引，兼容旧数据 "1"~"6" */
-    private getDefaultAvatarFrame(avatarUrl: string): SpriteFrame | null {
-        if (!avatarUrl || this.defaultAvatarFrames.length === 0) return null;
-        // 匹配 default:N 或纯数字格式
-        const match = avatarUrl.match(/^default:(\d+)$|^(\d+)$/);
-        if (!match) return null;
-        const index = parseInt(match[1] || match[2], 10) - 1;
-        if (index < 0 || index >= this.defaultAvatarFrames.length) return null;
-        return this.defaultAvatarFrames[index];
-    }
-
-    private getRandomDefaultAvatar(): SpriteFrame | null {
-        if (this.defaultAvatarFrames.length === 0) return null;
-        const idx = Math.floor(Math.random() * this.defaultAvatarFrames.length);
-        return this.defaultAvatarFrames[idx];
-    }
-
-    private createAvatarSpriteNode(parent: Node, x: number, y: number, size: number, avatarUrl?: string): Node {
-        const node = this.createNode('Avatar', parent, x, y, size, size);
-        const sprite = node.addComponent(Sprite);
-        sprite.sizeMode = Sprite.SizeMode.CUSTOM; // 强制使用自定义尺寸，避免原图过大
-        
-        // 可选：添加一个 Mask 组件让图片变成圆形
-        const maskNode = this.createNode('AvatarMask', parent, x, y, size, size);
-        const mask = maskNode.addComponent(Mask);
-        mask.type = Mask.Type.GRAPHICS_ELLIPSE; // 圆形遮罩
-        
-        // 把 sprite 放到 mask 下面
-        node.parent = maskNode;
-        node.setPosition(0, 0, 0);
-        
-        const url = (avatarUrl || '').trim();
-        
-        // 远程微信头像
-        if (url.startsWith('http')) {
-            this.setDefaultAvatarFrame(sprite); // 先给默认图，加载成功后替换
-            assetManager.loadRemote<ImageAsset>(url, { ext: '.png' }, (err, imageAsset) => {
-                if (!err && imageAsset && sprite.isValid) {
-                    const texture = new Texture2D();
-                    texture.image = imageAsset;
-                    const spriteFrame = new SpriteFrame();
-                    spriteFrame.texture = texture;
-                    sprite.spriteFrame = spriteFrame;
-                }
-            });
-        } else {
-            // 默认头像
-            this.setDefaultAvatarFrame(sprite, url);
-        }
-        return maskNode;
-    }
-
-    private setDefaultAvatarFrame(sprite: Sprite, avatarUrl?: string) {
-        const frame = this.getDefaultAvatarFrame(avatarUrl || '') || this.getRandomDefaultAvatar();
-        if (frame) {
-            sprite.spriteFrame = frame;
-        }
-    }
-
-    private async loadAndShowRank() {
-        this.showLoadingOverlay();
-        try {
-            const data = await fetchRank();
-            await this.loadDefaultAvatars();
-            this.hideLoadingOverlay();
-            this.renderRankPage(data.list, data.myRank);
-        } catch {
-            this.hideLoadingOverlay();
-        }
-    }
-
-    private closeRankPage() {
-        if (this.rankPageNode && this.rankPageNode.isValid) {
-            this.rankPageNode.destroy();
-            this.rankPageNode = null;
-        }
-        if (this.modalLayerNode) {
-            this.modalLayerNode.active = false;
-        }
-        if (this.topAreaNode) this.topAreaNode.active = true;
-        if (this.boardAreaNode) this.boardAreaNode.active = true;
-        if (this.bottomAreaNode) this.bottomAreaNode.active = true;
-    }
-
-    /** 榜单展示昵称：未授权用户按 userId 生成稳定的随机玩家名 */
-    private getRankDisplayName(item: RankItem): string {
-        const nick = (item.nickname || '').trim();
-        if (nick) return nick.substring(0, 8);
-        const seed = Number(item.userId) || 0;
-        return `玩家${(seed * 73 + 1357) % 9000 + 1000}`;
-    }
-
-    private renderRankPage(list: RankItem[], myRank: RankItem | null) {
-        this.closeRankPage();
-        // 排行榜页会销毁主界面，原生授权按钮一并销毁（返回时随 ensureTempSlotViews 重建）
-        this.destroyRankAuthOverlay();
+    public goBackToGame() {
+        this.rankPage.close();
         if (this.rootNode) {
             this.rootNode.removeAllChildren();
         }
+        this.gameOver = false;
+        this.plateNodes.clear();
+        this.fallingPlateNodes.clear();
+        this.boxViews = [];
+        this.tempSlotViews = [];
+        this.toolViews = [];
+        this.setupLayout();
+        this.renderAll();
+    }
 
+    /** 确保游戏界面存在：从首页打开设置弹窗点重开时，需先重建游戏布局再 initGame */
+    private ensureGameUI() {
+        if (this.boardAreaNode && this.boardAreaNode.isValid) return;
+        this.homePage.close();
+        this.rankPage.close();
+        if (this.rootNode) {
+            this.rootNode.removeAllChildren();
+        }
+        this.plateNodes.clear();
+        this.fallingPlateNodes.clear();
+        this.boxViews = [];
+        this.tempSlotViews = [];
+        this.toolViews = [];
+        this.setupLayout();
+    }
+
+    /** 整页（排行榜/首页）切换前：隐藏并置空游戏主界面引用，返回游戏时由 goBackToGame 重建 */
+    public teardownGameView() {
         if (this.topAreaNode) this.topAreaNode.active = false;
         if (this.boardAreaNode) this.boardAreaNode.active = false;
         if (this.bottomAreaNode) this.bottomAreaNode.active = false;
@@ -4421,220 +4196,12 @@ export class GameManager extends Component {
         // 太阳/设置排行榜按钮随主界面销毁，置空以便返回游戏时重建
         this.sunCountLabel = null;
         this.sunIconNode = null;
-
-        const pageW = this.screenWidth;
-        const pageH = this.screenHeight;
-        const padX = 20;
-        const listW = pageW - padX * 2;
-
-        this.rankPageNode = this.createNode('RankPage', this.rootNode, 0, 0, pageW, pageH);
-
-        // --- 整体背景 (采用浅色清新的原木/休闲主题色) ---
-        const bg = this.createGraphicsNode('RankBg', this.rankPageNode, pageW, pageH, 0, 0);
-        bg.getComponent(Graphics)!.fillColor = new Color(245, 248, 240, 255); // 极浅的米绿色背景
-        bg.getComponent(Graphics)!.rect(-pageW / 2, -pageH / 2, pageW, pageH);
-        bg.getComponent(Graphics)!.fill();
-
-        // --- 顶部导航区域 ---
-        const headerY = pageH / 2 - 40;
-        
-        // 返回按钮 (< 图标)
-        const backBtnW = 40;
-        const backBtnH = 40;
-        const backBtn = this.createNode('BackBtn', this.rankPageNode, -pageW / 2 + 30, headerY, backBtnW, backBtnH);
-        this.createLabel(backBtn, '❮', 0, 0, 24, new Color(100, 120, 90, 255), true); // 绿色箭头
-        backBtn.on(Node.EventType.TOUCH_END, () => this.goBackToGame(), this);
-
-        // 标题 (排行榜)
-        this.createLabel(this.rankPageNode, '排行榜', 0, headerY, 22, new Color(60, 80, 50, 255), true); // 深绿色标题
-
-        // --- 前三名领奖台区域 (Top 3 Podium) ---
-        // 按实际排名取，避免并列排名时 slice 错位
-        const top1 = list.find(t => t.rank === 1);
-        const top2 = list.find(t => t.rank === 2);
-        const top3 = list.find(t => t.rank === 3);
-        const podiumY = headerY - 140; // 领奖台中心高度
-        
-        // 定义领奖台配置：[2, 1, 3] 的顺序 (左，中，右)
-        const podiumConfigs = [
-            { rank: 2, offsetX: -90, yOffset: -30, scale: 0.85, color: new Color(160, 200, 240, 255) }, // 银色/浅蓝
-            { rank: 1, offsetX: 0,   yOffset: 20,  scale: 1.1,  color: new Color(255, 190, 60, 255) },  // 金色
-            { rank: 3, offsetX: 90,  yOffset: -40, scale: 0.8,  color: new Color(140, 220, 160, 255) }  // 铜色/浅绿
-        ];
-
-        // 绘制领奖台底板 (一个大圆角矩形，包裹前三名)
-        const podiumBgH = 160;
-        const podiumBgY = podiumY - 40;
-        const podiumBg = this.createGraphicsNode('PodiumBg', this.rankPageNode, listW, podiumBgH, 0, podiumBgY);
-        this.drawRoundedRect(podiumBg.getComponent(Graphics)!, listW, podiumBgH, new Color(230, 240, 220, 255), 24);
-
-        // 渲染前三名
-        const podiumMap: Record<number, RankItem | undefined> = { 1: top1, 2: top2, 3: top3 };
-        podiumConfigs.forEach(config => {
-            const item = podiumMap[config.rank];
-            if (!item) return;
-
-            const itemX = config.offsetX;
-            const itemY = podiumY + config.yOffset;
-
-            // 头像
-            const avatarSize = 64 * config.scale;
-            // 头像图片 (使用用户选择的头像)
-            this.createAvatarSpriteNode(this.rankPageNode, itemX, itemY, avatarSize, item.avatarUrl);
-            // 外圈装饰环
-            const avatarBorder = this.createGraphicsNode(`PodiumBorder_${config.rank}`, this.rankPageNode, avatarSize + 8, avatarSize + 8, itemX, itemY);
-            this.drawCircle(avatarBorder.getComponent(Graphics)!, avatarSize / 2 + 4, new Color(0, 0, 0, 0), 3, config.color);
-
-            // 排名徽章 (贴在头像下方)
-            const badgeSize = 20 * config.scale;
-            const badgeY = itemY - avatarSize / 2;
-            const badge = this.createGraphicsNode(`PodiumBadge_${config.rank}`, this.rankPageNode, badgeSize, badgeSize, itemX, badgeY);
-            this.drawCircle(badge.getComponent(Graphics)!, badgeSize / 2, config.color);
-            this.createLabel(this.rankPageNode, `${config.rank}`, itemX, badgeY, 12 * config.scale, new Color(255, 255, 255, 255), true);
-
-            // 昵称
-            const nick = this.getRankDisplayName(item);
-            this.createLabel(this.rankPageNode, nick, itemX, badgeY - 20, 14, new Color(80, 100, 70, 255), config.rank === 1);
-
-            // 关卡数 (高亮颜色)
-            this.createLabel(this.rankPageNode, `${item.levelNum}关`, itemX, badgeY - 40, 16, config.color, true);
-            
-            // 皇冠 (仅第一名有)
-            if (config.rank === 1) {
-                this.createLabel(this.rankPageNode, '👑', itemX, itemY + avatarSize / 2 + 15, 24, new Color(255, 190, 60, 255), true);
-            }
-        });
-
-        // --- 列表区域 (List Area) ---
-        // 列表大底板
-        let listStartY = podiumBgY - podiumBgH / 2 - 20;
-        const myRankH = myRank ? 90 : 20; // 为底部的"我的排名"预留高度
-        const listBgH = pageH / 2 + listStartY; // 延伸到底部，刚好到屏幕边缘
-        const listBgCenterY = listStartY - listBgH / 2;
-        
-        const listBg = this.createGraphicsNode('ListBg', this.rankPageNode, pageW, listBgH, 0, listBgCenterY);
-        // 上边两个角是圆角，下面直角
-        const g = listBg.getComponent(Graphics)!;
-        g.fillColor = new Color(255, 255, 255, 255); // 纯白底板，显得干净
-        g.roundRect(-pageW / 2, -listBgH / 2, pageW, listBgH, 30); // 简单起见统一用大圆角
-        g.fill();
-
-        // 渲染列表项 (从第 4 名开始)
-        const listItems = list.filter(t => t.rank > 3); // 排除领奖台已展示的前三名
-        const visibleCount = listItems.length;
-        const itemH = 64;
-
-        // 创建 ScrollView 可视区域
-        const viewW = pageW;
-        const viewH = listBgH - 30 - myRankH; // 上边距 30，下边距 myRankH
-        const viewY = listBgCenterY - 15 + myRankH / 2; // 微调位置
-
-        const scrollViewNode = this.createNode('ScrollView', this.rankPageNode, 0, viewY, viewW, viewH);
-        const scrollView = scrollViewNode.addComponent(ScrollView);
-        scrollView.horizontal = false;
-        scrollView.vertical = true;
-        
-        const viewNode = this.createNode('View', scrollViewNode, 0, 0, viewW, viewH);
-        const mask = viewNode.addComponent(Mask);
-        mask.type = Mask.Type.GRAPHICS_RECT;
-        
-        const contentH = Math.max(visibleCount * itemH, viewH);
-        const contentNode = this.createNode('Content', viewNode, 0, 0, viewW, contentH);
-        const contentUI = contentNode.getComponent(UITransform)!;
-        contentUI.setAnchorPoint(0.5, 1); // 顶部对齐
-        contentNode.setPosition(0, viewH / 2, 0); // 放在 view 的最上面
-        
-        scrollView.content = contentNode;
-
-        for (let i = 0; i < visibleCount; i++) {
-            const item = listItems[i];
-            const itemY = -i * itemH - itemH / 2; // 相对 contentNode (anchor 0.5, 1)
-
-            const isMe = item.isMe;
-            const itemLeftX = -listW / 2 + 20;
-
-            // 排名数字 (最左侧，放大、加粗、醒目颜色)
-            const rankColor = isMe ? new Color(255, 150, 0, 255) : new Color(120, 140, 110, 255);
-            const rankLabel = this.createLabel(contentNode, `${item.rank}`, itemLeftX + 10, itemY, 20, rankColor, true);
-            rankLabel.horizontalAlign = 0; // LEFT
-            rankLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
-
-            // 头像 (紧跟在排名右侧)
-            const avatarSize = 40;
-            const avatarX = itemLeftX + 60; // 排名占约 40px 宽度
-            this.createAvatarSpriteNode(contentNode, avatarX, itemY, avatarSize, item.avatarUrl);
-
-            // 昵称 (紧跟在头像右侧)
-            const nick = (item.nickname || '玩家').substring(0, 8);
-            const nameColor = isMe ? new Color(200, 140, 30, 255) : new Color(80, 100, 70, 255);
-            
-            const nickLabel = this.createLabel(contentNode, nick, avatarX + 30, itemY, 16, nameColor, isMe);
-            nickLabel.horizontalAlign = 0; // LEFT
-            nickLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
-
-            // 关卡数 (靠最右)
-            const rightX = listW / 2 - 20;
-            const lvLabel = this.createLabel(contentNode, `${item.levelNum} 关`, rightX, itemY, 18, nameColor, true);
-            lvLabel.horizontalAlign = 2; // RIGHT
-            lvLabel.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
-
-            // 分割线
-            if (i < visibleCount - 1) {
-                const lineY = itemY - itemH / 2;
-                const lineNode = this.createGraphicsNode('ItemLine', contentNode, listW, 1, 0, lineY);
-                lineNode.getComponent(Graphics)!.fillColor = new Color(240, 245, 235, 255);
-                lineNode.getComponent(Graphics)!.rect(-listW / 2, -0.5, listW, 1);
-                lineNode.getComponent(Graphics)!.fill();
-            }
-        }
-
-        // --- 底部悬浮的“我”的排名 ---
-        if (myRank) {
-            const myCardH = 70;
-            const myCardY = -pageH / 2 + myCardH / 2 + 20; // 悬浮在底部
-
-            // 我的排名底板 (带阴影)
-            const myBg = this.createGraphicsNode('MyRankBg', this.rankPageNode, listW, myCardH, 0, myCardY);
-            this.drawRoundedRect(myBg.getComponent(Graphics)!, listW, myCardH, new Color(255, 190, 60, 255), 20); // 醒目的暖黄色
-            
-            const itemLeftX = -listW / 2 + 20;
-
-            // 排名数字 (最左侧)
-            const rankLabel = this.createLabel(this.rankPageNode, `${myRank.rank || '?'}`, itemLeftX + 10, myCardY, 20, new Color(255, 255, 255, 255), true);
-            rankLabel.horizontalAlign = 0; // LEFT
-            rankLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
-
-            // 头像 (紧跟排名)
-            const avatarSize = 40;
-            const avatarX = itemLeftX + 60;
-            this.createAvatarSpriteNode(this.rankPageNode, avatarX, myCardY, avatarSize, myRank.avatarUrl);
-
-            // 昵称
-            const nick = this.getRankDisplayName(myRank);
-            const nickLabel = this.createLabel(this.rankPageNode, nick, avatarX + 30, myCardY, 18, new Color(255, 255, 255, 255), true);
-            nickLabel.horizontalAlign = 0; // LEFT
-            nickLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
-
-            // 关卡数
-            const rightX = listW / 2 - 20;
-            const lvLabel = this.createLabel(this.rankPageNode, `${myRank.levelNum || 0} 关`, rightX, myCardY, 20, new Color(255, 255, 255, 255), true);
-            lvLabel.horizontalAlign = 2; // RIGHT
-            lvLabel.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
-        }
     }
 
-    private goBackToGame() {
-        this.closeRankPage();
-        if (this.rootNode) {
-            this.rootNode.removeAllChildren();
-        }
-        this.gameOver = false;
-        this.plateNodes.clear();
-        this.fallingPlateNodes.clear();
-        this.boxViews = [];
-        this.tempSlotViews = [];
-        this.toolViews = [];
-        this.setupLayout();
-        this.renderAll();
+    /** 新手引导：首次进入无限模式时触发，仅一次（新人礼/每日登录奖励已移到首页弹出） */
+    public showWelcomeFlowIfNeeded() {
+        if (this.welcomeFlowShown) return;
+        this.welcomeFlowShown = true;
+        this.scheduleOnce(() => this.showTutorialIfNeeded(), 0.35);
     }
 }

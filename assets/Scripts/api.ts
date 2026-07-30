@@ -47,6 +47,7 @@ const SECRET_KEY = "X9vP2xL5mN8qR1sT4wY7zB0cJ3fH6gD9";
 let token: string | null = null;
 let currentLevel = 1;
 let dailyRewardClaimable = false;
+let newUserThisLogin = false;
 
 try {
     if (platform) {
@@ -208,6 +209,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
     console.log('[API] login response, levelNum:', res.data?.progress?.levelNum, 'hasProfile:', res.data?.hasProfile, 'isNewUser:', res.data?.isNewUser, 'dailyRewardClaimable:', res.data?.dailyRewardClaimable);
     token = res.data.token;
     dailyRewardClaimable = res.data?.dailyRewardClaimable ?? false;
+    newUserThisLogin = res.data?.isNewUser ?? false;
     if (token) {
         if (platform) {
             platform.setStorageSync('token', token);
@@ -335,6 +337,7 @@ export interface GameConfig {
   boxCapacity: GameConfigCapacityRange[]
   toolCosts: GameConfigToolCosts
   dailyLoginReward: number
+  newUserReward: number
 }
 
 /** 缓存的游戏配置 */
@@ -380,6 +383,7 @@ export const getDefaultGameConfig = (): GameConfig => {
     challengeWeights: { temp: 10, click: 20, block: 60 },
     toolCosts: { addBasket: 20, clearTray: 20 },
     dailyLoginReward: 200,
+    newUserReward: 1000,
     boxCapacity: [
       { max: 6,  w3: 100 },
       { max: 11, w3: 85,  w4: 15 },
@@ -400,6 +404,9 @@ export const getGameConfig = (): GameConfig => {
 
 /** 今日是否可领取每日登录奖励 */
 export const isDailyRewardClaimable = (): boolean => dailyRewardClaimable;
+
+/** 本次登录是否是新用户（仅创建用户的那次登录为 true，用于新人见面礼） */
+export const isNewUserThisLogin = (): boolean => newUserThisLogin;
 
 /** 领取每日登录奖励 */
 export const claimDailyReward = async (): Promise<{ success: boolean; amount: number }> => {
