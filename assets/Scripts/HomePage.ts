@@ -230,10 +230,10 @@ export class HomePage {
         this.gm.rankPage.destroyAuthOverlay();
     }
 
-    /** 进入无限模式：重建主界面并渲染已有进度，首次进入时补触发新手引导 */
+    /** 进入无限模式：重开一局全新局面（关卡号不变），首次进入时补触发新手引导 */
     private enterEndlessMode() {
         this.close();
-        this.gm.goBackToGame();
+        this.gm.startGameFromHome();
         this.gm.showWelcomeFlowIfNeeded();
     }
 
