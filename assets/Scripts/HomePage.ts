@@ -163,15 +163,16 @@ export class HomePage {
         const btnNode = this.gm.createNode(`HomeBtn_${imgName}`, this.pageNode, x, y, width, width * 0.55);
         const sprite = btnNode.addComponent(Sprite);
         sprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        resources.load(`ui/${imgName}/spriteFrame`, SpriteFrame, (err, sf) => {
-            if (!err && sf && sprite && sprite.isValid) {
+        // 主页按钮图已挪 bundle_late 分包（主包瘦身），用 BundleManager 加载
+        BundleManager.getInstance().loadAsset<SpriteFrame>(`ui/${imgName}/spriteFrame`, SpriteFrame).then((sf) => {
+            if (sf && sprite && sprite.isValid) {
                 sprite.spriteFrame = sf;
                 const rect = sf.rect;
                 if (rect && rect.width > 0) {
                     btnNode.getComponent(UITransform)!.setContentSize(width, width * (rect.height / rect.width));
                 }
             }
-        });
+        }).catch(() => {});
         btnNode.on(Node.EventType.TOUCH_START, () => {
             tween(btnNode).to(0.06, { scale: new Vec3(0.94, 0.94, 1) }).start();
         }, this);

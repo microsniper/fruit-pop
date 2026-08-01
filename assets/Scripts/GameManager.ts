@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, Vec3, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, Layers, Sprite, SpriteFrame, resources, ImageAsset, LabelOutline, UIOpacity } from 'cc';
+import { _decorator, Component, Node, Vec2, Vec3, Size, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, Layers, Sprite, SpriteFrame, resources, ImageAsset, LabelOutline, UIOpacity, RigidBody2D, BoxCollider2D, CircleCollider2D, ERigidBody2DType, PhysicsSystem2D } from 'cc';
 import { saveProgress, loginAndGetProgress, consumeShareCount, reportEvent, fetchGameConfig, GameConfig, getGameConfig } from './api';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
@@ -92,6 +92,10 @@ interface PlateData {
     holes: { x: number; y: number }[];
     removed: boolean;
     state?: 'stable' | 'falling' | 'supported' | 'removed';
+    /** 掉落板被卡住（停在下层板上不再下落）：此时它仍遮挡别的果子，这些果子不可点 */
+    stuck?: boolean;
+    /** 卡住帧计数（内部用，连续多帧速度过小才判 stuck） */
+    stuckFrames?: number;
     supportPlateId?: string;
     supportY?: number;
     isFalling?: boolean;
@@ -309,13 +313,6 @@ const FRUIT_FACE_COLORS: Record<FruitColor, Color> = {
 
 const PAGE_CONTENT_SCALE = 0.9;
 const TOP_CONTENT_OFFSET = 24;
-const SUPPORT_SAMPLE_COUNT = 21;
-const SUPPORT_RATIO_THRESHOLD = 0.3;
-const SUPPORT_MIN_CONTINUOUS_SAMPLES = 6;
-const SUPPORT_CONTACT_TOLERANCE = 3;
-const SUPPORT_MIN_DROP_DISTANCE = 6;
-const SUPPORT_SURFACE_SCAN_STEP = 4;
-const SUPPORT_SURFACE_REFINE_ITERATIONS = 8;
 /** 未启用层（垫在最底下作预告的下一层）的统一灰，与底图叠乘后只剩形状 */
 const PLATE_BURIED_COLOR = new Color(120, 126, 132, 230);
 /** 覆盖率采样网格边长：单块板子最多 9x9 个采样点 */
@@ -380,6 +377,11 @@ let challengeTipShown = false;
 
 @ccclass('GameManager')
 export class GameManager extends Component {
+    private static _physicsGravitySet = false;
+    /** 碰撞矩阵是否已按当前关卡 wave 配置（initGame 重置，每关重配） */
+    private static _collisionMatrixConfigured = false;
+    /** 物理组件是否就绪：initGame 期间为 false（跳过物理创建），场景稳定后置 true 统一初始化 */
+    private _physicsReady = true;
     public rootNode: Node | null = null;
     public currentLevel = 1;
     private maxTempHoles = 5;
@@ -542,19 +544,31 @@ export class GameManager extends Component {
         await this.loadFruitSprites();  // 确保水果图片加载完成后再初始化游戏
         await this.loadBasketBase();    // 加载灰度果篮底图
         this.preloadShareImages();      // 预加载分享图片
+        // 物理延迟激活：场景切换中创建刚体可能导致 Box2D broadphase 状态异常，先跳过物理，等 enter() 后统一初始化
+        this._physicsReady = false;
         this.initGame();
         const elapsed = (Date.now() - loadStart) / 1000;
         const delay = fromLoading ? 0 : Math.max(0, 2.0 - elapsed);
-        this.scheduleOnce(() => {
+        const enter = () => {
             this.hideLoadingOverlay();
             if (LoadingPage.consumeTarget() === 'endless') {
                 // 目标无限模式：initGame 已建好对局视图，直接补新手/奖励引导
+                this.initAllPlatePhysics();
                 this.showWelcomeFlowIfNeeded();
             } else {
                 // 先进首页选择模式，新手引导/奖励弹窗延后到首次进入无限模式时再弹
+                // 不初始化物理：homePage.render() 会清掉板子节点，物理刚体不需要
+                this._physicsReady = true;
                 this.homePage.render();
             }
-        }, delay);
+        };
+        // 经 Loading 进入（delay=0）时同帧执行：initGame 渲染的对局在同帧被 homePage.render 清空（进主页）
+        // 或直接展示（进无限模式），既不闪现对局画面，也避免 scheduleOnce 跨帧的时序问题
+        if (delay <= 0) {
+            enter();
+        } else {
+            this.scheduleOnce(enter, delay);
+        }
     }
 
     private initSound() {
@@ -1142,6 +1156,8 @@ export class GameManager extends Component {
 
     private initGame() {
         this.gameOver = false;
+        // 碰撞矩阵按当前关卡 wave 重配（每关 wave 不同，重置配置标志）
+        GameManager._collisionMatrixConfigured = false;
         this.plates = [];
         this.tempHoles = [];
         this.tempGuideArmed = true;
@@ -2324,7 +2340,6 @@ export class GameManager extends Component {
         }
 
         this.plates = this.plates.filter((plate) => plate.fruits.length > 0);
-        this.plates.forEach((plate) => this.updatePlateGravity(plate));
         // 开局一次性启用 5 层（首批，全彩色），后面按“剩余果子跌破首批总量的 70%”逐层启用
         this.loadedWave = Math.min(this.maxWave, LAYER_INITIAL_LOAD - 1);
         const initialFruits = this.plates
@@ -2773,37 +2788,6 @@ export class GameManager extends Component {
         return entries[0]?.cap || 3;
     }
 
-    private updatePlateGravity(plate: PlateData) {
-        const remaining = plate.fruits.filter(s => !s.removed);
-        if (remaining.length !== 1) {
-            plate.rotation = 0;
-            plate.gravityOrigin = undefined;
-            return;
-        }
-        
-        const anchorX = remaining[0].x;
-        const anchorY = remaining[0].y;
-        
-        const cx = plate.w / 2;
-        const cy = plate.h / 2;
-        
-        const dx = cx - anchorX;
-        const dy = cy - anchorY;
-        
-        if (dy <= 0 && Math.abs(dx) < 10) {
-            plate.rotation = 0;
-            plate.gravityOrigin = undefined;
-            return;
-        }
-        
-        let targetRotation = Math.atan2(dx, dy) * (180 / Math.PI);
-        // Cocos Creator uses counter-clockwise rotation for positive angles, but the math gives clockwise.
-        // Let's negate it for Cocos.
-        targetRotation = -targetRotation;
-        
-        plate.rotation = targetRotation;
-        plate.gravityOrigin = { x: anchorX, y: anchorY };
-    }
 
     private handleFruitClick(plate: PlateData, fruit: FruitData) {
         if (this.gameOver) return;
@@ -3073,54 +3057,152 @@ export class GameManager extends Component {
             .start();
     }
 
-    /** 水果移除后的板子处理（共用逻辑） */
+    /** 水果移除后的板子处理（共用逻辑）：Box2D 接管物理 */
     private afterFruitRemoved(plate: PlateData) {
-        const pivotNode = this.plateNodes.get(plate.id);
         const remaining = plate.fruits.filter((item) => !item.removed);
         if (remaining.length === 0) {
-            plate.state = 'stable';
-            plate.supportPlateId = undefined;
-            plate.supportY = undefined;
-            this.startPlateFalling(plate);
-        } else {
-            plate.state = 'stable';
-            plate.supportPlateId = undefined;
-            plate.supportY = undefined;
-            const oldRotation = plate.rotation || 0;
-            this.updatePlateGravity(plate);
+            // 果子全摘完 → 板子从 Static 切到 Dynamic，让 Box2D 接管掉落
+            this.activatePlatePhysics(plate);
+        }
+        // 有果子时物理引擎不需要动作（板子保持 Static）
+    }
 
-            if (oldRotation !== (plate.rotation || 0)) {
-                if (pivotNode && pivotNode.isValid) {
-                    const visualNode = pivotNode.getChildByName(`PlateVisual_${plate.id}`);
-                    
-                    if (plate.gravityOrigin) {
-                        // 绕最后一个水果旋转：把 pivot 移到水果位置，反向偏移视觉节点
-                        const offsetX = plate.gravityOrigin.x - plate.w / 2;
-                        const offsetY = plate.h / 2 - plate.gravityOrigin.y;
-                        pivotNode.setPosition(plate.x + offsetX, plate.y + offsetY, 0);
-                        if (visualNode) {
-                            visualNode.setPosition(-offsetX, -offsetY, 0);
-                        }
-                    } else {
-                        // 旋转归零：pivot 回到板子中心
-                        pivotNode.setPosition(plate.x, plate.y, 0);
-                        if (visualNode) {
-                            visualNode.setPosition(0, 0, 0);
-                        }
-                    }
+    /** 将板子从静态切为动态，Box2D 接管物理 */
+    private activatePlatePhysics(plate: PlateData) {
+        const pivotNode = this.plateNodes.get(plate.id);
+        if (!pivotNode || !pivotNode.isValid) return;
 
-                    tween(pivotNode).stop();
-                    tween(pivotNode)
-                        .to(1.2, { angle: plate.rotation || 0 }, { easing: 'backOut' })
-                        .start();
-                }
+        const body = pivotNode.getComponent(RigidBody2D);
+        if (!body) return;
 
-                // 板子因重心偏转了，遮住的区域跟着变，这一拨可能把下层板子露出来
-                this.refreshBuriedStates();
+        plate.state = 'falling';
+        plate.gravityOrigin = undefined;
+        plate.rotation = 0;
+
+        body.type = ERigidBody2DType.Dynamic;
+        body.gravityScale = 1.5;
+        // 极小水平速度打破对称（避免完全对称卡死），主要靠重力下落
+        body.linearVelocity = new Vec2((Math.random() - 0.5) * 4, 0);
+    }
+
+    /**
+     * 场景稳定后统一初始化所有板子的物理组件。
+     * start() 的 initGame() 中 _physicsReady=false 跳过物理创建，
+     * 等 enter() 确认进对局后才调此方法补上，避免 Box2D 在场景切换中注册刚体导致 broadphase 异常。
+     */
+    private initAllPlatePhysics() {
+        this._physicsReady = true;
+        this.plates.forEach((plate) => {
+            if (plate.removed) return;
+            const pivotNode = this.plateNodes.get(plate.id);
+            if (!pivotNode || !pivotNode.isValid) return;
+            // 已有刚体则跳过（防重）
+            if (pivotNode.getComponent(RigidBody2D)) return;
+
+            let offsetX = 0;
+            let offsetY = 0;
+            if (plate.gravityOrigin) {
+                offsetX = plate.gravityOrigin.x - plate.w / 2;
+                offsetY = plate.h / 2 - plate.gravityOrigin.y;
             }
 
-            this.checkWin();
-        }
+            const rigidBody = pivotNode.addComponent(RigidBody2D);
+            rigidBody.type = ERigidBody2DType.Static;
+            rigidBody.gravityScale = 0;
+            rigidBody.linearDamping = 0.5;
+            rigidBody.angularDamping = 0.2;
+
+            // 第一个物理组件创建后，物理系统一定就绪，此时设重力
+            if (!GameManager._physicsGravitySet) {
+                GameManager._physicsGravitySet = true;
+                if (PhysicsSystem2D && PhysicsSystem2D.instance) {
+                    PhysicsSystem2D.instance.gravity = new Vec2(0, -400);
+                }
+            }
+
+            // 碰撞矩阵每关重配：同 wave 碰撞、跨 wave 穿透
+            if (!GameManager._collisionMatrixConfigured) {
+                GameManager._collisionMatrixConfigured = true;
+                const ps = PhysicsSystem2D.instance;
+                if (ps) {
+                    const cm = ps.collisionMatrix as any;
+                    for (const k in cm) delete cm[k];
+                    const waves = new Set<number>();
+                    this.plates.forEach((p) => waves.add((p.wave ?? 0) % 16));
+                    waves.forEach((g) => {
+                        const cat = 1 << g;
+                        cm['' + cat] = cat;
+                    });
+                }
+            }
+
+            const plateGroup = 1 << ((plate.wave ?? 0) % 16);
+            const colliders = plate.colliders;
+            if (colliders && colliders.length > 0) {
+                colliders.forEach((col) => {
+                    const px = col.cx - plate.w / 2 - offsetX;
+                    const py = plate.h / 2 - col.cy - offsetY;
+                    if (col.kind === 'box') {
+                        const boxCol = pivotNode.addComponent(BoxCollider2D);
+                        boxCol.group = plateGroup;
+                        boxCol.offset = new Vec2(px, py);
+                        boxCol.size = new Size(col.w, col.h);
+                    } else {
+                        const circleCol = pivotNode.addComponent(CircleCollider2D);
+                        circleCol.group = plateGroup;
+                        circleCol.offset = new Vec2(px, py);
+                        circleCol.radius = col.r;
+                    }
+                });
+            } else {
+                const boxCol = pivotNode.addComponent(BoxCollider2D);
+                boxCol.group = plateGroup;
+                boxCol.offset = new Vec2(-offsetX, -offsetY);
+                boxCol.size = new Size(plate.w, plate.h);
+            }
+        });
+    }
+
+    /** Box2D 每帧同步：读物理位置写回数据模型，检测掉出屏幕的板子 */
+    update(_dt: number) {
+        this.plates.forEach((plate) => {
+            if (plate.removed || plate.state !== 'falling') return;
+
+            const node = this.plateNodes.get(plate.id);
+            if (!node || !node.isValid) return;
+
+            const body = node.getComponent(RigidBody2D);
+            if (!body || body.type !== ERigidBody2DType.Dynamic) return;
+
+            const pos = node.position;
+            plate.x = pos.x;
+            plate.y = pos.y;
+
+            // 卡住检测：掉落板被下层板支撑停住（速度持续很小）时标记 stuck，
+            // 此时它仍停在画面上遮挡别的果子，这些果子应判为不可点
+            const vel = body.linearVelocity;
+            const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
+            if (speed < 8) {
+                plate.stuckFrames = (plate.stuckFrames || 0) + 1;
+                if (plate.stuckFrames > 18) plate.stuck = true;
+            } else {
+                plate.stuckFrames = 0;
+                plate.stuck = false;
+            }
+
+            // 板子掉出屏幕 → 标记移除、销毁节点
+            if (pos.y < -this.boardHeight * 1.5) {
+                this.triggerVibration('success');
+                plate.removed = true;
+                plate.state = 'removed';
+                this.destroyPlateNode(plate.id);
+                this.refreshBuriedStates();
+                this.ensureLayerBudget();
+                this.checkAllBoxesForClear();
+                this.renderTopUI();
+                this.checkWin();
+            }
+        });
     }
 
     /** 获取小太阳图标的世界坐标（取图片左侧太阳图形中心，而非整张图中心） */
@@ -3728,16 +3810,10 @@ export class GameManager extends Component {
         this.renderTools();
     }
 
-    private startPlateFalling(plate: PlateData, forceDropOut = false) {
-        if (plate.removed || plate.state === 'falling') return;
-        if (!forceDropOut && this.hasRemainingFruits(plate)) return;
-
-        this.dropPlateOutOfScene(plate);
-    }
 
     private checkWin() {
         if (this.gameOver) return;
-        if (this.fallingPlateNodes.size > 0 || this.plates.some((plate) => plate.state === 'falling')) return;
+        if (this.plates.some((plate) => plate.state === 'falling')) return;
         const allRemoved = this.plates.every((plate) => plate.removed);
         if (!allRemoved || this.tempHoles.length > 0) return;
 
@@ -3838,7 +3914,10 @@ export class GameManager extends Component {
         const totalSamples = samplePoints.length;
 
         for (const other of this.plates) {
-            if (other.id === plate.id || other.removed || other.state === 'falling' || other.layer <= plate.layer) continue;
+            // 卡住不动的掉落板（stuck）无视层级：它物理停在上层板子上，遮住的果子不可点
+            const stuckCover = other.state === 'falling' && other.stuck;
+            if (other.id === plate.id || other.removed) continue;
+            if (!stuckCover && (other.state === 'falling' || other.layer <= plate.layer)) continue;
 
             let coveredCount = 0;
             for (const point of samplePoints) {
@@ -3888,10 +3967,12 @@ export class GameManager extends Component {
      * 与 isFruitBlocked 共用一套坐标换算；正在掉落的板子不算遮挡，它马上就走了。
      */
     private getPlateCoverRatio(plate: PlateData) {
-        const uppers = this.plates.filter((other) => other.id !== plate.id
-            && !other.removed
-            && other.state !== 'falling'
-            && other.layer > plate.layer);
+        const uppers = this.plates.filter((other) => {
+            if (other.id === plate.id || other.removed) return false;
+            // 卡住不动的掉落板（stuck）无视层级：物理停在上层板子上也算遮挡
+            if (other.state === 'falling') return !!other.stuck;
+            return other.layer > plate.layer;
+        });
         if (uppers.length === 0) return 0;
 
         const step = PLATE_COVER_SAMPLE_GRID - 1;
@@ -4109,70 +4190,10 @@ export class GameManager extends Component {
     }
 
     private getPlateTopSurfaceYAtX(plate: PlateData, worldX: number) {
+        // 由 Box2D 物理引擎接管，不再使用自定义表面扫描
         const bounds = this.getPlateWorldBounds(plate);
         if (worldX < bounds.minX - 1 || worldX > bounds.maxX + 1) return null;
-
-        const scanTop = bounds.maxY + SUPPORT_SURFACE_SCAN_STEP;
-        const scanBottom = bounds.minY - SUPPORT_SURFACE_SCAN_STEP;
-        let lastOutsideY = scanTop;
-
-        for (let y = scanTop; y >= scanBottom; y -= SUPPORT_SURFACE_SCAN_STEP) {
-            if (!this.isPointInsidePlate(plate, worldX, y)) {
-                lastOutsideY = y;
-                continue;
-            }
-
-            let insideY = y;
-            let outsideY = lastOutsideY;
-            for (let i = 0; i < SUPPORT_SURFACE_REFINE_ITERATIONS; i++) {
-                const midY = (insideY + outsideY) / 2;
-                if (this.isPointInsidePlate(plate, worldX, midY)) {
-                    insideY = midY;
-                } else {
-                    outsideY = midY;
-                }
-            }
-            return insideY;
-        }
-
-        return null;
-    }
-
-
-
-    private dropPlateOutOfScene(plate: PlateData) {
-        if (plate.removed || plate.state === 'falling' || !this.boardEffectNode) return;
-
-        const fallingNode = this.createPlateNode(this.boardEffectNode, plate, false, plate.rotation || 0);
-        if (!fallingNode) return;
-
-        plate.isFalling = true;
-        plate.state = 'falling';
-        this.destroyPlateNode(plate.id);
-        this.fallingPlateNodes.set(plate.id, fallingNode);
-        // 板子一开始下落就不再算遮挡，立即把底下翻出来的板子点亮，跟掉落动画同步
-        this.refreshBuriedStates();
-
-        const dropDistance = Math.max(800, this.boardHeight + this.bottomHeight + 220);
-        tween(fallingNode)
-            .to(1.2, { position: new Vec3(fallingNode.position.x, fallingNode.position.y - dropDistance, 0) }, { easing: 'quadIn' })
-            .call(() => {
-                this.triggerVibration('success');
-                plate.removed = true;
-                plate.isFalling = false;
-                plate.state = 'removed';
-                const activeNode = this.fallingPlateNodes.get(plate.id);
-                if (activeNode && activeNode.isValid) {
-                    activeNode.destroy();
-                }
-                this.fallingPlateNodes.delete(plate.id);
-                // removed 落地才置位；这里再补一次计数检查，免得最后一块板落地后场上断粮
-                this.ensureLayerBudget();
-                this.checkAllBoxesForClear();
-                this.renderTopUI();
-                this.checkWin();
-            })
-            .start();
+        return bounds.maxY;
     }
 
     public createNode(name: string, parent: Node, x: number, y: number, width: number, height: number) {
@@ -4311,6 +4332,70 @@ export class GameManager extends Component {
                 fruitContainer.active = false;
             }
         });
+
+        // === Box2D 物理组件：挂在 pivotNode 上 ===
+        // _physicsReady=false 时（initGame 场景切换中）跳过，等场景稳定后由 initAllPlatePhysics 统一补上，
+        // 避免 Box2D 在场景未稳定时注册刚体导致 broadphase 状态异常
+        if (interactive && this._physicsReady) {
+            const rigidBody = pivotNode.addComponent(RigidBody2D);
+            rigidBody.type = ERigidBody2DType.Static;
+            rigidBody.gravityScale = 0;
+            rigidBody.linearDamping = 0.5;
+            // 角阻尼取较小值：板子被角支撑时，重力力矩能明显推动板子旋转倾覆，呈真实物理感
+            rigidBody.angularDamping = 0.2;
+
+            // 第一个物理组件创建后，物理系统一定就绪，此时设重力
+            if (!GameManager._physicsGravitySet) {
+                GameManager._physicsGravitySet = true;
+                if (PhysicsSystem2D && PhysicsSystem2D.instance) {
+                    PhysicsSystem2D.instance.gravity = new Vec2(0, -400);
+                }
+            }
+
+            // 碰撞矩阵每关重配：同 wave 碰撞、跨 wave 穿透（同层XY真实物理，跨Z层隔离）。
+            // collisionMatrix 是可变字典，key=categoryBits 字符串(1<<groupIndex)，value=maskBits；
+            // collider.group 直接当 categoryBits，创建时 maskBits=collisionMatrix[group]（查不到则全碰）。
+            if (!GameManager._collisionMatrixConfigured) {
+                GameManager._collisionMatrixConfigured = true;
+                const ps = PhysicsSystem2D.instance;
+                if (ps) {
+                    const cm = ps.collisionMatrix as any;
+                    for (const k in cm) delete cm[k]; // 清空旧配置，按当前关卡重配
+                    const waves = new Set<number>();
+                    this.plates.forEach((p) => waves.add((p.wave ?? 0) % 16));
+                    waves.forEach((g) => {
+                        const cat = 1 << g;
+                        cm['' + cat] = cat; // mask 只含自己：同 wave 碰撞、跨 wave 穿透
+                    });
+                }
+            }
+
+            // 碰撞分组：group=categoryBits(1<<(wave%16))，与 collisionMatrix 配套
+            const plateGroup = 1 << ((plate.wave ?? 0) % 16);
+            const colliders = plate.colliders;
+            if (colliders && colliders.length > 0) {
+                colliders.forEach((col) => {
+                    const px = col.cx - plate.w / 2 - offsetX;
+                    const py = plate.h / 2 - col.cy - offsetY;
+                    if (col.kind === 'box') {
+                        const boxCol = pivotNode.addComponent(BoxCollider2D);
+                        boxCol.group = plateGroup;
+                        boxCol.offset = new Vec2(px, py);
+                        boxCol.size = new Size(col.w, col.h);
+                    } else {
+                        const circleCol = pivotNode.addComponent(CircleCollider2D);
+                        circleCol.group = plateGroup;
+                        circleCol.offset = new Vec2(px, py);
+                        circleCol.radius = col.r;
+                    }
+                });
+            } else {
+                const boxCol = pivotNode.addComponent(BoxCollider2D);
+                boxCol.group = plateGroup;
+                boxCol.offset = new Vec2(-offsetX, -offsetY);
+                boxCol.size = new Size(plate.w, plate.h);
+            }
+        }
 
         return pivotNode;
     }
