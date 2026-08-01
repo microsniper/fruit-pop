@@ -3,6 +3,7 @@ import { saveProgress, loginAndGetProgress, consumeShareCount, reportEvent, fetc
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
 import { BundleManager } from './BundleManager';
+import { LoadingPage } from './LoadingPage';
 import { HomePage } from './HomePage';
 import { RankPage } from './RankPage';
 
@@ -390,6 +391,12 @@ export class GameManager extends Component {
     public totalSuns = 0;
     /** 小太阳不足提示横幅节点：用于幂等控制，显示期间忽略重复触发 */
     private sunShortageTipNode: Node | null = null;
+    /** 暂存区满 4 时指向解锁果篮的引导小手节点 */
+    private tempFullGuideNode: Node | null = null;
+    /** 跟小手同步呼吸（缩放脉动）的锁定果篮节点：小手在它就呼吸，小手没了就停 */
+    private tempGuideBreathNode: Node | null = null;
+    /** 引导“已武装”：暂存区掉回 4 以下重新武装，再次达 4 才弹，避免一直停在 4/5 重复弹 */
+    private tempGuideArmed = true;
     private gameOver = false;
     private gameConfig: GameConfig | null = null;
     private loadingNode: Node | null = null;
@@ -521,10 +528,15 @@ export class GameManager extends Component {
 
         this.initSound();
         this.initAd();
-        this.showLoadingOverlay();
+        // 经由 Loading 场景进入时：资源/登录已在加载页完成，直接复用预热结果，跳过旧转圈与 2 秒等待
+        const fromLoading = LoadingPage.consumeLaunched();
+        const warmup = LoadingPage.consumeWarmup();
+        if (!fromLoading) {
+            this.showLoadingOverlay();
+        }
         const loadStart = Date.now();
-        this.currentLevel = await loginAndGetProgress();
-        this.gameConfig = await fetchGameConfig();
+        this.currentLevel = warmup ? await warmup.login : await loginAndGetProgress();
+        this.gameConfig = warmup ? await warmup.config : await fetchGameConfig();
         
         BundleManager.getInstance().preload();  // 后台预加载分包
         await this.loadFruitSprites();  // 确保水果图片加载完成后再初始化游戏
@@ -532,11 +544,16 @@ export class GameManager extends Component {
         this.preloadShareImages();      // 预加载分享图片
         this.initGame();
         const elapsed = (Date.now() - loadStart) / 1000;
-        const delay = Math.max(0, 2.0 - elapsed);
+        const delay = fromLoading ? 0 : Math.max(0, 2.0 - elapsed);
         this.scheduleOnce(() => {
             this.hideLoadingOverlay();
-            // 先进首页选择模式，新手引导/奖励弹窗延后到首次进入无限模式时再弹
-            this.homePage.render();
+            if (LoadingPage.consumeTarget() === 'endless') {
+                // 目标无限模式：initGame 已建好对局视图，直接补新手/奖励引导
+                this.showWelcomeFlowIfNeeded();
+            } else {
+                // 先进首页选择模式，新手引导/奖励弹窗延后到首次进入无限模式时再弹
+                this.homePage.render();
+            }
         }, delay);
     }
 
@@ -831,6 +848,7 @@ export class GameManager extends Component {
     /** 挑战失败弹窗：panel_fail.png，暂存区满时弹出。重新挑战=重开本关；继续游戏=看广告清空暂存区 */
     private renderFailModal() {
         if (!this.modalLayerNode) return;
+        this.removeTempFullGuide();
         this.modalLayerNode.removeAllChildren();
 
         // 遮罩
@@ -1126,6 +1144,8 @@ export class GameManager extends Component {
         this.gameOver = false;
         this.plates = [];
         this.tempHoles = [];
+        this.tempGuideArmed = true;
+        this.removeTempFullGuide();
         this.flyingFruitColors = [];
         this.removedFruits = 0;
         this.sunsCollectedThisLevel = 0;
@@ -1396,6 +1416,87 @@ export class GameManager extends Component {
         if (this.sunCountLabel && this.sunCountLabel.isValid) {
             this.sunCountLabel.string = `${this.totalSuns}`;
         }
+
+        // 暂存区满 4 引导（每次 renderTopUI 都会跑，能盖住放果/自动填充/清篮等所有暂存变化）
+        this.updateTempFullGuide();
+    }
+
+    /**
+     * 暂存区数量变化后判定要不要弹引导小手：
+     * 掉回 4 以下重新武装；达 4+ 且已武装且场上有锁定果篮才弹（弹一次就解除武装）。
+     */
+    private updateTempFullGuide() {
+        if (this.tempHoles.length < 4) {
+            this.tempGuideArmed = true;
+            return;
+        }
+        if (this.tempGuideArmed && this.boxes.some((box) => box.color === 'locked')) {
+            this.tempGuideArmed = false;
+            this.showTempFullGuide();
+        }
+    }
+
+    /** 弹引导小手：指向第一个锁定果篮，提示点击解锁；停留 10 秒自动消失 */
+    private showTempFullGuide() {
+        if (!this.boxesContainerNode || !this.boxesContainerNode.isValid) return;
+        const lockedIndex = this.boxes.findIndex((box) => box.color === 'locked');
+        if (lockedIndex < 0) return;
+        const lockedView = this.boxViews[lockedIndex];
+        if (!lockedView || !lockedView.node || !lockedView.node.isValid) return;
+
+        this.removeTempFullGuide();
+
+        // 让这个锁定果篮跟小手一起呼吸（缩放脉动）：小手在它就呼吸，小手没了（removeTempFullGuide）就停并复位
+        this.tempGuideBreathNode = lockedView.node;
+        lockedView.node.setScale(new Vec3(1, 1, 1));
+        tween(lockedView.node)
+            .to(0.6, { scale: new Vec3(1.08, 1.08, 1) }, { easing: 'sineInOut' })
+            .to(0.6, { scale: new Vec3(1, 1, 1) }, { easing: 'sineInOut' })
+            .union()
+            .repeatForever()
+            .start();
+
+        // 手图 144x256，指尖朝左上；手放果篮右下，指尖落在果篮上（照 HomePage 引导手的做法）
+        const handH = 62;
+        const handW = Math.round(handH * 144 / 256);
+        const boxX = lockedView.node.position.x;
+        const hx = boxX + handW * 0.4;
+        const hy = -handH * 0.42;
+        const handNode = this.createNode('TempFullGuideHand', this.boxesContainerNode, hx, hy, handW, handH);
+        handNode.setSiblingIndex(9999);
+        this.tempFullGuideNode = handNode;
+        const handSprite = handNode.addComponent(Sprite);
+        handSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/hand_guide/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && handSprite.isValid) {
+                handSprite.spriteFrame = sf;
+            }
+        }).catch(() => {});
+
+        // 朝果篮方向（左上）反复轻戳；手指不挂触摸，不挡果篮点击
+        tween(handNode)
+            .to(0.45, { position: new Vec3(hx - 5, hy + 7, 0) }, { easing: 'sineInOut' })
+            .to(0.45, { position: new Vec3(hx, hy, 0) }, { easing: 'sineInOut' })
+            .union()
+            .repeatForever()
+            .start();
+
+        // 10 秒后自动消失
+        this.scheduleOnce(() => this.removeTempFullGuide(), 10);
+    }
+
+    /** 移除引导小手并停掉果篮呼吸（解锁果篮/切关/gameOver/10秒到时都会调） */
+    private removeTempFullGuide() {
+        if (this.tempFullGuideNode && this.tempFullGuideNode.isValid) {
+            this.tempFullGuideNode.destroy();
+        }
+        this.tempFullGuideNode = null;
+        // 停掉锁定果篮的呼吸并复位到原尺寸
+        if (this.tempGuideBreathNode && this.tempGuideBreathNode.isValid) {
+            tween(this.tempGuideBreathNode).stop();
+            this.tempGuideBreathNode.setScale(new Vec3(1, 1, 1));
+        }
+        this.tempGuideBreathNode = null;
     }
 
     private renderTools() {
@@ -3572,6 +3673,7 @@ export class GameManager extends Component {
         this.updateBoxColor(targetBox, nextColor);
         targetBox.capacity = this.getNextCapacityForColor(nextColor, targetBox);
         targetBox.isNew = true;
+        this.removeTempFullGuide();
         this.renderTopUI();
         this.autoFillFromTemp();
     }
@@ -4378,6 +4480,12 @@ export class GameManager extends Component {
             });
 
             boxNode.on(Node.EventType.TOUCH_END, () => {
+                // 锁定果篮可点：弹现有的“加果篮”弹窗（看广告 / 花太阳）。
+                // 按 index 读当前 box 状态，只有 locked 才响应；非锁定果篮不做事
+                const curBox = this.boxes[index];
+                if (curBox && curBox.color === 'locked' && !this.gameOver) {
+                    this.renderAddBasketModal();
+                }
             }, this);
 
             this.boxViews.push({
@@ -4409,10 +4517,9 @@ export class GameManager extends Component {
             const iconH = 36; // 图标放大
             const iconW = iconH * 2.5;
 
-            // 设置按钮（btn_gear.png，分包），放在暂存区左侧、与小太阳镜像对称
-            // 排行榜入口已移到首页，游戏内不再放排行榜按钮
-            const gearX = -sunX;
-            const gearBtnNode = this.createNode('SettingsBtn', this.tempContainerNode, gearX, 0, iconH, iconH);
+            // 设置按钮（btn_gear.png，分包）：放到屏幕左上角（挂 topAreaNode，关卡号徽章在正中 x=0，左上角空着）。
+            // 排行榜入口已移到首页，游戏内不再放排行榜按钮；功能（点开设置弹窗）不变
+            const gearBtnNode = this.createNode('SettingsBtn', this.topAreaNode!, -this.screenWidth / 2 + 28, this.topHeight / 2 - 30, iconH, iconH);
             const gearSprite = gearBtnNode.addComponent(Sprite);
             gearSprite.sizeMode = Sprite.SizeMode.CUSTOM;
             BundleManager.getInstance().loadAsset<SpriteFrame>('ui/btn_gear/spriteFrame', SpriteFrame).then((sf) => {

@@ -1,7 +1,8 @@
-import { Node, Vec3, UITransform, Color, tween, Graphics, Mask, Sprite, SpriteFrame, Label, resources } from 'cc';
-import { getGameConfig, isNewUserThisLogin } from './api';
+import { Node, Vec3, UITransform, Color, tween, Graphics, Mask, Sprite, SpriteFrame, Label, resources, ScrollView, director } from 'cc';
+import { getGameConfig, isNewUserThisLogin, getLocalRegionId, fetchRegionList, saveUserRegion, RegionItem } from './api';
 import { SoundManager } from './SoundManager';
 import { BundleManager } from './BundleManager';
+import { LoadingPage } from './LoadingPage';
 import type { GameManager } from './GameManager';
 
 declare const wx: any;
@@ -82,7 +83,7 @@ export class HomePage {
             .start();
 
         // 两个模式入口按钮（每日挑战在上，无限模式在下）
-        this.createHomeButton('btn_daily', 0, -pageH * 0.08, 125, () => this.showTip('每日挑战即将上线，敬请期待！'));
+        this.createHomeButton('btn_daily', 0, -pageH * 0.08, 125, () => this.onDailyChallengeClick());
         this.createHomeButton('btn_endless', 0, -pageH * 0.22, 125, () => this.enterEndlessMode());
 
         // 左右两侧功能图标：每日签到（左）、排行榜（右）
@@ -232,9 +233,9 @@ export class HomePage {
 
     /** 进入无限模式：重开一局全新局面（关卡号不变），首次进入时补触发新手引导 */
     private enterEndlessMode() {
-        this.close();
-        this.gm.startGameFromHome();
-        this.gm.showWelcomeFlowIfNeeded();
+        // 经 Loading 场景进入无限模式：加载页展示真实进度，完成后由 GameManager 直接进对局
+        LoadingPage.target = 'endless';
+        director.loadScene('Loading');
     }
 
     /** 新人礼是否待领取（本地存储标记，领取成功才清除，跨会话有效） */
@@ -605,6 +606,147 @@ export class HomePage {
         } else {
             localStorage.setItem('signInDays', val);
         }
+    }
+
+    /**
+     * 点「每日挑战」：先检测是否选过地区。没选过→弹选地区；选过→（每日挑战本体未做）先弹“即将上线”。
+     */
+    private onDailyChallengeClick() {
+        if (getLocalRegionId() != null) {
+            this.showTip('每日挑战即将上线，敬请期待！');
+            return;
+        }
+        this.renderRegionSelectModal();
+    }
+
+    /**
+     * 地区选择弹窗：手搬圆角面板 + 三列网格（ScrollView）+ 底部确定。
+     * 拉起时先请后端拿 34 省列表（后端缓存优先）；点省份先高亮，点确定才落定。
+     * 点遮罩/关闭 = 放弃，不存，下次还问（每日挑战本体还没做，不强制）。
+     */
+    private async renderRegionSelectModal() {
+        if (!this.gm.modalLayerNode || !this.gm.modalLayerNode.isValid) return;
+        const items = await fetchRegionList();
+        if (!this.gm.modalLayerNode || !this.gm.modalLayerNode.isValid) return; // 等网络期间可能已离页
+        if (items.length === 0) {
+            this.showTip('网络不好，稍后再试');
+            return;
+        }
+        this.gm.modalLayerNode.removeAllChildren();
+
+        const screenW = this.gm.screenWidth;
+        const screenH = this.gm.screenHeight;
+
+        // 遮罩：点空白处关闭（放弃选择）
+        const mask = this.gm.createGraphicsNode('Mask', this.gm.modalLayerNode, screenW, screenH, 0, 0);
+        this.gm.drawRoundedRect(mask.getComponent(Graphics)!, screenW, screenH, new Color(0, 0, 0, 150), 0);
+        mask.on(Node.EventType.TOUCH_END, () => {
+            this.gm.modalLayerNode!.removeAllChildren();
+        }, this);
+
+        // 面板：手搬圆角卡片（无专用底图）
+        const panelW = 320;
+        const panelH = 464;
+        const panelNode = this.gm.createNode('RegionPanel', this.gm.modalLayerNode, 0, 0, panelW, panelH);
+        const panelBg = this.gm.createGraphicsNode('PanelBg', panelNode, panelW, panelH, 0, 0);
+        this.gm.drawRoundedRect(panelBg.getComponent(Graphics)!, panelW, panelH, new Color(252, 250, 242, 255), 24);
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => { e.propagationStopped = true; }, this);
+
+        // 标题
+        this.gm.createLabel(panelNode, '选择你的地区', 0, panelH / 2 - 34, 22, new Color(96, 64, 32, 255), true);
+
+        // 网格参数：3 列
+        const cols = 3;
+        const cellW = 92;
+        const cellH = 42;
+        const gapX = 8;
+        const gapY = 10;
+        const gridW = cols * cellW + (cols - 1) * gapX;
+        const rows = Math.ceil(items.length / cols);
+        const contentH = rows * cellH + (rows - 1) * gapY;
+
+        // ScrollView 可视区（标题下、确定钮上）。去掉副标题小字后，网格上移 20、高度补 20，不留空当
+        const viewW = panelW - 24;
+        const viewH = panelH - 130;
+        const viewY = 18;
+        const scrollNode = this.gm.createNode('RegionScroll', panelNode, 0, viewY, viewW, viewH);
+        const scrollView = scrollNode.addComponent(ScrollView);
+        scrollView.horizontal = false;
+        scrollView.vertical = true;
+        const viewNode = this.gm.createNode('View', scrollNode, 0, 0, viewW, viewH);
+        const viewMask = viewNode.addComponent(Mask);
+        viewMask.type = Mask.Type.GRAPHICS_RECT;
+        const realContentH = Math.max(contentH, viewH);
+        const contentNode = this.gm.createNode('Content', viewNode, 0, 0, viewW, realContentH);
+        contentNode.getComponent(UITransform)!.setAnchorPoint(0.5, 1);
+        contentNode.setPosition(0, viewH / 2, 0);
+        scrollView.content = contentNode;
+
+        // 选中态：记住选中 id 和对应格子，重画高亮
+        let selectedId: number | null = null;
+        const cellBgMap = new Map<number, Graphics>();
+        const paintCell = (id: number, on: boolean) => {
+            const g = cellBgMap.get(id);
+            if (!g) return;
+            this.gm.drawRoundedRect(g, cellW, cellH,
+                on ? new Color(120, 190, 90, 255) : new Color(238, 234, 224, 255), 12);
+        };
+
+        items.forEach((item: RegionItem, i: number) => {
+            const r = Math.floor(i / cols);
+            const c = i % cols;
+            const cx = -gridW / 2 + cellW / 2 + c * (cellW + gapX);
+            const cy = -cellH / 2 - r * (cellH + gapY);
+            const cell = this.gm.createNode(`Region_${item.id}`, contentNode, cx, cy, cellW, cellH);
+            const cellBg = this.gm.createGraphicsNode('bg', cell, cellW, cellH, 0, 0);
+            const g = cellBg.getComponent(Graphics)!;
+            cellBgMap.set(item.id, g);
+            this.gm.drawRoundedRect(g, cellW, cellH, new Color(238, 234, 224, 255), 12);
+            const nameLabel = this.gm.createLabel(cell, item.name, 0, 0, 15, new Color(90, 70, 45, 255), false);
+            nameLabel.node.getComponent(UITransform)!.setContentSize(cellW, cellH);
+            cell.on(Node.EventType.TOUCH_END, (e: any) => {
+                e.propagationStopped = true;
+                if (selectedId === item.id) return;
+                const prevId = selectedId;
+                selectedId = item.id;
+                if (prevId != null) paintCell(prevId, false);
+                paintCell(item.id, true);
+            }, this);
+        });
+
+        // 底部确定按钮
+        const btnW = 160;
+        const btnH = 46;
+        const btnY = -panelH / 2 + 40;
+        const confirmBtn = this.gm.createNode('ConfirmBtn', panelNode, 0, btnY, btnW, btnH);
+        const confirmBg = this.gm.createGraphicsNode('bg', confirmBtn, btnW, btnH, 0, 0);
+        this.gm.drawRoundedRect(confirmBg.getComponent(Graphics)!, btnW, btnH, new Color(250, 170, 60, 255), 23);
+        this.gm.createLabel(confirmBtn, '确定', 0, 0, 18, new Color(255, 255, 255, 255), true);
+        let submitting = false;
+        confirmBtn.on(Node.EventType.TOUCH_END, async (e: any) => {
+            e.propagationStopped = true;
+            if (submitting) return;
+            const chosenId = selectedId;
+            if (chosenId == null) {
+                this.showTip('请先选择地区');
+                return;
+            }
+            submitting = true;
+            const ok = await saveUserRegion(chosenId);
+            if (!ok) {
+                submitting = false;
+                this.showTip('保存失败，网络不好请重试');
+                return;
+            }
+            if (this.gm.modalLayerNode && this.gm.modalLayerNode.isValid) {
+                this.gm.modalLayerNode.removeAllChildren();
+            }
+            this.showTip('每日挑战即将上线，敬请期待！');
+        }, this);
+
+        // 从小到大弹出
+        panelNode.setScale(new Vec3(0.7, 0.7, 1));
+        tween(panelNode).to(0.22, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
     }
 
     /** 首页轻提示：短暂浮现后自动消失 */

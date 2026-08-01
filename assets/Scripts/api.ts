@@ -197,7 +197,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
         console.log('[API] wx.login success, code:', code);
     }
 
-    const res = await request<{ token: string; openid: string; source: SourceEnum; hasProfile: boolean; isNewUser: boolean; dailyRewardClaimable: boolean; progress: { gameType: GameTypeEnum; levelNum: number } }>({
+    const res = await request<{ token: string; openid: string; source: SourceEnum; hasProfile: boolean; isNewUser: boolean; dailyRewardClaimable: boolean; regionId: number | null; progress: { gameType: GameTypeEnum; levelNum: number } }>({
       url: '/api/game/login',
       method: 'POST',
       data: {
@@ -233,6 +233,9 @@ export const loginAndGetProgress = async (): Promise<number> => {
             localStorage.setItem('openid', res.data.openid);
         }
     }
+
+    // 已选地区ID回写本地（跨设备/重装后仍能记得）；后端为 null 就清本地
+    setLocalRegionId(res.data?.regionId ?? null);
 
     const serverLevel = res.data.progress?.levelNum || 1;
     setLocalLevel(serverLevel);
@@ -535,5 +538,70 @@ export const consumeShareCount = async (): Promise<{ success: boolean, isLimit: 
     console.error("Consume share count failed:", e);
     const isLimit = e.message && e.message.includes('上限');
     return { success: false, isLimit: !!isLimit };
+  }
+}
+
+// ========== 地区选择 ==========
+
+export interface RegionItem {
+  id: number
+  name: string
+}
+
+/** 本地地区ID 键（存 region.id，没选过为空） */
+const REGION_ID_KEY = 'userRegionId'
+
+/** 回写本地地区ID：登录后用后端值同步，null 则清除 */
+export const setLocalRegionId = (regionId: number | null) => {
+  try {
+    if (regionId == null) {
+      if (platform) platform.removeStorageSync(REGION_ID_KEY)
+      else localStorage.removeItem(REGION_ID_KEY)
+      return
+    }
+    if (platform) platform.setStorageSync(REGION_ID_KEY, String(regionId))
+    else localStorage.setItem(REGION_ID_KEY, String(regionId))
+  } catch (e) {}
+}
+
+/** 读本地地区ID，没选过返回 null（每日挑战 gate 用它判断要不要弹选地区） */
+export const getLocalRegionId = (): number | null => {
+  try {
+    const raw = platform ? platform.getStorageSync(REGION_ID_KEY) : localStorage.getItem(REGION_ID_KEY)
+    const n = parseInt(String(raw), 10)
+    return Number.isFinite(n) && n > 0 ? n : null
+  } catch (e) {
+    return null
+  }
+}
+
+/** 拉地区字典列表（后端缓存优先），失败返回空数组 */
+export const fetchRegionList = async (): Promise<RegionItem[]> => {
+  try {
+    const res = await request<RegionItem[]>({
+      url: '/api/game/region/list',
+      method: 'POST',
+      data: {}
+    })
+    return res.data || []
+  } catch (e) {
+    console.error('Fetch region list failed:', e)
+    return []
+  }
+}
+
+/** 保存用户选的地区（存 region.id）；成功同步本地 */
+export const saveUserRegion = async (regionId: number): Promise<boolean> => {
+  try {
+    await request({
+      url: '/api/game/region',
+      method: 'POST',
+      data: { regionId }
+    })
+    setLocalRegionId(regionId)
+    return true
+  } catch (e) {
+    console.error('Save user region failed:', e)
+    return false
   }
 }
