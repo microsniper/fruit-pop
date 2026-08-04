@@ -62,8 +62,10 @@ export class AdManager extends Component {
                 console.warn('AdManager rewardedVideoAd error:', err);
             });
             sharedRewardedAd.onClose((res: any) => {
-                // 广告关闭后恢复 BGM（微信广告会暂停音频）
-                SoundManager.getInstance()?.playBGM();
+                // 广告关闭后恢复 BGM：广告是系统级打断音频，需显式拉回。
+                // 用 resumeAfterInterruption 而非 playBGM，避免把用户关掉的音乐重新拉起来。
+                // （SoundManager 也监听了 onShow，这里是双保险，play() 幂等不会叠加）
+                SoundManager.getInstance()?.resumeAfterInterruption();
 
                 // 绑定事件的实例可能已随场景销毁，通过当前活跃实例中转处理回调
                 const inst = AdManager.instance;

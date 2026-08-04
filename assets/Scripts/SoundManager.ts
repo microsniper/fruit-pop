@@ -7,11 +7,28 @@ declare const tt: any;
 
 const platform = typeof wx !== 'undefined' ? wx : (typeof tt !== 'undefined' ? tt : null);
 
+/**
+ * 背景音乐管理。
+ *
+ * 关于「看完广告后没声音」：微信/抖音播激励视频是系统级打断音频，不走 InnerAudioContext.pause()，
+ * 所以打断后 innerAudio.paused 仍是 false。早先 playBGM() 用 `!paused` 提前返回，
+ * 就把「被外部打断」误判成「正在播放」，play() 永不执行，音乐再也不响。
+ *
+ * 现在不再读 paused，改为自己维护两个状态：
+ *   soundOn    用户是否开着声音（设置面板控制，落 localStorage）
+ *   shouldPlay 游戏是否希望 BGM 在播（playBGM/stopBGM 控制）
+ * 恢复播放统一走 resumeAfterInterruption()，它只按这两个状态决定，不看平台的 paused。
+ */
 @ccclass('SoundManager')
 export class SoundManager extends Component {
     private static instance: SoundManager | null = null;
     private innerAudio: any = null;
     private bgmVolume = 1;
+
+    /** 用户是否开着声音 */
+    private soundOn = true;
+    /** 游戏是否希望 BGM 正在播（与平台实际状态无关，仅表达意图） */
+    private shouldPlay = false;
 
     static getInstance(): SoundManager | null {
         return SoundManager.instance;
@@ -24,12 +41,13 @@ export class SoundManager extends Component {
         }
         SoundManager.instance = this;
 
+        this.soundOn = localStorage.getItem('soundEnabled') !== 'false';
+
         try {
             if (platform && platform.createInnerAudioContext) {
                 this.innerAudio = platform.createInnerAudioContext();
                 this.innerAudio.loop = true;
-                const storedSound = localStorage.getItem('soundEnabled');
-                this.innerAudio.volume = storedSound === 'false' ? 0 : this.bgmVolume;
+                this.innerAudio.volume = this.soundOn ? this.bgmVolume : 0;
                 this.innerAudio.autoplay = false;
                 this.innerAudio.src = 'bgm.mp3';
                 this.innerAudio.onError((err: any) => {
@@ -40,50 +58,80 @@ export class SoundManager extends Component {
         } catch (e) {
             console.warn('BGM wx init failed:', e);
         }
+
+        this.listenInterruptions();
+    }
+
+    /**
+     * 注册各类中断的恢复入口：
+     *   onShow                  切后台/看广告/跳转其他小程序后回到游戏
+     *   onAudioInterruptionEnd  来电、闹钟、其他 App 抢占音频结束
+     * 两个事件都是叠加注册，不会覆盖 GameManager 里已有的 onShow 监听。
+     */
+    private listenInterruptions() {
+        if (!platform) return;
+        const resume = () => this.resumeAfterInterruption();
+        try {
+            if (typeof platform.onShow === 'function') platform.onShow(resume);
+            if (typeof platform.onAudioInterruptionEnd === 'function') {
+                platform.onAudioInterruptionEnd(resume);
+            }
+        } catch (e) {
+            console.warn('BGM listen interruptions failed:', e);
+        }
+    }
+
+    /**
+     * 中断结束后恢复播放。不改变播放意图，只是把实际状态拉回意图。
+     * 广告关闭、切后台返回、音频被抢占结束都走这里。
+     */
+    resumeAfterInterruption() {
+        if (!this.innerAudio) return;
+        if (!this.shouldPlay || !this.soundOn) return;
+        try {
+            // 不看 paused：被系统打断时它仍是 false。play() 对正在播放的音频是幂等的。
+            this.innerAudio.play();
+        } catch (e) {
+            console.warn('BGM resume failed:', e);
+        }
     }
 
     playBGM() {
+        this.shouldPlay = true;
+        if (!this.innerAudio || !this.soundOn) return;
         try {
-            if (this.innerAudio && !this.innerAudio.paused) return;
-            if (this.innerAudio) {
-                this.innerAudio.play();
-            }
+            this.innerAudio.play();
         } catch (e) {
             console.warn('BGM play failed:', e);
         }
     }
 
     stopBGM() {
+        this.shouldPlay = false;
+        if (!this.innerAudio) return;
         try {
-            if (this.innerAudio) {
-                this.innerAudio.stop();
-            }
+            this.innerAudio.stop();
         } catch (e) {
             console.warn('BGM stop failed:', e);
         }
     }
 
     setMute(isMuted: boolean) {
+        this.soundOn = !isMuted;
         if (!this.innerAudio) return;
         try {
             this.innerAudio.volume = isMuted ? 0 : this.bgmVolume;
+            // 从静音恢复时，若本该在播则补一次 play（静音期间可能已被打断停掉）
+            if (!isMuted && this.shouldPlay) {
+                this.innerAudio.play();
+            }
         } catch (e) {
             console.warn('Set mute failed:', e);
         }
     }
 
     toggleMute(): boolean {
-        if (!this.innerAudio) return false;
-        try {
-            if (this.innerAudio.volume > 0) {
-                this.innerAudio.volume = 0;
-                return false;
-            } else {
-                this.innerAudio.volume = this.bgmVolume;
-                return true;
-            }
-        } catch (e) {
-            return false;
-        }
+        this.setMute(this.soundOn);
+        return this.soundOn;
     }
 }

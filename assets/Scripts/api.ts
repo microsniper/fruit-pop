@@ -322,6 +322,8 @@ export const saveProgress = async (levelNum: number): Promise<void> => {
 export interface DailyStatusResponse {
   cleared: boolean
   challengeDate: string
+  /** 今日最快通关耗时（秒）；未通关或无有效计时为 null */
+  bestSeconds: number | null
 }
 
 export interface DailyRankItem {
@@ -366,19 +368,30 @@ export const getDailyStatus = async (): Promise<DailyStatusResponse | null> => {
   }
 }
 
-/** 每日挑战通关上报：startAt 为前端计时的挑战开始毫秒时间戳；后端 uk 幂等不重复计 */
-export const saveDailyClear = async (startAt: number): Promise<boolean> => {
+/** 每日挑战通关上报响应：本次耗时 / 今日最快耗时（秒），计时不可信时为 null */
+export interface DailyClearResponse {
+  currentSeconds: number | null
+  bestSeconds: number | null
+  newRecord: boolean
+}
+
+/**
+ * 每日挑战通关上报：startAt 为前端计时的挑战开始毫秒时间戳。
+ * 一人一天一行，重复挑战更快则后端刷新起止时间，所以每次通关都要报。
+ * 返回本次与今日最快耗时，通关页直接用。
+ */
+export const saveDailyClear = async (startAt: number): Promise<DailyClearResponse | null> => {
   try {
     await ensureToken()
-    await request({
+    const res = await request<DailyClearResponse>({
       url: '/api/game/daily/clear',
       method: 'POST',
       data: { gameType: GameTypeEnum.FRUIT_PICKING, startAt }
     })
-    return true
+    return res.data
   } catch (e) {
     console.error('[API] saveDailyClear failed:', e)
-    return false
+    return null
   }
 }
 
