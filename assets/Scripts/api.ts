@@ -183,6 +183,11 @@ export const setLocalLevel = (levelNum: number) => {
 
 export const loginAndGetProgress = async (): Promise<number> => {
   try {
+    // 已登录（token 已有）：跳过重复登录，直接返回本地进度
+    if (token) {
+      console.log('[API] already logged in, skip login');
+      return getLocalLevel();
+    }
     let code = "browser_mock_code";
     
     if (platform) {
@@ -312,6 +317,126 @@ export const saveProgress = async (levelNum: number): Promise<void> => {
   }
 }
 
+// ========== 每日挑战（省份 PK） ==========
+
+export interface DailyStatusResponse {
+  cleared: boolean
+  challengeDate: string
+}
+
+export interface DailyRankItem {
+  rank: number
+  regionId: number
+  regionName: string
+  clearCount: number
+  isMe: boolean
+}
+
+export interface DailyRankResponse {
+  myRank: DailyRankItem | null
+  list: DailyRankItem[]
+}
+
+/** 检查 token，没有则先静默登录（与 saveProgress 同款模式） */
+const ensureToken = async (): Promise<void> => {
+  let hasToken = false;
+  if (platform) {
+    hasToken = !!token || !!platform.getStorageSync('token');
+  } else {
+    hasToken = !!token || !!localStorage.getItem('token');
+  }
+  if (!hasToken) {
+    await loginAndGetProgress()
+  }
+}
+
+/** 每日挑战状态：今天是否已通关（后端读不建行；失败返回 null 由调用方按未通关兜底） */
+export const getDailyStatus = async (): Promise<DailyStatusResponse | null> => {
+  try {
+    await ensureToken()
+    const res = await request<DailyStatusResponse>({
+      url: '/api/game/daily/status',
+      method: 'POST',
+      data: { gameType: GameTypeEnum.FRUIT_PICKING }
+    })
+    return res.data
+  } catch (e) {
+    console.error('[API] getDailyStatus failed:', e)
+    return null
+  }
+}
+
+/** 每日挑战通关上报：startAt 为前端计时的挑战开始毫秒时间戳；后端 uk 幂等不重复计 */
+export const saveDailyClear = async (startAt: number): Promise<boolean> => {
+  try {
+    await ensureToken()
+    await request({
+      url: '/api/game/daily/clear',
+      method: 'POST',
+      data: { gameType: GameTypeEnum.FRUIT_PICKING, startAt }
+    })
+    return true
+  } catch (e) {
+    console.error('[API] saveDailyClear failed:', e)
+    return false
+  }
+}
+
+/** 每日求助好友次数响应 */
+export interface DailyHelpResponse {
+  used: number
+  max: number
+  remaining: number
+}
+
+/** 每日求助好友状态：今日已用次数/上限/剩余 */
+export const getDailyHelpStatus = async (): Promise<DailyHelpResponse | null> => {
+  try {
+    await ensureToken()
+    const res = await request<DailyHelpResponse>({
+      url: '/api/game/daily-help/status',
+      method: 'POST',
+      data: { gameType: GameTypeEnum.FRUIT_PICKING }
+    })
+    return res.data
+  } catch (e) {
+    console.error('[API] getDailyHelpStatus failed:', e)
+    return null
+  }
+}
+
+/** 每日求助好友使用：+1，返回最新次数 */
+export const useDailyHelp = async (): Promise<DailyHelpResponse | null> => {
+  try {
+    await ensureToken()
+    const res = await request<DailyHelpResponse>({
+      url: '/api/game/daily-help/use',
+      method: 'POST',
+      data: { gameType: GameTypeEnum.FRUIT_PICKING }
+    })
+    return res.data
+  } catch (e) {
+    console.error('[API] useDailyHelp failed:', e)
+    return null
+  }
+}
+
+/** 每日挑战省份榜（榜单 UI 后续接入，接口先备） */
+export const getDailyRank = async (): Promise<DailyRankResponse | null> => {
+  try {
+    await ensureToken()
+    const res = await request<DailyRankResponse>({
+      url: '/api/game/daily/rank',
+      method: 'POST',
+      data: { gameType: GameTypeEnum.FRUIT_PICKING }
+    })
+    return res.data
+  } catch (e) {
+    console.error('[API] getDailyRank failed:', e)
+    return null
+  }
+}
+
 // ========== 游戏配置 ==========
 
 export interface GameConfigWeights {
@@ -331,6 +456,7 @@ export interface GameConfigCapacityRange {
 export interface GameConfigToolCosts {
   addBasket: number
   clearTray: number
+  smashPlate: number
 }
 
 export interface GameConfig {
@@ -341,6 +467,41 @@ export interface GameConfig {
   toolCosts: GameConfigToolCosts
   dailyLoginReward: number
   newUserReward: number
+  /** 每日挑战批次计划（按关号分组）：levels.关号.batches=[{colors水果颜色数,layers层数}] */
+  dailyWavePlan?: Record<string, { batches?: DailyWavePlanBatch[] }>
+  /** 每日挑战每层板子数（按关号分组再按批）：maxPlates 缺省=铺满；rectFirst/shapeFirst=方板/异形保底块数 */
+  dailyWavePlates?: Record<string, { batches?: DailyWavePlatesBatch[] }>
+  /** 每日挑战果篮孔数分布权重 */
+  dailyBoxCapacity?: DailyBoxCapacity
+  /** 每日挑战果篮刷新颜色权重 */
+  dailyChallengeWeights?: GameConfigWeights
+  /** 每日挑战层流规则：遮挡翻彩/补层阈值 */
+  dailyLayerRules?: DailyLayerRules
+}
+
+export interface DailyWavePlanBatch {
+  colors?: number
+  layers?: number
+}
+
+export interface DailyWavePlatesBatch {
+  maxPlates?: number
+  rectFirst?: number
+  shapeFirst?: number
+  /** 长条形大板保底块数（plate_bar，宽扁横条横向5孔；缺省/0=不出现） */
+  stripFirst?: number
+}
+
+export interface DailyBoxCapacity {
+  w3?: number
+  w4?: number
+  w5?: number
+  w6?: number
+}
+
+export interface DailyLayerRules {
+  unburyRatio?: number
+  refillRatio?: number
 }
 
 /** 缓存的游戏配置 */
@@ -384,7 +545,7 @@ export const getDefaultGameConfig = (): GameConfig => {
     challengeInterval: 5,
     normalWeights: { temp: 20, click: 30, block: 60 },
     challengeWeights: { temp: 10, click: 20, block: 60 },
-    toolCosts: { addBasket: 20, clearTray: 20 },
+    toolCosts: { addBasket: 20, clearTray: 20, smashPlate: 20 },
     dailyLoginReward: 200,
     newUserReward: 1000,
     boxCapacity: [

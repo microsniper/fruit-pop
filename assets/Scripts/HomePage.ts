@@ -1,8 +1,9 @@
-import { Node, Vec3, UITransform, Color, tween, Graphics, Mask, Sprite, SpriteFrame, Label, resources, ScrollView, director } from 'cc';
+import { Node, Vec3, UITransform, Color, tween, Graphics, Mask, Sprite, SpriteFrame, Label, resources, ScrollView, director, UIOpacity } from 'cc';
 import { getGameConfig, isNewUserThisLogin, getLocalRegionId, fetchRegionList, saveUserRegion, RegionItem } from './api';
 import { SoundManager } from './SoundManager';
 import { BundleManager } from './BundleManager';
 import { LoadingPage } from './LoadingPage';
+import { DailyDriver } from './DailyDriver';
 import type { GameManager } from './GameManager';
 
 declare const wx: any;
@@ -84,12 +85,23 @@ export class HomePage {
 
         // 两个模式入口按钮（每日挑战在上，无限模式在下）
         this.createHomeButton('btn_daily', 0, -pageH * 0.08, 125, () => this.onDailyChallengeClick());
+                // 每日挑战按钮下方：今日状态小字（仅展示通关标记，不再有续玩进度）
+                const dailyStatusText = DailyDriver.readTodayCleared()
+                    ? '今日已通关·继续挑战'
+                    : '';
+                if (dailyStatusText) {
+                    this.gm.createLabel(this.pageNode!, dailyStatusText, 0, -pageH * 0.08 - 48, 14, new Color(120, 85, 45, 255), true);
+                }
         this.createHomeButton('btn_endless', 0, -pageH * 0.22, 125, () => this.enterEndlessMode());
 
         // 左右两侧功能图标：每日签到（左）、排行榜（右）
         const sideBtnW = 58;
         const sideBtnY = pageH * 0.10;
-        this.createHomeButton('btn_signin', -pageW / 2 + 42, sideBtnY, sideBtnW, () => this.onSignInClick());
+        const signInBtnNode = this.createHomeButton('btn_signin', -pageW / 2 + 42, sideBtnY, sideBtnW, () => this.onSignInClick());
+        // 未授权用户：签到按钮也叠加微信原生授权按钮，授权成功后再继续签到流程
+        if (signInBtnNode) {
+            this.gm.setupAuthOverlay('signin', signInBtnNode, () => this.onSignInClick());
+        }
         const rankBtnNode = this.createHomeButton('btn_rank', pageW / 2 - 42, sideBtnY, sideBtnW, () => {
             this.gm.rankPage.open(true);
         });
@@ -136,17 +148,32 @@ export class HomePage {
         balLabel.verticalAlign = Label.VerticalAlign.CENTER;
         balLabel.overflow = Label.Overflow.NONE;
         this.gm.sunCountLabel = balLabel;
+        
+                // 余额下方常驻提示：小太阳每日清零规则（金黄填充+深棕描边艺术字，透明度呼吸吸睛）
+                const sunTipLabel = this.gm.createLabel(this.pageNode, '☀ 小太阳每日零点清零 ☀', 0, balY - balIconH / 2 - 16, 14, new Color(255, 195, 45, 255), true);
+                sunTipLabel.enableOutline = true;
+                sunTipLabel.outlineColor = new Color(120, 60, 15, 255);
+                sunTipLabel.outlineWidth = 2;
+                const sunTipOpacity = sunTipLabel.node.addComponent(UIOpacity);
+                tween(sunTipOpacity)
+                    .to(1.2, { opacity: 150 }, { easing: 'sineInOut' })
+                    .to(1.2, { opacity: 255 }, { easing: 'sineInOut' })
+                    .union()
+                    .repeatForever()
+                    .start();
 
         // 弹窗层：设置弹窗等挂载在此，盖在首页之上（首页销毁了游戏界面的弹窗层，需重建）
         this.gm.modalLayerNode = this.gm.createNode('ModalLayer', this.gm.rootNode!, 0, 0, pageW, pageH);
         this.gm.modalLayerNode.setSiblingIndex(999);
         // 原生授权按钮浮在 Canvas 之上，任何弹窗（签到/设置/新人礼）打开期间需隐藏，防止透明按钮误拦截点击
         this.gm.modalLayerNode.on(Node.EventType.CHILD_ADDED, () => {
-            this.gm.rankPage.setAuthOverlayVisible(false);
+            this.gm.setAuthOverlayVisible('rank', false);
+            this.gm.setAuthOverlayVisible('signin', false);
         }, this);
         this.gm.modalLayerNode.on(Node.EventType.CHILD_REMOVED, () => {
             if (this.gm.modalLayerNode && this.gm.modalLayerNode.isValid && this.gm.modalLayerNode.children.length === 0) {
-                this.gm.rankPage.setAuthOverlayVisible(true);
+                this.gm.setAuthOverlayVisible('rank', true);
+                this.gm.setAuthOverlayVisible('signin', true);
             }
         }, this);
 
@@ -228,8 +255,9 @@ export class HomePage {
         // 首页太阳余额引用随页面销毁置空（进游戏时 ensureTempSlotViews 检测到空引用会重建游戏内版本）
         this.gm.sunCountLabel = null;
         this.gm.sunIconNode = null;
-        // 授权叠层只服务首页排行榜按钮，离开首页即销毁（重新 render 时会再创建）
-        this.gm.rankPage.destroyAuthOverlay();
+        // 授权叠层只服务首页按钮，离开首页即销毁（重新 render 时会再创建）
+        this.gm.destroyAuthOverlay('rank');
+        this.gm.destroyAuthOverlay('signin');
     }
 
     /** 进入无限模式：重开一局全新局面（关卡号不变），首次进入时补触发新手引导 */
@@ -610,14 +638,17 @@ export class HomePage {
     }
 
     /**
-     * 点「每日挑战」：先检测是否选过地区。没选过→弹选地区；选过→（每日挑战本体未做）先弹“即将上线”。
+     * 点「每日挑战」：先检测是否选过地区。没选过→弹选地区（选完确定直接进）；选过→经 Loading 直进对局。
      */
     private onDailyChallengeClick() {
-        if (getLocalRegionId() != null) {
-            this.showTip('每日挑战即将上线，敬请期待！');
+        if (getLocalRegionId() == null) {
+            // 未选省份：先选省（省份榜按省统计通关人数，选完再进）
+            this.renderRegionSelectModal();
             return;
         }
-        this.renderRegionSelectModal();
+        // 经 Loading 场景进入每日挑战：GameManager 按 target='daily' 实例化 DailyDriver 并直进对局
+        LoadingPage.target = 'daily';
+        director.loadScene('Loading');
     }
 
     /**
@@ -742,7 +773,9 @@ export class HomePage {
             if (this.gm.modalLayerNode && this.gm.modalLayerNode.isValid) {
                 this.gm.modalLayerNode.removeAllChildren();
             }
-            this.showTip('每日挑战即将上线，敬请期待！');
+            // 选省完成：直接进入每日挑战（与已选省点按钮同路径，无需再点一次）
+            LoadingPage.target = 'daily';
+            director.loadScene('Loading');
         }, this);
 
         // 从小到大弹出

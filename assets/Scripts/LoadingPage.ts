@@ -5,7 +5,7 @@ import { loginAndGetProgress, fetchGameConfig, getDefaultGameConfig, GameConfig 
 const { ccclass } = _decorator;
 
 /** 加载页跳转目标：进主页 / 直接进无限模式 */
-export type LoadingTarget = 'home' | 'endless';
+export type LoadingTarget = 'home' | 'endless' | 'daily';
 
 /** Loading 场景预热的请求，Main 场景 GameManager 启动时复用，避免重复 wx.login/拉配置 */
 interface WarmupRequests {
@@ -33,6 +33,8 @@ export class LoadingPage extends Component {
     private static _launched = false;
 
     /** 首页切场景前设置目标，Loading 完成后由 GameManager 消费并自动复位 */
+    /** 读取目标不清除（GameManager 实例化驱动时用；enter 分流仍走 consumeTarget） */
+    static get target(): LoadingTarget { return LoadingPage._target; }
     static set target(t: LoadingTarget) { LoadingPage._target = t; }
     static consumeTarget(): LoadingTarget {
         const t = LoadingPage._target;
@@ -103,11 +105,14 @@ export class LoadingPage extends Component {
             })
             .catch(() => { this.done.bundle = 1; });
 
-        // ② 主包水果图预载（与 GameManager.loadFruitSprites 同一批，进 Main 后秒完成）
-        const fruits = ['Red Apple', 'Lemon', 'Peach', 'Orange', 'Pear', 'Eggplant', 'Сorn', 'Carrot'];
+        // ② 分包水果图预载（与 GameManager.loadFruitSprites 同一批，进 Main 后秒完成）
+        const fruits = ['Red Apple', 'Lemon', 'Peach', 'Orange', 'Pear', 'Eggplant', 'Сorn', 'Carrot', 'Pomegranate', 'Potato', 'Grape', 'Banana', 'Watermelon', 'Cherry'];
         let fruitLoaded = 0;
         fruits.forEach((name) => {
-            resources.load(`fruits/${name}/spriteFrame`, SpriteFrame, () => {
+            BundleManager.getInstance().loadAsset<SpriteFrame>(`fruits/${name}/spriteFrame`, SpriteFrame).then(() => {
+                fruitLoaded++;
+                this.done.fruits = fruitLoaded / fruits.length;
+            }).catch(() => {
                 fruitLoaded++;
                 this.done.fruits = fruitLoaded / fruits.length;
             });
@@ -169,15 +174,15 @@ export class LoadingPage extends Component {
         this.appleNode = this.createNode('BarApple', barNode, -this.barWidth / 2, 16, 36, 36);
         const appleSprite = this.appleNode.addComponent(Sprite);
         appleSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        resources.load('fruits/Red Apple/spriteFrame', SpriteFrame, (err, sf) => {
-            if (!err && sf && appleSprite && appleSprite.isValid && this.appleNode) {
+        BundleManager.getInstance().loadAsset<SpriteFrame>('fruits/Red Apple/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && appleSprite && appleSprite.isValid && this.appleNode) {
                 appleSprite.spriteFrame = sf;
                 const rect = sf.rect;
                 if (rect && rect.height > 0) {
                     this.appleNode.getComponent(UITransform)!.setContentSize(36 * (rect.width / rect.height), 36);
                 }
             }
-        });
+        }).catch(() => {});
 
         // 健康游戏忠告
         const tipColor = new Color(96, 76, 52, 255);

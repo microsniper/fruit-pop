@@ -1,4 +1,4 @@
-import { Node, UITransform, Color, Graphics, Mask, screen, view, Sprite, SpriteFrame, ImageAsset, ScrollView, assetManager, Texture2D } from 'cc';
+import { Node, UITransform, Color, Graphics, Mask, Sprite, SpriteFrame, ImageAsset, ScrollView, assetManager, Texture2D } from 'cc';
 import { fetchRank, RankItem, hasUserProfile, updateProfile } from './api';
 import { BundleManager } from './BundleManager';
 import type { GameManager } from './GameManager';
@@ -14,8 +14,6 @@ export class RankPage {
     private pageNode: Node | null = null;
     /** 排行榜页是否从首页打开（决定返回键回首页还是回游戏） */
     private fromHome = false;
-    /** 覆盖在排行榜按钮上的微信原生授权按钮（createUserInfoButton） */
-    private authBtn: any = null;
     private defaultAvatarsLoaded = false;
     private defaultAvatarFrames: SpriteFrame[] = [];
 
@@ -67,89 +65,19 @@ export class RankPage {
     /**
      * 在排行榜按钮位置叠加透明的微信原生授权按钮。
      * 点击后微信自动串起「官方隐私弹窗 → 昵称头像授权弹窗」，
-     * 任一步取消都不进入排行榜。
-     * 坐标换算：节点世界包围盒 → view 缩放/视口偏移 → 屏幕逻辑像素，全设备通用。
+     * 任一步取消都不进入排行榜。坐标换算/创建/保存均委托 GameManager 通用方法。
      */
     setupAuthOverlay(targetNode: Node) {
-        if (typeof wx === 'undefined' || typeof wx.createUserInfoButton !== 'function') return;
-        if (hasUserProfile()) return;
-        this.destroyAuthOverlay();
-
-        // 延迟一帧：等待节点世界变换更新后再取包围盒，否则可能拿到零值
-        this.gm.scheduleOnce(() => {
-            if (!targetNode || !targetNode.isValid) return;
-            const uiTf = targetNode.getComponent(UITransform);
-            if (!uiTf) return;
-
-            const box = uiTf.getBoundingBoxToWorld();
-            const vpRect = view.getViewportRect();
-            const sx = view.getScaleX();
-            const sy = view.getScaleY();
-            const dpr = screen.devicePixelRatio || 1;
-            const sysInfo = wx.getSystemInfoSync();
-
-            const pad = 4; // 略微扩大点击热区
-            const left = (box.xMin * sx + vpRect.x) / dpr - pad;
-            const top = sysInfo.windowHeight - (box.yMax * sy + vpRect.y) / dpr - pad;
-            const btnW = (box.width * sx) / dpr + pad * 2;
-            const btnH = (box.height * sy) / dpr + pad * 2;
-            console.log('[Auth] rankAuthBtn rect:', JSON.stringify({ left, top, width: btnW, height: btnH, windowW: sysInfo.windowWidth, windowH: sysInfo.windowHeight }));
-
-            try {
-                const button = wx.createUserInfoButton({
-                    type: 'text',
-                    text: '',
-                    style: {
-                        left,
-                        top,
-                        width: btnW,
-                        height: btnH,
-                        backgroundColor: 'transparent',
-                        color: 'transparent',
-                        textAlign: 'center',
-                        fontSize: 0,
-                    },
-                });
-
-                button.onTap((res: any) => {
-                    console.log('[Auth] rankAuthBtn onTap:', JSON.stringify(res));
-                    if (res && res.userInfo && res.userInfo.nickName && res.userInfo.nickName !== '微信用户') {
-                        // 授权成功：销毁原生按钮，保存并进榜
-                        this.destroyAuthOverlay();
-                        this.saveAndEnterRank(res.userInfo);
-                    } else {
-                        // 用户在隐私弹窗或授权弹窗中取消：不进榜，按钮保留供下次点击
-                        console.log('[Auth] auth cancelled or anonymous userInfo:', res && res.errMsg);
-                        this.showAuthRequiredToast();
-                    }
-                });
-
-                this.authBtn = button;
-            } catch (e) {
-                console.warn('[Auth] createUserInfoButton failed:', e);
-            }
-        }, 0);
+        this.gm.setupAuthOverlay('rank', targetNode, () => this.loadAndShowRank());
     }
 
     destroyAuthOverlay() {
-        if (this.authBtn) {
-            try {
-                this.authBtn.destroy();
-            } catch { }
-            this.authBtn = null;
-        }
+        this.gm.destroyAuthOverlay('rank');
     }
 
     /** 显示/隐藏排行榜上的原生授权按钮（弹窗打开期间需隐藏，防止透明按钮误拦截点击） */
     setAuthOverlayVisible(visible: boolean) {
-        if (!this.authBtn) return;
-        try {
-            if (visible) {
-                this.authBtn.show();
-            } else {
-                this.authBtn.hide();
-            }
-        } catch { }
+        this.gm.setAuthOverlayVisible('rank', visible);
     }
 
     private async saveAndEnterRank(userInfo: any) {
