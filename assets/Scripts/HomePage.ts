@@ -4,13 +4,14 @@ import { SoundManager } from './SoundManager';
 import { BundleManager } from './BundleManager';
 import { LoadingPage } from './LoadingPage';
 import { DailyDriver } from './DailyDriver';
+import { SignInPage } from './SignInPage';
 import type { GameManager } from './GameManager';
 
 declare const wx: any;
 
 /**
  * 首页：模式选择页（无限模式/每日挑战）及只在首页出现的功能——
- * 每日登录宝箱、首页设置弹窗、免费太阳、新人礼弹窗。
+ * 七日签到入口、首页设置弹窗、免费太阳、新人礼弹窗。
  * 纯逻辑类（非组件），共享工具与状态通过 GameManager 引用访问。
  */
 export class HomePage {
@@ -22,7 +23,7 @@ export class HomePage {
     private readonly FREE_SUN_DAILY_LIMIT = 3;
     /** 本次登录是否已标记过新人礼待领取（防止领取后同会话重复标记） */
     private newUserGiftMarked = false;
-    /** 签到引导手指（未领每日登录好礼时压在签到按钮上） */
+    /** 签到引导手指（今天未签到时压在签到按钮上） */
     private signInGuideNode: Node | null = null;
 
     constructor(private gm: GameManager) {}
@@ -98,6 +99,13 @@ export class HomePage {
         const sideBtnW = 58;
         const sideBtnY = pageH * 0.10;
         const signInBtnNode = this.createHomeButton('btn_signin', -pageW / 2 + 42, sideBtnY, sideBtnW, () => this.onSignInClick());
+        // 今天未签到：签到按钮右上角红点提醒
+        if (signInBtnNode && !SignInPage.isSignedToday()) {
+            const dot = signInBtnNode.addComponent(Graphics);
+            dot.fillColor = new Color(235, 60, 50, 255);
+            dot.circle(sideBtnW * 0.42, sideBtnW * 0.26, 6);
+            dot.fill();
+        }
         // 未授权用户：签到按钮也叠加微信原生授权按钮，授权成功后再继续签到流程
         if (signInBtnNode) {
             this.gm.setupAuthOverlay('signin', signInBtnNode, () => this.onSignInClick());
@@ -177,7 +185,7 @@ export class HomePage {
             }
         }, this);
 
-        // 未领每日登录好礼：手指引导指向签到按钮
+        // 今天未签到：手指引导指向签到按钮
         this.showSignInGuideIfNeeded(-pageW / 2 + 42, sideBtnY);
 
         // 新人礼弹窗改在首页弹出（已领取的不会再弹）
@@ -214,13 +222,12 @@ export class HomePage {
     }
 
     /**
-     * 签到引导手指：今天还没领每日登录好礼时，手指压在签到按钮上朝按钮方向反复轻戳。
-     * 点签到按钮即销毁；挂在 pageNode 下随首页销毁，下次回首页仍未领会再出现。
+     * 签到引导手指：今天还没签到时，手指压在签到按钮上朝按钮方向反复轻戳。
+     * 点签到按钮即销毁；挂在 pageNode 下随首页销毁，下次回首页仍未签再出现。
      */
     private showSignInGuideIfNeeded(btnX: number, btnY: number) {
         if (!this.pageNode) return;
-        const today = new Date().getDate();
-        if (this.getSignedDaysThisMonth().indexOf(today) >= 0) return;
+        if (SignInPage.isSignedToday()) return;
 
         // 图 144x256，指尖朝左上（位于图上约 30%/8% 处），手放按钮右下让指尖落在按钮中心
         const handH = 64;
@@ -510,131 +517,14 @@ export class HomePage {
         // 游戏反馈按钮（图里的橙色立体按钮）：暂不可点击，不挂事件，仅占位
     }
 
-    /** 点击签到按钮：今天未领弹每日登录宝箱，已领弹提示 */
+    /** 点击签到按钮：打开七日签到弹窗（签到状态/今日已领判断都在弹窗内） */
     private onSignInClick() {
         // 点了签到按钮即撤掉引导手指
         if (this.signInGuideNode && this.signInGuideNode.isValid) {
             this.signInGuideNode.destroy();
         }
         this.signInGuideNode = null;
-        const today = new Date().getDate();
-        if (this.getSignedDaysThisMonth().indexOf(today) >= 0) {
-            this.gm.renderCommonTip('每日登录好礼', '今天的好礼已经领过啦\n明天再来哦～');
-            return;
-        }
-        this.renderDailyGiftModal();
-    }
-
-    /** 每日登录宝箱弹窗（panel_daily_gift.png）：点宝箱 +小太阳（每天一次），太阳粒子飞向顶部余额 */
-    private renderDailyGiftModal() {
-        if (!this.gm.modalLayerNode || !this.gm.modalLayerNode.isValid) return;
-        this.gm.modalLayerNode.removeAllChildren();
-
-        const amount = getGameConfig()?.dailyLoginReward ?? 200;
-
-        // 遮罩：点击关闭（今天不领，之后再点签到按钮还能领）
-        const mask = this.gm.createGraphicsNode('Mask', this.gm.modalLayerNode, this.gm.screenWidth, this.gm.screenHeight, 0, 0);
-        this.gm.drawRoundedRect(mask.getComponent(Graphics)!, this.gm.screenWidth, this.gm.screenHeight, new Color(0, 0, 0, 150), 0);
-        mask.on(Node.EventType.TOUCH_END, () => {
-            this.gm.modalLayerNode!.removeAllChildren();
-        }, this);
-
-        // 宝箱整图面板：panel_daily_gift.png（标题、宝箱、金色光芒都画在图里，1:1 方图）
-        const panelW = Math.min(340, this.gm.screenWidth * 0.92);
-        const panelNode = this.gm.createNode('DailyGiftPanel', this.gm.modalLayerNode, 0, 0, panelW, panelW);
-        const panelTransform = panelNode.getComponent(UITransform)!;
-        const sprite = panelNode.addComponent(Sprite);
-        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_daily_gift/spriteFrame', SpriteFrame).then((sf) => {
-            if (sf && sprite && sprite.isValid) {
-                sprite.spriteFrame = sf;
-                const rect = sf.rect;
-                if (rect && rect.width > 0) {
-                    panelTransform.setContentSize(panelW, panelW * rect.height / rect.width);
-                }
-            }
-        }).catch(() => {});
-
-        const ph = panelTransform.height;
-
-        // 提示文案：面板下方
-        this.gm.createLabel(this.gm.modalLayerNode, `点击宝箱领取 +${amount} 小太阳`, 0, -ph / 2 - 36, 20, new Color(255, 235, 160, 255), true);
-
-        // 整个面板都是领取热区
-        let claiming = false;
-        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
-            e.propagationStopped = true;
-            if (claiming) return;
-            claiming = true;
-
-            const startSuns = this.gm.totalSuns;
-            this.gm.totalSuns += amount;
-            if (typeof wx !== 'undefined' && wx.setStorageSync) {
-                wx.setStorageSync('totalSuns', this.gm.totalSuns.toString());
-            } else {
-                localStorage.setItem('totalSuns', this.gm.totalSuns.toString());
-            }
-            // 记录今天已领（沿用签到天数存储，跨月自动清零）
-            this.setSignedToday();
-
-            // 宝箱弹一下 + "+N 小太阳" 上飘 + 金色太阳飞向顶部余额（计数随粒子到达滚动）
-            if (breathTween) breathTween.stop();
-            tween(panelNode)
-                .to(0.12, { scale: new Vec3(1.15, 1.15, 1) })
-                .to(0.12, { scale: new Vec3(1, 1, 1) })
-                .start();
-            const gainLabel = this.gm.createLabel(this.gm.modalLayerNode!, `+${amount} 小太阳`, 0, ph * 0.18, 30, new Color(255, 220, 80, 255), true);
-            tween(gainLabel.node)
-                .by(0.8, { position: new Vec3(0, 70, 0) })
-                .start();
-
-            // 起飞点取宝箱主体中心（面板中心略偏下）
-            const chestWorldPos = panelTransform.convertToWorldSpaceAR(new Vec3(0, -ph * 0.1, 0));
-            this.gm.playDailyRewardSunFly(chestWorldPos, startSuns, amount, () => {
-                if (this.gm.modalLayerNode) this.gm.modalLayerNode.removeAllChildren();
-            });
-        }, this);
-
-        // 入场：从小到大弹出；播完后再启动独立的循环呼吸 tween
-        let breathTween: ReturnType<typeof tween> | null = null;
-        panelNode.setScale(new Vec3(0.6, 0.6, 1));
-        tween(panelNode)
-            .to(0.25, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' })
-            .call(() => {
-                if (!panelNode.isValid) return;
-                breathTween = tween(panelNode)
-                    .to(0.55, { scale: new Vec3(1.09, 1.09, 1) }, { easing: 'sineInOut' })
-                    .to(0.55, { scale: new Vec3(1, 1, 1) }, { easing: 'sineInOut' })
-                    .union()
-                    .repeatForever();
-                breathTween.start();
-            })
-            .start();
-    }
-
-    /** 本月已签到的日期列表（本地存储，格式 "YYYY-M:d1,d2"，跨月自动清零） */
-    private getSignedDaysThisMonth(): number[] {
-        const raw = (typeof wx !== 'undefined' && wx.getStorageSync)
-            ? (wx.getStorageSync('signInDays') || '')
-            : (localStorage.getItem('signInDays') || '');
-        const sep = String(raw).lastIndexOf(':');
-        if (sep < 0) return [];
-        const monthKey = String(raw).substring(0, sep);
-        const d = new Date();
-        if (monthKey !== `${d.getFullYear()}-${d.getMonth() + 1}`) return [];
-        return String(raw).substring(sep + 1).split(',').map(Number).filter(n => n > 0);
-    }
-
-    private setSignedToday() {
-        const d = new Date();
-        const days = this.getSignedDaysThisMonth();
-        if (days.indexOf(d.getDate()) < 0) days.push(d.getDate());
-        const val = `${d.getFullYear()}-${d.getMonth() + 1}:${days.join(',')}`;
-        if (typeof wx !== 'undefined' && wx.setStorageSync) {
-            wx.setStorageSync('signInDays', val);
-        } else {
-            localStorage.setItem('signInDays', val);
-        }
+        new SignInPage(this.gm).open();
     }
 
     /**

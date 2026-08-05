@@ -1,5 +1,6 @@
-import { loginAndGetProgress, saveProgress } from './api';
+import { loginAndGetProgress, saveProgress, getGameConfig } from './api';
 import type { ClearAction, ModeDriver, ToolPayment, ToolType } from './ModeDriver';
+import { DEFAULT_LAYER_RULES, LayerRules } from './ModeDriver';
 
 /**
  * 无限模式驱动：进度永久累积，存 user_progress.level_num。
@@ -76,6 +77,19 @@ export class EndlessDriver implements ModeDriver {
     }
     getRemainingHelp(): number {
         return 0;
+    }
+
+    // ===== 层流规则（后端 endless_layer_rules 按关卡区间）=====
+    getLayerRules(level: number): LayerRules {
+        // 第 1 关写死新手局：1 层 3 块板，不走配置
+        if (level <= 1) {
+            return { ...DEFAULT_LAYER_RULES, maxLayers: 1, maxPlates: 3, initialLoad: 1 };
+        }
+        // 按关号找第一个 level <= max 的区间，缺字段回落默认值；无配置整体回落默认值
+        const ranges = getGameConfig().endlessLayerRules;
+        if (!ranges || ranges.length === 0) return { ...DEFAULT_LAYER_RULES };
+        const hit = ranges.find((r) => level <= (r.max ?? 0));
+        return { ...DEFAULT_LAYER_RULES, ...(hit || {}) };
     }
 
     // ===== UI =====

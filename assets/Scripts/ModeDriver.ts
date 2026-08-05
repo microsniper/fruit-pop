@@ -12,6 +12,27 @@
 export type ToolType = 'addBasket' | 'smash' | 'clear';
 
 /**
+ * 层流规则（各模式自行读后端配置合并默认值）：
+ *   maxPlates   单层板子数上限（安全阀，实际受棋盘面积约束）
+ *   maxLayers   一关最多层数
+ *   initialLoad 开局一次性启用几层
+ *   refillRatio 果量跌破首批总果量×此比例时启用下一层
+ *   unburyRatio 被遮挡面积比跌破此值时灰板单独翻彩
+ */
+export interface LayerRules {
+    maxPlates: number;
+    maxLayers: number;
+    initialLoad: number;
+    refillRatio: number;
+    unburyRatio: number;
+}
+
+/** 两个模式共用的兜底默认值（= 原 GameManager 写死常量） */
+export const DEFAULT_LAYER_RULES: LayerRules = {
+    maxPlates: 40, maxLayers: 10, initialLoad: 2, refillRatio: 0.7, unburyRatio: 0.6
+};
+
+/**
  * 过关后的走向：
  *   modal        弹常规过关弹窗，等玩家点「下一关」（无限模式全程）
  *   autoAdvance  不弹窗，直接进加载页加载下一关（每日挑战第 1 关）
@@ -76,6 +97,13 @@ export interface ModeDriver {
     setHelpUsed(used: number): void;
     getHelpUsed(): number;
     getRemainingHelp(): number;
+
+    // ===== 层流规则 =====
+    /**
+     * 取当前关的层流规则：各模式读自己的后端配置合并 DEFAULT_LAYER_RULES。
+     * 无限模式按关号落区间（endless_layer_rules，含第 1 关写死的新手局）；每日挑战忽略 level 参数。
+     */
+    getLayerRules(level: number): LayerRules;
 
     // ===== UI 差异 =====
     /** 道具弹窗底图资源名（不含 ui/ 前缀与 /spriteFrame 后缀） */

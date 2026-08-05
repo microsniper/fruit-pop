@@ -1,5 +1,6 @@
-import { saveDailyClear, DailyClearResponse } from './api';
+import { saveDailyClear, DailyClearResponse, getGameConfig } from './api';
 import type { ClearAction, ModeDriver, ToolPayment, ToolType } from './ModeDriver';
+import { DEFAULT_LAYER_RULES, LayerRules } from './ModeDriver';
 
 /**
  * 每日挑战驱动（省份 PK）：每天仅 2 关，1→2→(通关上报)→1 循环，可重复挑战。
@@ -132,6 +133,13 @@ export class DailyDriver implements ModeDriver {
     }
     showToolCost(): boolean {
         return false;
+    }
+
+    // ===== 层流规则（后端 daily_challenge_layer_rules）=====
+    /** 每日挑战不分关区间，level 参数忽略；行为 = 原 GameManager 里的 dailyLayerRules 读取 */
+    getLayerRules(_level: number): LayerRules {
+        const cfg = getGameConfig().dailyLayerRules;
+        return { ...DEFAULT_LAYER_RULES, ...cfg };
     }
 
     // ===== 通关上报与本地存储 =====

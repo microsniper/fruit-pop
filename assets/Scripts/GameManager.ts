@@ -4,11 +4,12 @@ import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
 import { BundleManager } from './BundleManager';
 import { LoadingPage } from './LoadingPage';
-import { ModeDriver, ToolType } from './ModeDriver';
+import { ModeDriver, ToolType, LayerRules, DEFAULT_LAYER_RULES } from './ModeDriver';
 import { EndlessDriver } from './EndlessDriver';
 import { DailyDriver } from './DailyDriver';
 import { HomePage } from './HomePage';
 import { RankPage } from './RankPage';
+import { PropStore } from './PropStore';
 
 // @ts-ignore
 const { ccclass } = _decorator;
@@ -354,24 +355,10 @@ const TOP_CONTENT_OFFSET = 24;
 const PLATE_BURIED_COLOR = new Color(120, 126, 132, 230);
 /** 覆盖率采样网格边长：单块板子最多 9x9 个采样点 */
 const PLATE_COVER_SAMPLE_GRID = 9;
+/** 彩板透明度（预烘图与普通彩板共用，含翻彩动画终点）；灰板不走这里，保持 PLATE_BURIED_COLOR 自己的 alpha */
+const PLATE_ALPHA = 200;
 /** 层被启用时，这一层板子灰→彩的过渡时长 */
 const PLATE_REVEAL_DURATION = 0.35;
-/** 一关最多几层，直接决定单关时长 */
-const LAYER_MAX_COUNT = 10;
-/** 开局一次性启用几层（首批），这几层全部彩色 */
-const LAYER_INITIAL_LOAD = 2;
-/** 剩余果子跌到“首批总果量 × 这个比例”以下，就从最底下再启用一层 */
-const LAYER_REFILL_RATIO = 0.7;
-/**
- * 灰板提前解锁的遮挡阈值。未启用层的板子除了等果子数量跌破补层阈值，
- * 还多一条放行通道：自己被上层盖住的面积比跌到这个值以下，就单独翻彩。
- * 解决的是“上面的板子都掉完了，底下露出一片灰板却摸不得，而果子数又没跌破阈值”。
- * 翻彩按单块板结算（同一层里可能一部分亮了、一部分还灰着）；
- * 而数量跌破阈值那条通道依旧是整层一起亮。
- */
-const PLATE_UNBURY_COVER_RATIO = 0.6;
-/** 单层铺满时的板子数量上限，循环安全阀 */
-const LAYER_MAX_PLATES = 40;
 /**
  * 板子整体缩放。铺板改成规则化装箱后已经不需要靠缩小换密度，回到原尺寸。
  * 留着这个旋钮方便日后调：离线仿真 1.0 占地 79.8%，0.9 是 74.4%，
@@ -409,7 +396,6 @@ const LAYER_RECT_PLATE_FIRST = 2;
 const LAYER_SHAPE_PLATE_FIRST = 4;
 
 let tutorialShown = false;
-let rainbowIntroduced = false;
 let challengeTipShown = false;
 
 @ccclass('GameManager')
@@ -665,8 +651,10 @@ export class GameManager extends Component {
         private boardWidth = 0;
     /** 这一关一共几批，开局就定好 */
     private maxWave = 0;
-    /** 剩余果子跌到这个数以下就启用下一层（= 首批总果量 × LAYER_REFILL_RATIO） */
+    /** 剩余果子跌到这个数以下就启用下一层（= 首批总果量 × layerRules.refillRatio） */
     private refillThreshold = 0;
+    /** 当前关的层流规则（generateLevel 时从 driver 取，含层数/开局层数/补层与翻彩阈值/板数上限） */
+    private layerRules: LayerRules = DEFAULT_LAYER_RULES;
     /** 已经建过节点的最深批次，再深的批次等玩家挖到了才加载 */
     private loadedWave = 0;
     /** 每日挑战批次信息（generateLevel 写入）：逐层颜色数与层→批归属，供刷色池跨批扩池 */
@@ -768,10 +756,6 @@ export class GameManager extends Component {
         tutorialShown = true;
 
         this.renderCommonTip('🎉 欢迎来到果园', '🍎 点击果子 → 投入同色果篮\n🧺 凑满果篮 → 自动清空继续\n🪵 板子清空 → 掉落露出新果子\n\n没合适果篮？先放果盘暂存！', onClose);
-    }
-
-    private showRainbowTutorial() {
-        this.renderCommonTip('🌈 彩虹果！', '彩虹果是万能果实！\n✨ 它可以放入任意果篮，无视颜色\n哪里有空位就能去哪里\n\n合理利用彩虹果，轻松过关～');
     }
 
     /**
@@ -1556,22 +1540,8 @@ export class GameManager extends Component {
         this.ensurePrimaryBoxes();
     }
 
-    /** 进关后的延迟提示：彩虹果第 6 关 / 挑战关间隔关（原 initGame 尾部逻辑） */
+    /** 进关后的延迟提示：挑战关间隔关（原 initGame 尾部逻辑） */
     private scheduleLevelEntryTips() {
-        // 彩虹果提示：仅第 6 关弹出（彩虹果从第 6 关开始出现）
-        if (this.currentLevel === 6 && !rainbowIntroduced) {
-            rainbowIntroduced = true;
-            this.scheduleOnce(() => {
-                // 延迟期间可能已经退回首页，那就把标志退回去下次再弹；
-                // 不回滚的话这个提示就永久丢了，比弹错地方更隐蔽
-                if (!this.isGameViewAlive()) {
-                    rainbowIntroduced = false;
-                    return;
-                }
-                this.showRainbowTutorial();
-            }, 0.5);
-        }
-
         // 挑战关卡，弹出挑战提示
         const interval = this.gameConfig?.challengeInterval || 5;
         if (this.currentLevel % interval === 0 && !challengeTipShown) {
@@ -1854,17 +1824,23 @@ export class GameManager extends Component {
         this.ensureToolViews();
 
         const toolList = [
-            { key: 'smash' as const, label: '砸板子', icon: '🪓', count: this.tools.add },
-            { key: 'clear' as const, label: '清空果盘', icon: '🧹', count: this.tools.clear }
+            { key: 'smash' as const, label: '砸板子', icon: '🪓', count: PropStore.getToolCount('smash') },
+            { key: 'clear' as const, label: '清空果盘', icon: '🧹', count: PropStore.getToolCount('clear') }
         ];
         toolList.forEach((tool, index) => {
             const view = this.toolViews[index];
             view.iconLabel.string = '';
             view.iconLabel.node.active = false;
-            // 屏蔽徽章更新，因为已经隐藏
-            // const badgeColor = (tool.count <= 0 && tool.key !== 'add' && tool.key !== 'clear') ? new Color(160, 150, 130, 255) : new Color(220, 160, 50, 255);
-            // this.drawCircle(view.badge, 13, badgeColor, 3, new Color(255, 245, 220, 255));
-            // view.badgeLabel.string = String(tool.count > 0 ? tool.count : '+');
+            // 右上角角标：免费道具数量>0 显示红圈白字，=0 隐藏
+            if (tool.count > 0) {
+                view.badge.node.active = true;
+                view.badgeLabel.node.active = true;
+                this.drawCircle(view.badge, 13, new Color(235, 60, 50, 255), 3, new Color(255, 255, 255, 255));
+                view.badgeLabel.string = String(tool.count);
+            } else {
+                view.badge.node.active = false;
+                view.badgeLabel.node.active = false;
+            }
         });
     }
 
@@ -1914,21 +1890,6 @@ export class GameManager extends Component {
         return true;
     }
 
-    /**
-     * 道具按钮置灰：求助用完(btnSuns) 或 本关次数用完(btnSuns/btnAd)。
-     * 限次与求助上限全部取自 driver，无限模式两者都不会触发，故自动不置灰。
-     */
-    private drawHelpExhaustedOverlay(panelNode: Node, btnX: number, btnY: number, btnW: number, btnH: number, tool: ToolType, isHelpBtn: boolean) {
-        const helpExhausted = isHelpBtn && this.driver.isHelpExhausted();
-        const perLevelExhausted = this.driver.isToolExhausted(tool);
-        if (!helpExhausted && !perLevelExhausted) return;
-        // 灰色半透明覆盖
-        const overlay = this.createGraphicsNode(isHelpBtn ? 'HelpExhausted' : 'AdExhausted', panelNode, btnW, btnH, btnX, btnY);
-        this.drawRoundedRect(overlay.getComponent(Graphics)!, btnW, btnH, new Color(150, 150, 150, 180), btnH / 2);
-        // 文字
-        this.createLabel(panelNode, helpExhausted ? '求助已用完' : '本局已用完', btnX, btnY, 18, new Color(255, 255, 255, 255), true);
-    }
-
     /** 注册 wx.onShow：用户分享后回到游戏时执行待操作（非微信环境延迟1秒执行） */
     private scheduleDailyActionOnShow() {
         if (typeof wx === 'undefined' || typeof wx.onShow !== 'function') {
@@ -1957,6 +1918,21 @@ export class GameManager extends Component {
         if (!this.driver.hasHelpMechanism()) return;
         const res = await getDailyHelpStatus();
         if (res) this.driver.setHelpUsed(res.used);
+    }
+
+    /**
+     * 道具按钮置灰：求助用完(btnSuns) 或 本关次数用完(btnSuns/btnAd)。
+     * 限次与求助上限全部取自 driver，无限模式两者都不会触发，故自动不置灰。
+     */
+    private drawHelpExhaustedOverlay(panelNode: Node, btnX: number, btnY: number, btnW: number, btnH: number, tool: ToolType, isHelpBtn: boolean) {
+        const helpExhausted = isHelpBtn && this.driver.isHelpExhausted();
+        const perLevelExhausted = this.driver.isToolExhausted(tool);
+        if (!helpExhausted && !perLevelExhausted) return;
+        // 灰色半透明覆盖
+        const overlay = this.createGraphicsNode(isHelpBtn ? 'HelpExhausted' : 'AdExhausted', panelNode, btnW, btnH, btnX, btnY);
+        this.drawRoundedRect(overlay.getComponent(Graphics)!, btnW, btnH, new Color(150, 150, 150, 180), btnH / 2);
+        // 文字
+        this.createLabel(panelNode, helpExhausted ? '求助已用完' : '本局已用完', btnX, btnY, 18, new Color(255, 255, 255, 255), true);
     }
 
     private renderAddBasketModal() {
@@ -2019,6 +1995,14 @@ export class GameManager extends Component {
                 else this.renderCommonTip('提示', '本局加果篮次数已用完');
                 return;
             }
+            // 免费道具优先：背包有加果盘道具直接扣，不扣太阳也不走求助
+            if (PropStore.consumeTool('addBasket')) {
+                this.driver.useTool('addBasket');
+                this.modalLayerNode!.removeAllChildren();
+                this.handleUnlockBox(lockedBox);
+                this.renderBasketUnlockModal();
+                return;
+            }
             const payment = this.driver.getPrimaryPayment('addBasket', addCost);
             if (payment.kind === 'help') {
                 // 求助好友（每日挑战 4 次/天），不扣小太阳
@@ -2079,7 +2063,7 @@ export class GameManager extends Component {
         // 4. 第三个按钮：继续游戏（绿色按钮）
         const btnContinue = this.createNode('BtnContinue', panelNode, -5, -209, 180, 48);
         btnContinue.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            this.modalLayerNode?.removeAllChildren();
         }, this);
     }
 
@@ -2142,6 +2126,13 @@ export class GameManager extends Component {
                 this.renderCommonTip('砸板子', '当前没有可砸的板子哦');
                 return;
             }
+            // 免费道具优先：背包有砸板子道具直接扣，不扣太阳也不走求助
+            if (PropStore.consumeTool('smash')) {
+                this.modalLayerNode!.removeAllChildren();
+                this.smashTopBottomPlate();
+                this.renderTools();
+                return;
+            }
             const payment = this.driver.getPrimaryPayment('smash', smashCost);
             if (payment.kind === 'help') {
                 // 求助好友（每日挑战 4 次/天），不扣小太阳
@@ -2197,12 +2188,12 @@ export class GameManager extends Component {
         // 4. 第三个按钮：继续游戏（绿色按钮）
         const btnContinue = this.createNode('BtnContinue', panelNode, -5, -209, 180, 48);
         btnContinue.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            this.modalLayerNode?.removeAllChildren();
         }, this);
     }
 
-    /** 通用提示横条（panel_tip_common 深色横幅）：从屏幕底部升至中间，停顿 2 秒后向上飞出屏幕（不关闭当前弹窗） */
-    private showSunShortageTip(text: string = '小太阳数量不足') {
+    /** 通用提示横条（panel_tip_common 深色横幅）：从屏幕底部升至中间，停顿 2 秒后向上飞出屏幕（不关闭当前弹窗）；public 供签到弹窗等外部调用 */
+    public showSunShortageTip(text: string = '小太阳数量不足') {
         if (!this.modalLayerNode) return;
         // 幂等：横幅还在显示中（未飞出销毁）时忽略重复触发，防止连点叠加多个横幅
         if (this.sunShortageTipNode && this.sunShortageTipNode.isValid) return;
@@ -2285,7 +2276,7 @@ export class GameManager extends Component {
             this.tryConsumeTool('clear', () => {
                 this.tempHoles = [];
                 this.renderTopUI();
-                // 若清空后恰好达成过关条件，过关弹窗优先，不再弹出清空成功图
+                // 若清空后正好达成过关条件，过关弹窗优先，不再弹出清空成功图
                 const willWin = !this.gameOver
                     && this.fallingPlateNodes.size === 0
                     && !this.plates.some((plate) => plate.state === 'falling')
@@ -2306,6 +2297,14 @@ export class GameManager extends Component {
             if (!this.driver.canUseTool('clear')) {
                 if (isDaily) this.showSunShortageTip('本局清空果盘次数已用完');
                 else this.renderCommonTip('提示', '本局清空果盘次数已用完');
+                return;
+            }
+            // 免费道具优先：背包有清空果盘道具直接扣，不扣太阳也不走求助
+            if (PropStore.consumeTool('clear')) {
+                this.driver.useTool('clear');
+                this.modalLayerNode!.removeAllChildren();
+                doClearTray();
+                this.renderTools();
                 return;
             }
             const payment = this.driver.getPrimaryPayment('clear', clearCost);
@@ -2360,7 +2359,7 @@ export class GameManager extends Component {
         // 4. 第三个按钮：继续游戏（绿色按钮）
         const btnContinue = this.createNode('BtnContinue', panelNode, -6, -199, 212, 48);
         btnContinue.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            this.modalLayerNode?.removeAllChildren();
         }, this);
     }
 
@@ -2855,6 +2854,8 @@ export class GameManager extends Component {
 
         const levelNum = this.currentLevel;
         const isDaily = this.driver.mode === 'daily';
+        // 层流规则按关取：无限模式按关卡区间（第 1 关 driver 内写死新手局），每日挑战读自己的配置
+        this.layerRules = this.driver.getLayerRules(levelNum);
         const numColors = Math.min(COLORS.length, 4 + Math.floor((levelNum - 1) / 2));
         const activeColors = COLORS.slice(0, numColors);
         this.boxes[0].color = 'empty';
@@ -2866,13 +2867,10 @@ export class GameManager extends Component {
             box.isNew = false;
             box.isSlidingOut = false;
         });
-        // 一关分成几层：每 2 关多一层、封顶 8 层，板子和水果的总量全靠这个涨
-        let waveCount = Math.min(LAYER_MAX_COUNT, 2 + Math.floor((levelNum - 1) / 2));
-        // 彩虹果沿用原来的关卡门槛，发给最上面几批，早点让玩家用上
-        let rainbowTotal = 0;
-        if (levelNum >= 6) {
-            rainbowTotal = levelNum >= 20 ? 3 : levelNum >= 12 ? 2 : 1;
-        }
+        // 一关分成几层：每 2 关多一层，封顶由 layerRules.maxLayers 配置，板子和水果的总量全靠这个涨
+        let waveCount = Math.min(this.layerRules.maxLayers, 2 + Math.floor((levelNum - 1) / 2));
+        // 彩虹果不再随关卡生成（无限模式/每日挑战均不刷），仅保留签到背包发放入口
+        const rainbowTotal = 0;
 
         // 每日挑战批次计划（daily_challenge_wave_plan）：batches 展开为逐层颜色数与层→批归属，
         // 批内各层共用该批颜色池（如批1四色/批2六色/批3八色），难度逐批递增；未配置走无限模式曲线
@@ -2883,14 +2881,14 @@ export class GameManager extends Component {
             layerColors = [];
             layerBatchIndex = [];
             wavePlanBatches.forEach((batch, batchIdx) => {
-                const layers = Math.max(0, Math.min(LAYER_MAX_COUNT, batch.layers ?? 0));
+                const layers = Math.max(0, Math.min(this.layerRules.maxLayers, batch.layers ?? 0));
                 const colors = Math.max(1, Math.min(COLORS.length, batch.colors ?? numColors));
                 for (let i = 0; i < layers; i++) {
                     layerColors!.push(colors);
                     layerBatchIndex!.push(batchIdx);
                 }
             });
-            waveCount = Math.min(LAYER_MAX_COUNT, layerColors.length);
+            waveCount = Math.min(this.layerRules.maxLayers, layerColors.length);
             layerColors = layerColors.slice(0, waveCount);
             layerBatchIndex = layerBatchIndex.slice(0, waveCount);
         }
@@ -2919,7 +2917,7 @@ export class GameManager extends Component {
             // 多余孔位空着不放果，不影响观感
             const plateOpts = wavePlatesCfgBatches && layerBatchIndex
                 ? wavePlatesCfgBatches[layerBatchIndex[wave]]
-                : undefined;
+                : { maxPlates: this.layerRules.maxPlates };
             const wavePlates = this.buildWavePlates(wave, waveCount, availableTemplates, plateIndex, plateOpts);
             plateIndex += wavePlates.length;
             this.plates.push(...wavePlates);
@@ -2966,14 +2964,12 @@ export class GameManager extends Component {
         }
 
         this.plates = this.plates.filter((plate) => plate.fruits.length > 0);
-        // 开局一次性启用 5 层（首批，全彩色），后面按“剩余果子跌破首批总量的 70%”逐层启用
-        this.loadedWave = Math.min(this.maxWave, LAYER_INITIAL_LOAD - 1);
+        // 开局启用几层由 layerRules.initialLoad 配置（首批全彩色），后面按“剩余果子跌破首批总量×refillRatio”逐层启用
+        this.loadedWave = Math.min(this.maxWave, this.layerRules.initialLoad - 1);
         const initialFruits = this.plates
             .filter((plate) => (plate.wave ?? 0) <= this.loadedWave)
             .reduce((sum, plate) => sum + plate.fruits.length, 0);
-        // 补层阈值：每日挑战读 daily_challenge_layer_rules.refillRatio，否则用默认 0.7
-        const refillRatio = (isDaily ? this.gameConfig?.dailyLayerRules?.refillRatio : undefined) ?? LAYER_REFILL_RATIO;
-        this.refillThreshold = Math.floor(initialFruits * refillRatio);
+        this.refillThreshold = Math.floor(initialFruits * this.layerRules.refillRatio);
     }
 
     /**
@@ -2989,10 +2985,10 @@ export class GameManager extends Component {
         startIndex: number,
         opts?: { maxPlates?: number; rectFirst?: number; shapeFirst?: number; stripFirst?: number }
     ): PlateData[] {
-        // 每日挑战可按批覆盖放板参数（daily_challenge_wave_plates）；缺省走全局常量
+        // 每日挑战可按批覆盖放板参数（daily_challenge_wave_plates）；缺省走 layerRules.maxPlates（无限模式已含关卡区间配置）
         const rectFirst = opts?.rectFirst ?? LAYER_RECT_PLATE_FIRST;
         const shapeFirst = opts?.shapeFirst ?? LAYER_SHAPE_PLATE_FIRST;
-        const maxPlates = opts?.maxPlates ?? LAYER_MAX_PLATES;
+        const maxPlates = opts?.maxPlates ?? this.layerRules.maxPlates;
         const stripFirst = opts?.stripFirst ?? 0;
         const paddingX = 4;
         // 上边留得比下边多：顶部要避开头部 UI，底部紧着果篮
@@ -4863,14 +4859,12 @@ export class GameManager extends Component {
     /**
      * 置灰表示“现在还轮不到你”：灰板不显示果子、也点不了。
      * 两条放行通道：层被启用（果子数跌破补层阈值，整层一起亮），
-     * 或者自己已经没被压住了（遮挡跌到 PLATE_UNBURY_COVER_RATIO 以下，单块翻彩）。
+     * 或者自己已经没被压住了（遮挡跌到 layerRules.unburyRatio 以下，单块翻彩）。
      */
     private isPlateBuried(plate: PlateData) {
         if (plate.removed || plate.state === 'falling') return false;
         if ((plate.wave ?? 0) <= this.loadedWave) return false;
-        // 遮挡翻彩阈值：每日挑战读 daily_challenge_layer_rules.unburyRatio，否则用默认 0.6
-        const unburyRatio = (this.driver.mode === 'daily' ? this.gameConfig?.dailyLayerRules?.unburyRatio : undefined) ?? PLATE_UNBURY_COVER_RATIO;
-        return this.getPlateCoverRatio(plate) >= unburyRatio;
+        return this.getPlateCoverRatio(plate) >= this.layerRules.unburyRatio;
     }
 
     /**
@@ -4893,19 +4887,19 @@ export class GameManager extends Component {
         this.plates.forEach((plate) => {
             if (!plate.buried || plate.removed || plate.state === 'falling') return;
             if (!this.plateNodes.has(plate.id)) return;
-            if (this.getPlateCoverRatio(plate) >= PLATE_UNBURY_COVER_RATIO) return;
+            if (this.getPlateCoverRatio(plate) >= this.layerRules.unburyRatio) return;
             plate.buried = false;
             this.revealPlate(plate);
         });
     }
     
     /**
-     * 计数驱动的补层：剩余果子一跌破“首批总果量 × 70%”，就把下一层启用（灰→彩），
+     * 计数驱动的补层：剩余果子一跌破“首批总果量 × refillRatio”，就把下一层启用（灰→彩），
      * 同时把再下一层垫成灰板预告；启用完果数就回到阀值之上，所以一次只会启用一层。
      */
     private ensureLayerBudget() {
         let guard = 0;
-        while (this.loadedWave < this.maxWave && guard++ <= LAYER_MAX_COUNT) {
+        while (this.loadedWave < this.maxWave && guard++ <= this.layerRules.maxLayers) {
             if (this.getBoardFruitCount() >= this.refillThreshold) return;
             this.loadWave(this.loadedWave + 1);
         }
@@ -4948,7 +4942,7 @@ export class GameManager extends Component {
                 .to(PLATE_REVEAL_DURATION, { t: 1 }, {
                     onUpdate: (_target, ratio) => {
                         if (!bgSprite.isValid) return;
-                        bgSprite.color = new Color(255, 255, 255, 120 + (230 - 120) * (ratio ?? 0));
+                        bgSprite.color = new Color(255, 255, 255, 120 + (PLATE_ALPHA - 120) * (ratio ?? 0));
                     },
                 })
                 .start();
@@ -4956,7 +4950,7 @@ export class GameManager extends Component {
             // 手动插值而不直接 tween Sprite.color：color 的 getter 返回的是内部引用，
             // 交给 tween 取起始值会被后续赋值污染，过渡到一半就可能崩掉
             const from = PLATE_BURIED_COLOR;
-            const to = new Color(tint.r, tint.g, tint.b, 230);
+            const to = new Color(tint.r, tint.g, tint.b, PLATE_ALPHA);
             const progress = { t: 0 };
             tween(progress)
                 .to(PLATE_REVEAL_DURATION, { t: 1 }, {
@@ -5140,8 +5134,8 @@ export class GameManager extends Component {
 
         if (plate.baked && plate.texture) {
             // 预烘图自带颜色和白边，只能刷纯白：再刷一遍 tint 会把彩图乘暗发脏，
-            // 白边也会跟着被染成同色系。alpha 还是 230，半透明口径不变
-            bgSprite.color = new Color(255, 255, 255, 230);
+            // 白边也会跟着被染成同色系。alpha 取 PLATE_ALPHA，与普通彩板同口径
+            bgSprite.color = new Color(255, 255, 255, PLATE_ALPHA);
             this.applyBakedPlateTexture(
                 bgSprite,
                 plate.texture,
@@ -5150,7 +5144,7 @@ export class GameManager extends Component {
         } else {
             bgSprite.color = buried
                 ? PLATE_BURIED_COLOR.clone()
-                : new Color(tint.r, tint.g, tint.b, 230); // 230 为半透明 (约 90% 不透明度)
+                : new Color(tint.r, tint.g, tint.b, PLATE_ALPHA); // PLATE_ALPHA 半透明（180 ≈ 70% 不透明度）
 
             if (plate.texture) {
                 this.applyPlateTexture(bgSprite, plate.texture);

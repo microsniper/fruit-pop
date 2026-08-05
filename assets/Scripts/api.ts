@@ -46,7 +46,6 @@ const SECRET_KEY = "X9vP2xL5mN8qR1sT4wY7zB0cJ3fH6gD9";
 
 let token: string | null = null;
 let currentLevel = 1;
-let dailyRewardClaimable = false;
 let newUserThisLogin = false;
 
 try {
@@ -183,10 +182,11 @@ export const setLocalLevel = (levelNum: number) => {
 
 export const loginAndGetProgress = async (): Promise<number> => {
   try {
-    // 已登录（token 已有）：跳过重复登录，直接返回本地进度
+    // 冷启动时内存进度永远是 1，进度必须从服务器拉：
+    // 即使本地 token 已恢复也强制走完整登录（后端幂等，只返回已有用户+进度）
     if (token) {
-      console.log('[API] already logged in, skip login');
-      return getLocalLevel();
+      console.log('[API] token restored from storage, re-login to fetch server progress');
+      token = null;
     }
     let code = "browser_mock_code";
     
@@ -202,7 +202,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
         console.log('[API] wx.login success, code:', code);
     }
 
-    const res = await request<{ token: string; openid: string; source: SourceEnum; hasProfile: boolean; isNewUser: boolean; dailyRewardClaimable: boolean; regionId: number | null; progress: { gameType: GameTypeEnum; levelNum: number } }>({
+    const res = await request<{ token: string; openid: string; source: SourceEnum; hasProfile: boolean; isNewUser: boolean; regionId: number | null; progress: { gameType: GameTypeEnum; levelNum: number } }>({
       url: '/api/game/login',
       method: 'POST',
       data: {
@@ -211,9 +211,8 @@ export const loginAndGetProgress = async (): Promise<number> => {
         source: currentSource
       }
     });
-    console.log('[API] login response, levelNum:', res.data?.progress?.levelNum, 'hasProfile:', res.data?.hasProfile, 'isNewUser:', res.data?.isNewUser, 'dailyRewardClaimable:', res.data?.dailyRewardClaimable);
+    console.log('[API] login response, levelNum:', res.data?.progress?.levelNum, 'hasProfile:', res.data?.hasProfile, 'isNewUser:', res.data?.isNewUser);
     token = res.data.token;
-    dailyRewardClaimable = res.data?.dailyRewardClaimable ?? false;
     newUserThisLogin = res.data?.isNewUser ?? false;
     if (token) {
         if (platform) {
@@ -260,7 +259,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
                 const loginRes = await new Promise<any>((resolve, reject) => {
                     loginFunc({ success: resolve, fail: reject });
                 });
-                const res = await request<{ token: string; hasProfile: boolean; dailyRewardClaimable: boolean; progress: { levelNum: number } }>({
+                const res = await request<{ token: string; hasProfile: boolean; progress: { levelNum: number } }>({
                     url: '/api/game/login',
                     method: 'POST',
                     data: {
@@ -274,7 +273,6 @@ export const loginAndGetProgress = async (): Promise<number> => {
                     platform.setStorageSync('token', token);
                     platform.setStorageSync('hasProfile', res.data?.hasProfile);
                 }
-                dailyRewardClaimable = res.data?.dailyRewardClaimable ?? false;
                 const serverLevel = res.data.progress?.levelNum || 1;
                 setLocalLevel(serverLevel);
                 console.log('[API] fallback success, level:', serverLevel);
@@ -490,6 +488,18 @@ export interface GameConfig {
   dailyChallengeWeights?: GameConfigWeights
   /** 每日挑战层流规则：遮挡翻彩/补层阈值 */
   dailyLayerRules?: DailyLayerRules
+  /** 无限模式层流规则（按关卡区间）：max=关卡上界，缺字段回落默认值 */
+  endlessLayerRules?: EndlessLayerRuleRange[]
+}
+
+export interface EndlessLayerRuleRange {
+  /** 关卡上界（含），按当前关号找第一个 level <= max 的区间 */
+  max: number
+  maxPlates?: number
+  maxLayers?: number
+  initialLoad?: number
+  refillRatio?: number
+  unburyRatio?: number
 }
 
 export interface DailyWavePlanBatch {
@@ -579,19 +589,60 @@ export const getGameConfig = (): GameConfig => {
   return cachedGameConfig || getDefaultGameConfig()
 }
 
-/** 今日是否可领取每日登录奖励 */
-export const isDailyRewardClaimable = (): boolean => dailyRewardClaimable;
-
 /** 本次登录是否是新用户（仅创建用户的那次登录为 true，用于新人见面礼） */
 export const isNewUserThisLogin = (): boolean => newUserThisLogin;
 
-/** 领取每日登录奖励 */
-export const claimDailyReward = async (): Promise<{ success: boolean; amount: number }> => {
-  const res = await request<{ success: boolean; amount: number }>({
-    url: '/api/game/daily-reward/claim',
-    method: 'POST'
-  })
-  return res.data
+/** 签到奖励类型（与后端 RewardTypeEnum 的 code 一致） */
+export enum SignInRewardTypeEnum {
+  /** 小太阳 */
+  SUN = 'sun',
+  /** 砸板子道具 */
+  SMASH = 'smash',
+  /** 清空果盘道具 */
+  CLEAR = 'clear',
+  /** 加果篮道具 */
+  ADD = 'add',
+  /** 彩虹果 */
+  RAINBOW = 'rainbow',
+  /** 炸弹果 */
+  BOMB = 'bomb',
+  /** 彩虹果+炸弹果组合（按 amount 各发一份） */
+  COMBO = 'rainbow-bomb'
+}
+
+/** 七日签到单日奖励（后端配置表 JOIN 资源表下发） */
+export interface SignInRewardItem {
+  /** 签到第几天（1-7） */
+  dayNum: number
+  /** 奖励图 OSS CDN 地址 */
+  imageUrl: string
+  /** 奖励类型 */
+  rewardType: SignInRewardTypeEnum
+  /** 数量 */
+  amount: number
+}
+
+/** 拉取七日签到奖励配置（按天升序） */
+export const fetchSignInConfig = async (): Promise<SignInRewardItem[]> => {
+  try {
+    let hasToken = false;
+    if (platform) {
+      hasToken = !!token || !!platform.getStorageSync('token');
+    } else {
+      hasToken = !!token || !!localStorage.getItem('token');
+    }
+    if (!hasToken) {
+      await loginAndGetProgress()
+    }
+    const res = await request<SignInRewardItem[]>({
+      url: '/api/game/signin/config',
+      method: 'POST'
+    })
+    return res.data || []
+  } catch (e) {
+    console.error('[API] fetch signin config failed:', e)
+    return []
+  }
 }
 
 export interface RankItem {
