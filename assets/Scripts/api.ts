@@ -47,6 +47,8 @@ const SECRET_KEY = "X9vP2xL5mN8qR1sT4wY7zB0cJ3fH6gD9";
 let token: string | null = null;
 let currentLevel = 1;
 let newUserThisLogin = false;
+/** 本会话是否已成功登录过：区分「存储恢复的 token」（冷启动，内存进度不可信）与「本会话真实登录态」（内存进度最新） */
+let sessionLoggedIn = false;
 
 try {
     if (platform) {
@@ -182,6 +184,11 @@ export const setLocalLevel = (levelNum: number) => {
 
 export const loginAndGetProgress = async (): Promise<number> => {
   try {
+    // 本会话已登录过：内存进度是最新的（过关 saveProgress 实时同步），直接返回，
+    // 避免从首页进每日挑战/无限模式时重复走一遍 wx.login + 登录接口
+    if (token && sessionLoggedIn) {
+      return currentLevel;
+    }
     // 冷启动时内存进度永远是 1，进度必须从服务器拉：
     // 即使本地 token 已恢复也强制走完整登录（后端幂等，只返回已有用户+进度）
     if (token) {
@@ -213,6 +220,7 @@ export const loginAndGetProgress = async (): Promise<number> => {
     });
     console.log('[API] login response, levelNum:', res.data?.progress?.levelNum, 'hasProfile:', res.data?.hasProfile, 'isNewUser:', res.data?.isNewUser);
     token = res.data.token;
+    sessionLoggedIn = true;
     newUserThisLogin = res.data?.isNewUser ?? false;
     if (token) {
         if (platform) {
@@ -374,17 +382,18 @@ export interface DailyClearResponse {
 }
 
 /**
- * 每日挑战通关上报：startAt 为前端计时的挑战开始毫秒时间戳。
+ * 每日挑战通关上报：startAt/endAt 为前端计时的挑战起止毫秒时间戳。
+ * 后端耗时按 endAt - startAt 计（同一部设备的钟），与通关页「本次用时」同口径。
  * 一人一天一行，重复挑战更快则后端刷新起止时间，所以每次通关都要报。
  * 返回本次与今日最快耗时，通关页直接用。
  */
-export const saveDailyClear = async (startAt: number): Promise<DailyClearResponse | null> => {
+export const saveDailyClear = async (startAt: number, endAt: number): Promise<DailyClearResponse | null> => {
   try {
     await ensureToken()
     const res = await request<DailyClearResponse>({
       url: '/api/game/daily/clear',
       method: 'POST',
-      data: { gameType: GameTypeEnum.FRUIT_PICKING, startAt }
+      data: { gameType: GameTypeEnum.FRUIT_PICKING, startAt, endAt }
     })
     return res.data
   } catch (e) {
@@ -393,6 +402,9 @@ export const saveDailyClear = async (startAt: number): Promise<DailyClearRespons
   }
 }
 
+/** 求助好友计数模式：dailyChallenge=每日挑战，endlessChallenge=无限模式（两模式分开计数） */
+export type HelpMode = 'dailyChallenge' | 'endlessChallenge';
+
 /** 每日求助好友次数响应 */
 export interface DailyHelpResponse {
   used: number
@@ -400,14 +412,14 @@ export interface DailyHelpResponse {
   remaining: number
 }
 
-/** 每日求助好友状态：今日已用次数/上限/剩余 */
-export const getDailyHelpStatus = async (): Promise<DailyHelpResponse | null> => {
+/** 求助好友状态：指定模式今日已用次数/上限/剩余 */
+export const getDailyHelpStatus = async (mode: HelpMode): Promise<DailyHelpResponse | null> => {
   try {
     await ensureToken()
     const res = await request<DailyHelpResponse>({
       url: '/api/game/daily-help/status',
       method: 'POST',
-      data: { gameType: GameTypeEnum.FRUIT_PICKING }
+      data: { gameType: GameTypeEnum.FRUIT_PICKING, mode }
     })
     return res.data
   } catch (e) {
@@ -416,14 +428,14 @@ export const getDailyHelpStatus = async (): Promise<DailyHelpResponse | null> =>
   }
 }
 
-/** 每日求助好友使用：+1，返回最新次数 */
-export const useDailyHelp = async (): Promise<DailyHelpResponse | null> => {
+/** 求助好友使用：+1（达上限不再增加），返回最新次数 */
+export const useDailyHelp = async (mode: HelpMode): Promise<DailyHelpResponse | null> => {
   try {
     await ensureToken()
     const res = await request<DailyHelpResponse>({
       url: '/api/game/daily-help/use',
       method: 'POST',
-      data: { gameType: GameTypeEnum.FRUIT_PICKING }
+      data: { gameType: GameTypeEnum.FRUIT_PICKING, mode }
     })
     return res.data
   } catch (e) {
@@ -468,6 +480,8 @@ export interface GameConfigToolCosts {
   addBasket: number
   clearTray: number
   smashPlate: number
+  /** 加果盘的小太阳价格（后端 tool_costs 未配置时前端兜底 20） */
+  addTray?: number
 }
 
 export interface GameConfig {
@@ -490,6 +504,14 @@ export interface GameConfig {
   dailyLayerRules?: DailyLayerRules
   /** 无限模式层流规则（按关卡区间）：max=关卡上界，缺字段回落默认值 */
   endlessLayerRules?: EndlessLayerRuleRange[]
+  /** 求助好友每日上限（按模式）：help_max 配置键，缺省回落 4 */
+  helpMax?: HelpMax
+}
+
+/** 求助好友每日上限（按模式） */
+export interface HelpMax {
+  dailyChallenge?: number
+  endlessChallenge?: number
 }
 
 export interface EndlessLayerRuleRange {
@@ -513,6 +535,8 @@ export interface DailyWavePlatesBatch {
   shapeFirst?: number
   /** 长条形大板保底块数（plate_bar，宽扁横条横向5孔；缺省/0=不出现） */
   stripFirst?: number
+  /** 每层最多出现几种板子形状（从全部 7 种模板里随机抽这么多种，本层只铺这几种）；缺省/0=不限制 */
+  shapeVariety?: number
 }
 
 export interface DailyBoxCapacity {
@@ -592,8 +616,8 @@ export const getGameConfig = (): GameConfig => {
 /** 本次登录是否是新用户（仅创建用户的那次登录为 true，用于新人见面礼） */
 export const isNewUserThisLogin = (): boolean => newUserThisLogin;
 
-/** 签到奖励类型（与后端 RewardTypeEnum 的 code 一致） */
-export enum SignInRewardTypeEnum {
+/** 资源类型编码（与后端 ResourceCodeTypeEnum 的 code 一致）：签到奖励类型 / 资源表 code 共用 */
+export enum ResourceCodeTypeEnum {
   /** 小太阳 */
   SUN = 'sun',
   /** 砸板子道具 */
@@ -616,8 +640,8 @@ export interface SignInRewardItem {
   dayNum: number
   /** 奖励图 OSS CDN 地址 */
   imageUrl: string
-  /** 奖励类型 */
-  rewardType: SignInRewardTypeEnum
+  /** 奖励类型（取自资源表 resource_code） */
+  rewardType: ResourceCodeTypeEnum
   /** 数量 */
   amount: number
 }
@@ -642,6 +666,54 @@ export const fetchSignInConfig = async (): Promise<SignInRewardItem[]> => {
   } catch (e) {
     console.error('[API] fetch signin config failed:', e)
     return []
+  }
+}
+
+// ========== 资源查询 ==========
+
+/** 资源明细（game_resource 中登记了类型编码的一条数据） */
+export interface ResourceItem {
+  /** 资源类型编码 */
+  resourceCode: ResourceCodeTypeEnum
+  /** OSS CDN 地址 */
+  url: string
+  /** 资源说明 */
+  name?: string
+  /** 资源类型：image */
+  type?: string
+}
+
+/** 资源 Map 缓存：key=resourceCode，value=整条资源数据；一次会话只拉一次 */
+let resourcesCache: Record<string, ResourceItem> | null = null;
+
+export const fetchResources = async (): Promise<Record<string, ResourceItem>> => {
+  if (resourcesCache) return resourcesCache;
+  try {
+    let hasToken = false;
+    if (platform) {
+      hasToken = !!token || !!platform.getStorageSync('token');
+    } else {
+      hasToken = !!token || !!localStorage.getItem('token');
+    }
+    if (!hasToken) {
+      await loginAndGetProgress()
+    }
+    const res = await request<ResourceItem[]>({
+      url: '/api/game/resources',
+      method: 'POST'
+    })
+    // 后端返回列表，前端按 resourceCode 组 Map
+    const map: Record<string, ResourceItem> = {};
+    (res.data || []).forEach((item) => {
+      if (item && item.resourceCode) {
+        map[item.resourceCode] = item;
+      }
+    });
+    resourcesCache = map;
+    return resourcesCache;
+  } catch (e) {
+    console.error('[API] fetch resources failed:', e)
+    return {};
   }
 }
 

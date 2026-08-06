@@ -8,8 +8,10 @@
  * 当前实现：EndlessDriver（无限模式，道具不限次）；DailyDriver（每日挑战，每局限次+求助好友）。
  */
 
-/** 道具类型（三个道具弹窗共用） */
-export type ToolType = 'addBasket' | 'smash' | 'clear';
+import type { HelpMode } from './api';
+
+/** 道具类型（道具弹窗共用） */
+export type ToolType = 'addBasket' | 'smash' | 'clear' | 'addTray';
 
 /**
  * 层流规则（各模式自行读后端配置合并默认值）：
@@ -40,14 +42,15 @@ export const DEFAULT_LAYER_RULES: LayerRules = {
  */
 export type ClearAction = 'modal' | 'autoAdvance' | 'finish';
 
-/**
- * 道具主按钮（橙钮）的付费方式：
- * suns=扣小太阳（无限模式）；help=求助好友分享（每日挑战，不扣小太阳）。
- * 广告按钮（蓝钮）两个模式都有，不走这里。
- */
-export type ToolPayment =
-    | { kind: 'suns'; cost: number }
-    | { kind: 'help' };
+/** 分离式独立按钮的点击付费方式：free=免费道具；help=求助好友；suns=扣小太阳；ad=看广告兜底 */
+export type ToolButtonPay = 'free' | 'help' | 'suns' | 'ad';
+
+/** 分离式独立按钮展示态：文案 + 点击后实际走的付费方式；cost 仅 suns 态使用 */
+export interface ToolButtonSpec {
+    text: string;
+    pay: ToolButtonPay;
+    cost?: number;
+}
 
 export interface ModeDriver {
     readonly mode: 'endless' | 'daily';
@@ -84,13 +87,33 @@ export interface ModeDriver {
     /** 每关开始时重置计数 */
     resetPerLevel(): void;
 
-    // ===== 付费方式 =====
-    /** 主按钮（橙钮）怎么付费。cost 为该道具的小太阳价格，help 模式下忽略 */
-    getPrimaryPayment(tool: ToolType, cost: number): ToolPayment;
+    // ===== 失败与复活 =====
+    /** 失败弹窗底图资源名（不含 ui/ 前缀与 /spriteFrame 后缀） */
+    getFailPanelAsset(): string;
+    /** 本模式是否有复活机制（每日挑战：一局复活一次；无限模式：旧弹窗内置看广告继续） */
+    supportsRevive(): boolean;
+    /** 本局是否还能复活 */
+    canRevive(): boolean;
+    /** 记一次复活 */
+    useRevive(): void;
 
-    // ===== 求助好友（仅每日挑战有，无限模式返回 false/0）=====
+    // ===== 特殊果限次（彩虹果/炸弹果共享计数）=====
+    /** 本局特殊果上限，Infinity 表示不限次（无限模式） */
+    getSpecialFruitLimit(): number;
+    /** 本局特殊果已用次数 */
+    getSpecialFruitUsed(): number;
+    /** 本局是否还能用特殊果 */
+    canUseSpecialFruit(): boolean;
+    /** 记一次特殊果使用 */
+    useSpecialFruit(): void;
+
+    // ===== 求助好友（两个模式各自独立额度，上限读后端 help_max 配置）=====
     /** 本模式是否有求助机制（无则跳过拉取求助次数等逻辑） */
     hasHelpMechanism(): boolean;
+    /** 本模式在后端求助计数中的模式标识 */
+    getHelpMode(): HelpMode;
+    /** 本模式求助每日上限（后端 help_max 配置，缺省 4） */
+    getHelpLimit(): number;
     canHelp(): boolean;
     useHelp(): void;
     isHelpExhausted(): boolean;
@@ -110,12 +133,13 @@ export interface ModeDriver {
     getPanelAsset(tool: ToolType): string;
     /**
      * 道具弹窗面板高度（宽固定 320，高按底图原始比例）。
-     * 两个模式的底图尺寸不同：daily 三张统一 640x1036 → 518；
-     * 无限模式 clear 的底图是 640x983 → 492，另两张 640x1036 → 518。
+     * 两模式共用分离式新底图：加果篮 640x616→308、砸板子 640x604→302、清空果盘 640x634→317。
      */
     getPanelHeight(tool: ToolType): number;
-    /** 顶部是否显示小太阳余额 */
-    showSunBalance(): boolean;
-    /** 是否显示道具的小太阳价格标签 */
-    showToolCost(): boolean;
+    /**
+     * 分离式按钮展示态：弹窗只含标题/示意图，面板下方渲染一个独立操作按钮（btn_action）。
+     * 文案优先级：免费道具 > 求助好友 > 小太阳购买（cost 为该道具太阳价）> 看广告兜底。
+     * totalSuns 供小太阳支付能力判断（每日挑战忽略）。
+     */
+    getActionButton(tool: ToolType, cost: number, totalSuns: number): ToolButtonSpec;
 }

@@ -1,15 +1,21 @@
 import { loginAndGetProgress, saveProgress, getGameConfig } from './api';
-import type { ClearAction, ModeDriver, ToolPayment, ToolType } from './ModeDriver';
+import type { ClearAction, ModeDriver, ToolButtonSpec, ToolType } from './ModeDriver';
 import { DEFAULT_LAYER_RULES, LayerRules } from './ModeDriver';
+import { PropStore } from './PropStore';
 
 /**
  * 无限模式驱动：进度永久累积，存 user_progress.level_num。
  *
- * 道具规则：三个道具全部不限次，代价是小太阳（橙钮）或看广告（蓝钮）。
- * 玩家愿意看广告就可以一直用，不设每关上限。
+ * 道具规则：三个道具全部不限次。
+ * 按钮代价按优先级：免费道具 > 求助好友（当日独立额度）> 扣小太阳 > 看广告兜底。
  */
 export class EndlessDriver implements ModeDriver {
     readonly mode = 'endless' as const;
+
+    /** 当日求助已用次数（当日维度，进游戏时从后端拉取） */
+    private helpUsed = 0;
+    /** 求助上限兜底值（实际以后端 help_max 配置 endlessChallenge 为准） */
+    static readonly HELP_MAX_DEFAULT = 4;
 
     // ===== 进度与结算 =====
     async getStartLevel(warmedLogin?: Promise<number>): Promise<number> {
@@ -51,32 +57,62 @@ export class EndlessDriver implements ModeDriver {
         // 不限次，无状态可重置
     }
 
-    // ===== 付费方式：扣小太阳 =====
-    getPrimaryPayment(_tool: ToolType, cost: number): ToolPayment {
-        return { kind: 'suns', cost };
+    // ===== 失败与复活：沿用旧失败弹窗（内置重新挑战/看广告继续两个烘焙按钮）=====
+    getFailPanelAsset(): string {
+        return 'panel_fail';
+    }
+    supportsRevive(): boolean {
+        return false;
+    }
+    canRevive(): boolean {
+        return false;
+    }
+    useRevive(): void {
+        // 无限模式不走复活流程
     }
 
-    // ===== 求助好友：无限模式不提供 =====
+    // ===== 特殊果限次：无限模式不限 =====
+    getSpecialFruitLimit(): number {
+        return Infinity;
+    }
+    getSpecialFruitUsed(): number {
+        return 0;
+    }
+    canUseSpecialFruit(): boolean {
+        return true;
+    }
+    useSpecialFruit(): void {
+        // 不限次，无需计数
+    }
+
+    // ===== 求助好友（当日独立额度，与每日挑战分开计数；上限读后端 help_max 配置）=====
     hasHelpMechanism(): boolean {
-        return false;
+        return true;
+    }
+    getHelpMode(): 'endlessChallenge' {
+        return 'endlessChallenge';
+    }
+    getHelpLimit(): number {
+        const v = getGameConfig().helpMax?.endlessChallenge;
+        return v && v > 0 ? v : EndlessDriver.HELP_MAX_DEFAULT;
     }
     canHelp(): boolean {
-        return false;
+        return this.helpUsed < this.getHelpLimit();
     }
     useHelp(): void {
-        // 无限模式无求助机制
+        this.helpUsed++;
     }
     isHelpExhausted(): boolean {
-        return false;
+        return !this.canHelp();
     }
-    setHelpUsed(_used: number): void {
-        // 无限模式无求助机制
+    setHelpUsed(used: number): void {
+        this.helpUsed = used;
     }
     getHelpUsed(): number {
-        return 0;
+        return this.helpUsed;
     }
     getRemainingHelp(): number {
-        return 0;
+        return Math.max(0, this.getHelpLimit() - this.helpUsed);
     }
 
     // ===== 层流规则（后端 endless_layer_rules 按关卡区间）=====
@@ -92,20 +128,38 @@ export class EndlessDriver implements ModeDriver {
         return { ...DEFAULT_LAYER_RULES, ...(hit || {}) };
     }
 
-    // ===== UI =====
+    // ===== UI：分离式底图（标题/示意图，无烘焙按钮）+ 面板下方独立按钮 =====
     getPanelAsset(tool: ToolType): string {
         if (tool === 'addBasket') return 'panel_add_basket';
         if (tool === 'smash') return 'panel_smash_plate';
+        if (tool === 'addTray') return 'panel_add_tray';
         return 'panel_clear_basket';
     }
     getPanelHeight(tool: ToolType): number {
-        // panel_clear_basket.png 是 640x983，另两张 640x1036
-        return tool === 'clear' ? 492 : 518;
+        // 分离式底图按宽 320 缩放：加果篮 640x616→308、砸板子 640x604→302、清空果盘 640x634→317、加果盘 640x495→247
+        if (tool === 'addBasket') return 308;
+        if (tool === 'smash') return 302;
+        if (tool === 'addTray') return 247;
+        return 317;
     }
-    showSunBalance(): boolean {
-        return true;
-    }
-    showToolCost(): boolean {
-        return true;
+    /**
+     * 独立按钮文案优先级规则：
+     * 1. 背包有该道具的免费次数 → 「免费使用」
+     * 2. 当日求助未满 → 「求助好友」
+     * 3. 小太阳付得起 → 动作名 + 太阳价格（点击扣太阳）
+     * 4. 兜底 → 动作名（点击看广告，按钮右上角带视频小图标）
+     */
+    getActionButton(tool: ToolType, cost: number, totalSuns: number): ToolButtonSpec {
+        if (PropStore.getToolCount(tool) > 0) {
+            return { text: '免费使用', pay: 'free' };
+        }
+        if (this.canHelp()) {
+            return { text: '求助好友', pay: 'help' };
+        }
+        const actionName = tool === 'addBasket' ? '加果篮' : (tool === 'smash' ? '砸板子' : (tool === 'addTray' ? '加果盘' : '清空果盘'));
+        if (totalSuns >= cost) {
+            return { text: actionName, pay: 'suns', cost };
+        }
+        return { text: actionName, pay: 'ad' };
     }
 }

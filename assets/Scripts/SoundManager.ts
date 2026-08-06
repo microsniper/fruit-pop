@@ -29,6 +29,8 @@ export class SoundManager extends Component {
     private soundOn = true;
     /** 游戏是否希望 BGM 正在播（与平台实际状态无关，仅表达意图） */
     private shouldPlay = false;
+    /** 中断恢复监听函数引用（onDestroy 时要注销，防止僵尸回调） */
+    private resumeHandler: (() => void) | null = null;
 
     static getInstance(): SoundManager | null {
         return SoundManager.instance;
@@ -70,14 +72,45 @@ export class SoundManager extends Component {
      */
     private listenInterruptions() {
         if (!platform) return;
-        const resume = () => this.resumeAfterInterruption();
+        this.resumeHandler = () => this.resumeAfterInterruption();
         try {
-            if (typeof platform.onShow === 'function') platform.onShow(resume);
+            if (typeof platform.onShow === 'function') platform.onShow(this.resumeHandler);
             if (typeof platform.onAudioInterruptionEnd === 'function') {
-                platform.onAudioInterruptionEnd(resume);
+                platform.onAudioInterruptionEnd(this.resumeHandler);
             }
         } catch (e) {
             console.warn('BGM listen interruptions failed:', e);
+        }
+    }
+
+    /**
+     * 场景销毁时清理：置空单例引用 + 注销 onShow 监听 + 销毁音频上下文。
+     * 否则旧实例随场景销毁后静态引用仍非空，新场景的 SoundManager 会在 onLoad
+     * 里被单例守卫自毁，从此 getInstance 只剩僵尸实例，音乐开关彻底失灵
+     * （旧音频上下文还在响，开关却控制不了它）。与 AdManager.onDestroy 同模式。
+     */
+    onDestroy() {
+        if (SoundManager.instance === this) {
+            SoundManager.instance = null;
+        }
+        if (platform && this.resumeHandler) {
+            try {
+                if (typeof platform.offShow === 'function') platform.offShow(this.resumeHandler);
+                if (typeof platform.offAudioInterruptionEnd === 'function') {
+                    platform.offAudioInterruptionEnd(this.resumeHandler);
+                }
+            } catch (e) {
+                console.warn('BGM off interruptions failed:', e);
+            }
+        }
+        if (this.innerAudio) {
+            try {
+                this.innerAudio.stop();
+                this.innerAudio.destroy();
+            } catch (e) {
+                console.warn('BGM destroy failed:', e);
+            }
+            this.innerAudio = null;
         }
     }
 

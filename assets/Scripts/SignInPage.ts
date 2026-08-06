@@ -1,14 +1,14 @@
 import { Node, Vec3, UITransform, Color, tween, Graphics, Sprite, SpriteFrame, ImageAsset, Texture2D, assetManager } from 'cc';
-import { fetchSignInConfig, SignInRewardItem, SignInRewardTypeEnum } from './api';
+import { fetchSignInConfig, SignInRewardItem, ResourceCodeTypeEnum } from './api';
 import { PropStore } from './PropStore';
 import type { GameManager } from './GameManager';
 
 declare const wx: any;
 
 /** 领取后横幅提示文案：按 RewardType 区分，新增类型只需加一行 */
-const CLAIM_TIPS: Partial<Record<SignInRewardTypeEnum, string>> = {
-    [SignInRewardTypeEnum.RAINBOW]: '彩虹果可以适配任意果篮',
-    [SignInRewardTypeEnum.BOMB]: '炸弹果可以炸毁板子'
+const CLAIM_TIPS: Partial<Record<ResourceCodeTypeEnum, string>> = {
+    [ResourceCodeTypeEnum.RAINBOW]: '彩虹果可以适配任意果篮',
+    [ResourceCodeTypeEnum.BOMB]: '炸弹果可以炸毁板子'
 };
 
 /**
@@ -83,7 +83,8 @@ export class SignInPage {
         const cellW = 86;
         const cellH = 106;
         const gapX = 10;
-        const gapY = 10;
+        // 行距要大于「领取」按钮骑卡片下缘的探出量（约15px），否则按钮被下一行盖住
+        const gapY = 24;
         const gridW = cols * cellW + (cols - 1) * gapX;
         const gridNode = this.gm.createNode('SignInGrid', panelNode, 0, gridTopY, gridW, cellH * 2 + gapY);
 
@@ -98,11 +99,11 @@ export class SignInPage {
             this.renderDayCard(gridNode, item, cx, cy, cellW, cellH, signedCount, nextDay, claimedToday, rewards);
         };
 
-        // 第 7 天通栏大卡（网格下方）
+        // 第 7 天通栏大卡（网格下方，间距同样要大于领取按钮探出量）
         const renderWide = (item: SignInRewardItem) => {
             const wideW = gridW;
             const wideH = 92;
-            const wy = -(cellH * 2 + gapY) - 8 - wideH / 2;
+            const wy = -(cellH * 2 + gapY) - 22 - wideH / 2;
             this.renderDayCard(gridNode, item, 0, wy, wideW, wideH, signedCount, nextDay, claimedToday, rewards, true);
         };
 
@@ -250,7 +251,7 @@ export class SignInPage {
     private grantReward(card: Node, item: SignInRewardItem): string {
         const amount = item.amount || 0;
         switch (item.rewardType) {
-            case SignInRewardTypeEnum.SUN: {
+            case ResourceCodeTypeEnum.SUN: {
                 if (amount <= 0) return '';
                 const startSuns = this.gm.totalSuns;
                 this.gm.totalSuns += amount;
@@ -263,22 +264,22 @@ export class SignInPage {
                 this.gm.playDailyRewardSunFly(worldPos, startSuns, amount, () => {});
                 return '';
             }
-            case SignInRewardTypeEnum.SMASH:
+            case ResourceCodeTypeEnum.SMASH:
                 PropStore.addTools('smash', amount);
                 return `+${amount} 砸板子道具`;
-            case SignInRewardTypeEnum.CLEAR:
+            case ResourceCodeTypeEnum.CLEAR:
                 PropStore.addTools('clear', amount);
                 return `+${amount} 清空果盘道具`;
-            case SignInRewardTypeEnum.ADD:
+            case ResourceCodeTypeEnum.ADD:
                 PropStore.addTools('addBasket', amount);
                 return `+${amount} 加果篮道具`;
-            case SignInRewardTypeEnum.RAINBOW:
+            case ResourceCodeTypeEnum.RAINBOW:
                 PropStore.addFruits('rainbow', amount);
                 return `+${amount} 彩虹果`;
-            case SignInRewardTypeEnum.BOMB:
+            case ResourceCodeTypeEnum.BOMB:
                 PropStore.addFruits('bomb', amount);
                 return `+${amount} 炸弹果`;
-            case SignInRewardTypeEnum.COMBO:
+            case ResourceCodeTypeEnum.COMBO:
                 PropStore.addFruits('rainbow', amount);
                 PropStore.addFruits('bomb', amount);
                 return `+${amount} 彩虹果 +${amount} 炸弹果`;

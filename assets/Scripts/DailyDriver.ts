@@ -1,38 +1,49 @@
 import { saveDailyClear, DailyClearResponse, getGameConfig } from './api';
-import type { ClearAction, ModeDriver, ToolPayment, ToolType } from './ModeDriver';
+import type { ClearAction, ModeDriver, ToolButtonSpec, ToolType } from './ModeDriver';
 import { DEFAULT_LAYER_RULES, LayerRules } from './ModeDriver';
+import { PropStore } from './PropStore';
 
 /**
- * 每日挑战驱动（省份 PK）：每天仅 2 关，1→2→(通关上报)→1 循环，可重复挑战。
+ * 每日挑战驱动（省份 PK）：单关制（原第 2 关内容，配置 key "1"），通关上报后可重复挑战。
  * 进度存 localStorage 按天隔离（dailyLevel:日期），不上服务器；
  * 挑战开始时间前端计时（dailyStartTs:日期），通关时随上报带给后端；未通关仅本地，后端无感知。
  *
- * 道具规则：每关加果篮 2 次、砸板子 1 次、清空果盘 1 次；
- * 主按钮代价是求助好友（当日上限 4 次），不扣小太阳，界面隐藏小太阳余额与价格。
+ * 道具规则：每关加果篮限 2 次，砸板子/清空果盘各限 1 次；
+ * 特殊果每关限 1 次且彩虹果/炸弹果共享计数（二选一）；
+ * 主按钮代价是求助好友（当日上限读后端 help_max 配置），不扣小太阳，界面隐藏小太阳余额与价格。
  */
 export class DailyDriver implements ModeDriver {
     readonly mode = 'daily' as const;
-    /** 每日挑战总关数 */
-    static readonly TOTAL_LEVELS = 2;
+    /** 每日挑战总关数（单关制：原第 2 关内容作为唯一挑战关） */
+    static readonly TOTAL_LEVELS = 1;
 
-    // ===== 每关道具上限 =====
+    // ===== 每关道具上限（加果篮/加果盘可解两次，其余道具本局各一次）=====
     static readonly ADD_BASKET_LIMIT = 2;
     static readonly SMASH_LIMIT = 1;
     static readonly CLEAR_TRAY_LIMIT = 1;
-    /** 当日求助上限 */
-    static readonly HELP_MAX = 4;
+    static readonly ADD_TRAY_LIMIT = 2;
+    /** 特殊果本局上限：彩虹果/炸弹果共享计数，只能选其中一个用一次 */
+    static readonly SPECIAL_FRUIT_LIMIT = 1;
+    /** 当日求助上限兜底值（实际以后端 help_max 配置 dailyChallenge 为准） */
+    static readonly HELP_MAX_DEFAULT = 4;
 
     // ===== 每局道具次数（纯数据，UI 操作在 GameManager）=====
     private addBasketUsed = 0;
     private smashUsed = 0;
     private clearTrayUsed = 0;
+    private addTrayUsed = 0;
+    private specialFruitUsed = 0;
     private helpUsed = 0;
+    /** 本局是否已复活（第 1+2 关整体为一局，一局只能复活一次） */
+    private reviveUsedThisRun = false;
 
     // ===== 进度与结算 =====
     async getStartLevel(): Promise<number> {
         // 每次进入都从第1关开始：每日挑战是一整局体验（1→2→通关），退出即重置，不续玩
         // 每轮新开局都记录挑战开始时间（覆盖旧的，因为上一轮可能中途退出未通关）
         this.writeStartTs(Date.now());
+        // 新一局：复活机会重置
+        this.reviveUsedThisRun = false;
         return 1;
     }
 
@@ -47,6 +58,8 @@ export class DailyDriver implements ModeDriver {
             this.reportClear();
             localStorage.setItem(this.levelKey(), '1');
             this.writeStartTs(Date.now());
+            // 通关即本局结束，下一轮是新一局：复活机会重置
+            this.reviveUsedThisRun = false;
             return 1;
         }
         const next = clearedLevel + 1;
@@ -55,8 +68,7 @@ export class DailyDriver implements ModeDriver {
     }
 
     /**
-     * 第 1 关过完不弹窗，直接进加载页加载第 2 关；
-     * 第 2 关过完整局结束，弹通关页（展示本次用时与今日最快）。
+     * 单关制：过完即通关上报，弹通关页（展示本次用时与今日最快）。
      */
     getClearAction(clearedLevel: number): ClearAction {
         return clearedLevel >= DailyDriver.TOTAL_LEVELS ? 'finish' : 'autoAdvance';
@@ -66,11 +78,13 @@ export class DailyDriver implements ModeDriver {
     getToolLimit(tool: ToolType): number {
         if (tool === 'addBasket') return DailyDriver.ADD_BASKET_LIMIT;
         if (tool === 'smash') return DailyDriver.SMASH_LIMIT;
+        if (tool === 'addTray') return DailyDriver.ADD_TRAY_LIMIT;
         return DailyDriver.CLEAR_TRAY_LIMIT;
     }
     getToolUsed(tool: ToolType): number {
         if (tool === 'addBasket') return this.addBasketUsed;
         if (tool === 'smash') return this.smashUsed;
+        if (tool === 'addTray') return this.addTrayUsed;
         return this.clearTrayUsed;
     }
     canUseTool(tool: ToolType): boolean {
@@ -79,6 +93,7 @@ export class DailyDriver implements ModeDriver {
     useTool(tool: ToolType): void {
         if (tool === 'addBasket') this.addBasketUsed++;
         else if (tool === 'smash') this.smashUsed++;
+        else if (tool === 'addTray') this.addTrayUsed++;
         else this.clearTrayUsed++;
     }
     isToolExhausted(tool: ToolType): boolean {
@@ -88,19 +103,37 @@ export class DailyDriver implements ModeDriver {
         this.addBasketUsed = 0;
         this.smashUsed = 0;
         this.clearTrayUsed = 0;
+        this.addTrayUsed = 0;
+        this.specialFruitUsed = 0;
     }
 
-    // ===== 付费方式：求助好友，不扣小太阳 =====
-    getPrimaryPayment(_tool: ToolType, _cost: number): ToolPayment {
-        return { kind: 'help' };
+    // ===== 特殊果限次：本局 1 次，彩虹果/炸弹果二选一 =====
+    getSpecialFruitLimit(): number {
+        return DailyDriver.SPECIAL_FRUIT_LIMIT;
+    }
+    getSpecialFruitUsed(): number {
+        return this.specialFruitUsed;
+    }
+    canUseSpecialFruit(): boolean {
+        return this.specialFruitUsed < DailyDriver.SPECIAL_FRUIT_LIMIT;
+    }
+    useSpecialFruit(): void {
+        this.specialFruitUsed++;
     }
 
-    // ===== 求助好友（当日维度，跨关不重置）=====
+    // ===== 求助好友（当日维度，跨关不重置；上限读后端 help_max 配置）=====
     hasHelpMechanism(): boolean {
         return true;
     }
+    getHelpMode(): 'dailyChallenge' {
+        return 'dailyChallenge';
+    }
+    getHelpLimit(): number {
+        const v = getGameConfig().helpMax?.dailyChallenge;
+        return v && v > 0 ? v : DailyDriver.HELP_MAX_DEFAULT;
+    }
     canHelp(): boolean {
-        return this.helpUsed < DailyDriver.HELP_MAX;
+        return this.helpUsed < this.getHelpLimit();
     }
     useHelp(): void {
         this.helpUsed++;
@@ -115,24 +148,55 @@ export class DailyDriver implements ModeDriver {
         return this.helpUsed;
     }
     getRemainingHelp(): number {
-        return Math.max(0, DailyDriver.HELP_MAX - this.helpUsed);
+        return Math.max(0, this.getHelpLimit() - this.helpUsed);
     }
 
-    // ===== UI：使用 _daily 变体底图，隐藏小太阳与价格 =====
+    // ===== UI：分离式新底图（标题/示意图，无烘焙按钮）+ 面板下方独立按钮 =====
     getPanelAsset(tool: ToolType): string {
-        if (tool === 'addBasket') return 'panel_add_basket_daily';
-        if (tool === 'smash') return 'panel_smash_plate_daily';
-        return 'panel_clear_basket_daily';
+        if (tool === 'addBasket') return 'panel_add_basket';
+        if (tool === 'smash') return 'panel_smash_plate';
+        if (tool === 'addTray') return 'panel_add_tray';
+        return 'panel_clear_basket';
     }
-    getPanelHeight(_tool: ToolType): number {
-        // 三张 daily 底图统一 640x1036，按宽 320 缩放 → 518
-        return 518;
+    getPanelHeight(tool: ToolType): number {
+        // 分离式新底图按宽 320 缩放：加果篮 640x616→308、砸板子 640x604→302、清空果盘 640x634→317、加果盘 640x495→247
+        if (tool === 'addBasket') return 308;
+        if (tool === 'smash') return 302;
+        if (tool === 'addTray') return 247;
+        return 317;
     }
-    showSunBalance(): boolean {
-        return false;
+    /**
+     * 独立按钮文案优先级规则：
+     * 1. 背包有该道具的免费次数 → 「免费使用」（点击直接扣免费道具）
+     * 2. 当日求助未满 → 「求助好友」（点击走求助分享）
+     * 3. 兜底 → 动作名（加果篮/砸板子/清空果盘），点击看广告，按钮右上角带视频小图标
+     * （每日挑战不扣小太阳，cost 参数忽略）
+     */
+    getActionButton(tool: ToolType, _cost: number, _totalSuns: number): ToolButtonSpec {
+        if (PropStore.getToolCount(tool) > 0) {
+            return { text: '免费使用', pay: 'free' };
+        }
+        if (this.canHelp()) {
+            return { text: '求助好友', pay: 'help' };
+        }
+        if (tool === 'addBasket') return { text: '加果篮', pay: 'ad' };
+        if (tool === 'smash') return { text: '砸板子', pay: 'ad' };
+        if (tool === 'addTray') return { text: '加果盘', pay: 'ad' };
+        return { text: '清空果盘', pay: 'ad' };
     }
-    showToolCost(): boolean {
-        return false;
+
+    // ===== 失败与复活：新失败弹窗 + 一局一次复活 =====
+    getFailPanelAsset(): string {
+        return 'panel_daily_fail';
+    }
+    supportsRevive(): boolean {
+        return true;
+    }
+    canRevive(): boolean {
+        return !this.reviveUsedThisRun;
+    }
+    useRevive(): void {
+        this.reviveUsedThisRun = true;
     }
 
     // ===== 层流规则（后端 daily_challenge_layer_rules）=====
@@ -155,9 +219,12 @@ export class DailyDriver implements ModeDriver {
      */
     private reportClear() {
         const startAt = this.readStartTs() || Date.now();
-        this.lastRunSeconds = Math.max(0, Math.round((Date.now() - startAt) / 1000));
+        // endAt = 过关瞬间：与本次用时同一口径上报，后端按 endAt - startAt 算耗时，
+        // 避免用服务器收到请求的时刻做终点导致「今日最快」比「本次用时」多出网络延迟
+        const endAt = Date.now();
+        this.lastRunSeconds = Math.max(0, Math.round((endAt - startAt) / 1000));
         localStorage.setItem(this.reportedKey(), '1');
-        this.clearReport = saveDailyClear(startAt);
+        this.clearReport = saveDailyClear(startAt, endAt);
     }
 
     /** 本轮耗时（秒），本地算得，通关页展示「本次用时」 */

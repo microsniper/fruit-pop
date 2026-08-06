@@ -1,6 +1,6 @@
 /**
  * 道具与特殊果背包（纯前端存储，不存后端）：
- * - 道具：加果篮(addBasket)/砸板子(smash)/清空果盘(clear) 的免费使用次数
+ * - 道具：加果篮(addBasket)/砸板子(smash)/清空果盘(clear)/加果盘(addTray) 的免费使用次数
  * - 特殊果：彩虹果(rainbow)/炸弹果(bomb) 的持有数量
  * 来源：七日签到发放（SignInPage）；消耗：游戏内道具按钮（免费优先）与特殊果按钮。
  * 删除小程序即清零，与签到状态口径一致。
@@ -8,7 +8,7 @@
 
 declare const wx: any;
 
-export type ToolKey = 'addBasket' | 'smash' | 'clear';
+export type ToolKey = 'addBasket' | 'smash' | 'clear' | 'addTray';
 export type FruitKey = 'rainbow' | 'bomb';
 
 interface PropBag {
@@ -19,7 +19,7 @@ interface PropBag {
 const STORAGE_KEY = 'propBag';
 
 const defaultBag = (): PropBag => ({
-    tools: { addBasket: 0, smash: 0, clear: 0 },
+    tools: { addBasket: 0, smash: 0, clear: 0, addTray: 0 },
     fruits: { rainbow: 0, bomb: 0 }
 });
 
@@ -31,7 +31,7 @@ function readBag(): PropBag {
         if (!raw) return defaultBag();
         const parsed = JSON.parse(raw);
         const bag = defaultBag();
-        (['addBasket', 'smash', 'clear'] as ToolKey[]).forEach((k) => {
+        (['addBasket', 'smash', 'clear', 'addTray'] as ToolKey[]).forEach((k) => {
             bag.tools[k] = Math.max(0, Number(parsed?.tools?.[k]) || 0);
         });
         (['rainbow', 'bomb'] as FruitKey[]).forEach((k) => {
