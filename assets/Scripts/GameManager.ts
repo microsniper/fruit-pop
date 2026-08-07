@@ -1244,14 +1244,14 @@ export class GameManager extends Component {
 
         // 新图不带关闭按钮，弹窗只能走复活/返回主页流程关闭
 
-        // 成绩条：新图（2026-08-06 重出）已留好空白圆角卡片，实测中心(0,-59)，宽222高31
-        const wipe = this.createGraphicsNode('BarWipe', panelNode, 222, 31, 0, -59);
+        // 成绩条：新图（2026-08-06 重出）已留好空白圆角卡片，实测中心(0,-59)，宽222高31；整体下移2px对齐观感
+        const wipe = this.createGraphicsNode('BarWipe', panelNode, 222, 31, 0, -61);
         const wg = wipe.getComponent(Graphics)!;
         wg.fillColor = new Color(255, 255, 255, 255);
         wg.roundRect(-111, -15.5, 222, 31, 10);
         wg.fill();
-        this.createLabel(panelNode, '今日最好成绩', -58, -60, 15, new Color(93, 64, 55, 255), true);
-        const bestLabel = this.createLabel(panelNode, '--', 58, -60, 18, new Color(199, 39, 30, 255), true);
+        this.createLabel(panelNode, '今日最好成绩', -58, -62, 15, new Color(93, 64, 55, 255), true);
+        const bestLabel = this.createLabel(panelNode, '--', 58, -62, 18, new Color(199, 39, 30, 255), true);
         getDailyStatus().then((res) => {
             if (!bestLabel || !bestLabel.isValid) return;
             bestLabel.string = res && res.bestSeconds != null ? this.formatDuration(res.bestSeconds) : '暂无';
@@ -2268,21 +2268,37 @@ export class GameManager extends Component {
             this.modalLayerNode!.removeAllChildren();
         }, this);
 
-        // 有限次的模式（每日挑战）：盖掉烘焙文案「点击水果即可使用哦」，换成本局规则提示
+        // 有限次的模式（每日挑战）：盖掉烘焙文案「点击水果即可使用哦」，换成本局规则提示（两行，整体上移防出界）
         const sfLimit = this.driver.getSpecialFruitLimit();
         if (Number.isFinite(sfLimit)) {
-            const wipe = this.createGraphicsNode('HintWipe', panelNode, 280, 46, 0, -130);
+            const wipe = this.createGraphicsNode('HintWipe', panelNode, 280, 58, 0, -122);
             const wg = wipe.getComponent(Graphics)!;
             wg.fillColor = new Color(251, 243, 219, 255);
-            wg.roundRect(-140, -23, 280, 46, 10);
+            wg.roundRect(-140, -29, 280, 58, 10);
             wg.fill();
-            this.createLabel(panelNode, '本局只能使用其中一个特殊果', 0, -130, 16, new Color(199, 39, 30, 255), true);
+            this.createLabel(panelNode, '本局只能使用其中一个特殊果', 0, -110, 16, new Color(199, 39, 30, 255), true);
+            this.createLabel(panelNode, '可通过签到和无限模式获得', 0, -133, 13, new Color(199, 39, 30, 255), true);
+
+            // 获取道具按钮（仅每日挑战显示）：橙钮+右上角视频图标，点击先关弹窗，看完广告发彩虹果x1+炸弹果x1
+            const getPropBtn = this.createSeparatedActionButton(
+                panelNode, panelH, { text: '获取道具', pay: 'ad' }, false,
+                { asset: 'btn_action', name: 'BtnGetProp' }
+            );
+            getPropBtn.on(Node.EventType.TOUCH_END, () => {
+                this.modalLayerNode?.removeAllChildren();
+                this.showAdThen(() => {
+                    PropStore.addFruits('rainbow', 1);
+                    PropStore.addFruits('bomb', 1);
+                    this.renderTools();
+                    this.showSunShortageTip('恭喜获取彩虹果x1 炸弹果x1');
+                }, 'get_special_fruit');
+            }, this);
         }
 
         // 两个格子：左彩虹果 / 右炸弹果（中心与格子尺寸为底图像素实测）
         const slots = [
-            { fruit: 'rainbow' as const, code: ResourceCodeTypeEnum.RAINBOW, x: -75, emptyTip: '暂无彩虹果，签到可领取' },
-            { fruit: 'bomb' as const, code: ResourceCodeTypeEnum.BOMB, x: 68, emptyTip: '暂无炸弹果，签到可领取' }
+            { fruit: 'rainbow' as const, code: ResourceCodeTypeEnum.RAINBOW, x: -75, emptyTip: '可通过签到和无限模式获得' },
+            { fruit: 'bomb' as const, code: ResourceCodeTypeEnum.BOMB, x: 68, emptyTip: '可通过签到和无限模式获得' }
         ];
         // 本局特殊果已用完（限次模式）：两格都置灰不可点
         const sfExhausted = Number.isFinite(sfLimit) && !this.driver.canUseSpecialFruit();
