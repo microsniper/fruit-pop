@@ -476,28 +476,18 @@ export interface GameConfigCapacityRange {
   w6?: number
 }
 
-export interface GameConfigToolCosts {
-  addBasket: number
-  clearTray: number
-  smashPlate: number
-  /** 加果盘的小太阳价格（后端 tool_costs 未配置时前端兜底 20） */
-  addTray?: number
-}
-
 export interface GameConfig {
   challengeInterval: number
   normalWeights: GameConfigWeights
   challengeWeights: GameConfigWeights
   boxCapacity: GameConfigCapacityRange[]
-  toolCosts: GameConfigToolCosts
-  dailyLoginReward: number
+  /** 免费金币单次金额（看广告领取） */
+  freeCoinReward: number
   newUserReward: number
   /** 每日挑战批次计划（按关号分组）：levels.关号.batches=[{colors水果颜色数,layers层数}] */
   dailyWavePlan?: Record<string, { batches?: DailyWavePlanBatch[] }>
   /** 每日挑战每层板子数（按关号分组再按批）：maxPlates 缺省=铺满；rectFirst/shapeFirst=方板/异形保底块数 */
   dailyWavePlates?: Record<string, { batches?: DailyWavePlatesBatch[] }>
-  /** 每日挑战果篮孔数分布权重 */
-  dailyBoxCapacity?: DailyBoxCapacity
   /** 每日挑战果篮刷新颜色权重 */
   dailyChallengeWeights?: GameConfigWeights
   /** 每日挑战层流规则：遮挡翻彩/补层阈值 */
@@ -537,13 +527,6 @@ export interface DailyWavePlatesBatch {
   stripFirst?: number
   /** 每层最多出现几种板子形状（从全部 7 种模板里随机抽这么多种，本层只铺这几种）；缺省/0=不限制 */
   shapeVariety?: number
-}
-
-export interface DailyBoxCapacity {
-  w3?: number
-  w4?: number
-  w5?: number
-  w6?: number
 }
 
 export interface DailyLayerRules {
@@ -592,8 +575,7 @@ export const getDefaultGameConfig = (): GameConfig => {
     challengeInterval: 5,
     normalWeights: { temp: 20, click: 30, block: 60 },
     challengeWeights: { temp: 10, click: 20, block: 60 },
-    toolCosts: { addBasket: 20, clearTray: 20, smashPlate: 20 },
-    dailyLoginReward: 200,
+    freeCoinReward: 200,
     newUserReward: 1000,
     boxCapacity: [
       { max: 6,  w3: 100 },
@@ -616,22 +598,22 @@ export const getGameConfig = (): GameConfig => {
 /** 本次登录是否是新用户（仅创建用户的那次登录为 true，用于新人见面礼） */
 export const isNewUserThisLogin = (): boolean => newUserThisLogin;
 
-/** 资源类型编码（与后端 ResourceCodeTypeEnum 的 code 一致）：签到奖励类型 / 资源表 code 共用 */
+/** 资源类型编码（与后端 ResourceCodeTypeEnum 的数字 code 一致）：签到奖励类型 / 资源表 code 共用 */
 export enum ResourceCodeTypeEnum {
-  /** 小太阳 */
-  SUN = 'sun',
-  /** 砸板子道具 */
-  SMASH = 'smash',
+  /** 金币 */
+  COIN = 1,
+  /** 加果盘道具 */
+  ADD_TRAY = 2,
   /** 清空果盘道具 */
-  CLEAR = 'clear',
+  CLEAR = 3,
   /** 加果篮道具 */
-  ADD = 'add',
+  ADD = 4,
   /** 彩虹果 */
-  RAINBOW = 'rainbow',
+  RAINBOW = 5,
   /** 炸弹果 */
-  BOMB = 'bomb',
+  BOMB = 6,
   /** 彩虹果+炸弹果组合（按 amount 各发一份） */
-  COMBO = 'rainbow-bomb'
+  RAINBOW_BOMB = 7
 }
 
 /** 七日签到单日奖励（后端配置表 JOIN 资源表下发） */
@@ -683,10 +665,10 @@ export interface ResourceItem {
   type?: string
 }
 
-/** 资源 Map 缓存：key=resourceCode，value=整条资源数据；一次会话只拉一次 */
-let resourcesCache: Record<string, ResourceItem> | null = null;
+/** 资源 Map 缓存：key=resourceCode（数字），value=整条资源数据；一次会话只拉一次 */
+let resourcesCache: Record<number, ResourceItem> | null = null;
 
-export const fetchResources = async (): Promise<Record<string, ResourceItem>> => {
+export const fetchResources = async (): Promise<Record<number, ResourceItem>> => {
   if (resourcesCache) return resourcesCache;
   try {
     let hasToken = false;
@@ -702,10 +684,10 @@ export const fetchResources = async (): Promise<Record<string, ResourceItem>> =>
       url: '/api/game/resources',
       method: 'POST'
     })
-    // 后端返回列表，前端按 resourceCode 组 Map
-    const map: Record<string, ResourceItem> = {};
+    // 后端返回列表，前端按 resourceCode（数字）组 Map
+    const map: Record<number, ResourceItem> = {};
     (res.data || []).forEach((item) => {
-      if (item && item.resourceCode) {
+      if (item && item.resourceCode != null) {
         map[item.resourceCode] = item;
       }
     });
@@ -900,5 +882,122 @@ export const saveUserRegion = async (regionId: number): Promise<boolean> => {
   } catch (e) {
     console.error('Save user region failed:', e)
     return false
+  }
+}
+
+// ========== 过关奖励（配置放数据库，发放仍走前端本地记账）==========
+
+/** 过关奖励适用模式（与后端 GameRewardModeEnum 的 code 一致） */
+export enum GameRewardModeEnum {
+  /** 每日挑战 */
+  DAILY_CHALLENGE = 1,
+  /** 无限模式 */
+  ENDLESS_CHALLENGE = 2
+}
+
+/** 物品类型（与后端 ItemTypeEnum 的 code 一致） */
+export enum ItemTypeEnum {
+  /** 道具（含金币） */
+  PROP = 1,
+  /** 收集品 */
+  COLLECT = 2
+}
+
+/** 一条奖励结果（阶段1固定奖励 / 阶段2抽签结果通用）。itemType=PROP 时 resourceCode 有值；itemType=COLLECT 时 collectCode 有值 */
+export interface RewardItem {
+  itemType: ItemTypeEnum
+  resourceCode?: ResourceCodeTypeEnum
+  collectCode?: string
+  amount: number
+  imageUrl: string
+}
+
+/** 查阶段1固定奖励（通常是金币） */
+export const fetchRewardConfig = async (mode: GameRewardModeEnum): Promise<RewardItem | null> => {
+  try {
+    const res = await request<RewardItem>({
+      url: '/api/game/reward/config',
+      method: 'POST',
+      data: { mode }
+    })
+    return res.data || null
+  } catch (e) {
+    console.error('[API] fetch reward config failed:', e)
+    return null
+  }
+}
+
+/** 阶段2按权重无放回抽 count 条；无副作用，不落用户状态，发放仍由前端处理。空列表视为 null */
+export const drawReward = async (mode: GameRewardModeEnum, stage: number, count: number): Promise<RewardItem[] | null> => {
+  try {
+    const res = await request<RewardItem[]>({
+      url: '/api/game/reward/draw',
+      method: 'POST',
+      data: { mode, stage, count }
+    })
+    return res.data && res.data.length > 0 ? res.data : null
+  } catch (e) {
+    console.error('[API] draw reward failed:', e)
+    return null
+  }
+}
+
+// ========== 商城（目录后端配置，购买发放走前端本地账）==========
+
+/** 商城目录条目：category=1 道具（resourceCode 入账）/ 2 收集（groupCode 分组） */
+export interface ShopItem {
+  id: number
+  category: number
+  price: number
+  sortOrder: number
+  resourceCode?: ResourceCodeTypeEnum
+  groupCode: string
+  name: string
+  imageUrl: string
+}
+
+let shopCache: ShopItem[] | null = null;
+
+/** 拉取商城上架目录（会话内缓存一次） */
+export const fetchShopList = async (): Promise<ShopItem[]> => {
+  if (shopCache) return shopCache;
+  try {
+    const res = await request<ShopItem[]>({
+      url: '/api/game/shop/list',
+      method: 'POST'
+    })
+    shopCache = res.data || [];
+    return shopCache;
+  } catch (e) {
+    console.error('[API] fetch shop list failed:', e)
+    return []
+  }
+}
+
+/** 反馈类型：1-游戏反馈（bug/卡顿等）2-意见反馈（建议），与后端 FeedbackTypeEnum 一致 */
+export enum FeedbackTypeEnum {
+  GAME = 1,
+  SUGGESTION = 2
+}
+
+export interface FeedbackSubmitResult {
+  success: boolean
+  message?: string
+}
+
+/** 提交用户反馈：设置页"游戏反馈/意见反馈"入口，后端限每人每天 5 条 */
+export const submitFeedback = async (feedbackType: FeedbackTypeEnum, content: string): Promise<FeedbackSubmitResult> => {
+  try {
+    await request({
+      url: '/api/game/feedback/submit',
+      method: 'POST',
+      data: { feedbackType, content }
+    })
+    return { success: true }
+  } catch (e) {
+    const message = e instanceof Error
+      ? e.message
+      : ((e as { message?: string } | null)?.message || '提交失败，请重试')
+    return { success: false, message }
   }
 }

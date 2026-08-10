@@ -5,22 +5,23 @@ import { BundleManager } from './BundleManager';
 import { LoadingPage } from './LoadingPage';
 import { DailyDriver } from './DailyDriver';
 import { SignInPage } from './SignInPage';
+import { FeedbackPage } from './FeedbackPage';
 import type { GameManager } from './GameManager';
 
 declare const wx: any;
 
 /**
  * 首页：模式选择页（无限模式/每日挑战）及只在首页出现的功能——
- * 七日签到入口、首页设置弹窗、免费太阳、新人礼弹窗。
+ * 七日签到入口、首页设置弹窗、免费金币、新人礼弹窗。
  * 纯逻辑类（非组件），共享工具与状态通过 GameManager 引用访问。
  */
 export class HomePage {
     /** 首页节点：模式选择页（无限模式/每日挑战） */
     private pageNode: Node | null = null;
-    /** 首页免费太阳按钮（领满置灰用） */
-    private freeSunBtnNode: Node | null = null;
-    /** 免费太阳每日限领次数 */
-    private readonly FREE_SUN_DAILY_LIMIT = 3;
+    /** 首页免费金币按钮（领满置灰用） */
+    private freeCoinBtnNode: Node | null = null;
+    /** 免费金币每日限领次数 */
+    private readonly FREE_COIN_DAILY_LIMIT = 3;
     /** 本次登录是否已标记过新人礼待领取（防止领取后同会话重复标记） */
     private newUserGiftMarked = false;
     /** 签到引导手指（今天未签到时压在签到按钮上） */
@@ -32,6 +33,8 @@ export class HomePage {
     render() {
         this.close();
         this.gm.rankPage.close();
+        this.gm.storagePage.close();
+        this.gm.shopPage.close();
         if (this.gm.rootNode) {
             this.gm.rootNode.removeAllChildren();
         }
@@ -99,6 +102,8 @@ export class HomePage {
         const sideBtnW = 58;
         const sideBtnY = pageH * 0.10;
         const signInBtnNode = this.createHomeButton('btn_signin', -pageW / 2 + 42, sideBtnY, sideBtnW, () => this.onSignInClick());
+        // 个人仓库（签到按钮正下方，间距与「设置-签到」间距同款 0.12*pageH）：整页切换，看道具与收集品
+        this.createHomeButton('btn_storage', -pageW / 2 + 42, sideBtnY - pageH * 0.12, sideBtnW, () => this.gm.storagePage.open());
         // 今天未签到：签到按钮右上角红点提醒
         if (signInBtnNode && !SignInPage.isSignedToday()) {
             const dot = signInBtnNode.addComponent(Graphics);
@@ -113,6 +118,8 @@ export class HomePage {
         const rankBtnNode = this.createHomeButton('btn_rank', pageW / 2 - 42, sideBtnY, sideBtnW, () => {
             this.gm.rankPage.open(true);
         });
+        // 商城（排行榜按钮正下方，与左列仓库对称）：整页切换，金币买道具/收集品
+        this.createHomeButton('btn_shop', pageW / 2 - 42, sideBtnY - pageH * 0.12, sideBtnW, () => this.gm.shopPage.open());
         // 未授权用户：微信原生授权按钮叠在排行榜按钮上（游戏内排行榜入口已移除，授权只在首页完成），
         // 点击即由微信自动串起「官方隐私弹窗 → 昵称头像授权弹窗」
         if (rankBtnNode) {
@@ -122,53 +129,39 @@ export class HomePage {
         // 左上角设置按钮：放在树冠下方，避免遮挡背景上的树
         this.createHomeButton('btn_home_settings', -pageW / 2 + 42, pageH * 0.22, sideBtnW, () => this.renderHomeSettingsModal());
 
-        // 免费太阳（排行榜上方，与设置按钮同高）：看广告领小太阳，每天限 3 次
-        this.freeSunBtnNode = this.createHomeButton('btn_free_sun', pageW / 2 - 42, pageH * 0.22, sideBtnW, () => this.onFreeSunClick());
-        if (this.freeSunBtnNode && this.getFreeSunClaimsToday() >= this.FREE_SUN_DAILY_LIMIT) {
-            const sp = this.freeSunBtnNode.getComponent(Sprite);
+        // 免费金币（排行榜上方，与设置按钮同高）：看广告领金币，每天限 3 次
+        this.freeCoinBtnNode = this.createHomeButton('btn_free_coin', pageW / 2 - 42, pageH * 0.22, sideBtnW, () => this.onFreeCoinClick());
+        if (this.freeCoinBtnNode && this.getFreeCoinClaimsToday() >= this.FREE_COIN_DAILY_LIMIT) {
+            const sp = this.freeCoinBtnNode.getComponent(Sprite);
             if (sp) sp.grayscale = true;
         }
 
-        // 小太阳余额（设置与免费太阳之间，居中）：复用游戏内「sun.png 图标+数字」样式，
-        // 引用挂到 gm.sunCountLabel/sunIconNode 上，新人礼的太阳飞行动画自动飞向这里
-        const balIconH = 40;
-        const balIconW = balIconH * 2.5; // 新图 250x100（2.5:1），右侧数字底框加宽
+        // 金币余额（设置与免费金币之间，居中）：图标+文字平铺（方形 coin.png，无底框），
+        // 引用挂到 gm.coinCountLabel/coinIconNode 上，新人礼的金币飞行动画自动飞向这里
+        const balIconH = 28;
         const balY = pageH * 0.22;
-        const balSunNode = this.gm.createNode('HomeSunIcon', this.pageNode, 0, balY, balIconW, balIconH);
-        this.gm.sunIconNode = balSunNode;
-        const balSunSprite = balSunNode.addComponent(Sprite);
-        balSunSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/sun/spriteFrame', SpriteFrame).then((sf) => {
-            if (sf && balSunSprite.isValid) {
-                balSunSprite.spriteFrame = sf;
+        const balCoinNode = this.gm.createNode('HomeCoinIcon', this.pageNode, -balIconH / 2 - 4, balY, balIconH, balIconH);
+        this.gm.coinIconNode = balCoinNode;
+        const balCoinSprite = balCoinNode.addComponent(Sprite);
+        balCoinSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/coin/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && balCoinSprite.isValid) {
+                balCoinSprite.spriteFrame = sf;
             }
         }).catch(() => {});
-        // 数字靠左显示在底框内部（内部左缘实测在图宽 42% 处），左锚点+不缩放，数字变大时向右撑
-        const balLabelNode = this.gm.createNode('HomeSunCount', this.pageNode, (0.42 - 0.5) * balIconW + 6, balY, balIconW * 0.5, balIconH);
+        // 数字紧贴图标右侧，左锚点+不缩放，数字变大时向右撑
+        const balLabelNode = this.gm.createNode('HomeCoinCount', this.pageNode, balIconH / 2 + 2, balY, balIconH * 2, balIconH);
         const balLabel = balLabelNode.addComponent(Label);
-        balLabel.fontSize = 18;
+        balLabel.fontSize = 16;
         balLabel.lineHeight = balIconH;
         balLabel.color = new Color(46, 110, 30, 255);
-        balLabel.string = `${this.gm.totalSuns}`;
+        balLabel.string = `${this.gm.totalCoins}`;
         const balTransform = balLabelNode.getComponent(UITransform);
         if (balTransform) balTransform.setAnchorPoint(0, 0.5);
         balLabel.horizontalAlign = Label.HorizontalAlign.LEFT;
         balLabel.verticalAlign = Label.VerticalAlign.CENTER;
         balLabel.overflow = Label.Overflow.NONE;
-        this.gm.sunCountLabel = balLabel;
-        
-                // 余额下方常驻提示：小太阳每日清零规则（金黄填充+深棕描边艺术字，透明度呼吸吸睛）
-                const sunTipLabel = this.gm.createLabel(this.pageNode, '☀ 小太阳每日零点清零 ☀', 0, balY - balIconH / 2 - 16, 14, new Color(255, 195, 45, 255), true);
-                sunTipLabel.enableOutline = true;
-                sunTipLabel.outlineColor = new Color(120, 60, 15, 255);
-                sunTipLabel.outlineWidth = 2;
-                const sunTipOpacity = sunTipLabel.node.addComponent(UIOpacity);
-                tween(sunTipOpacity)
-                    .to(1.2, { opacity: 150 }, { easing: 'sineInOut' })
-                    .to(1.2, { opacity: 255 }, { easing: 'sineInOut' })
-                    .union()
-                    .repeatForever()
-                    .start();
+        this.gm.coinCountLabel = balLabel;
 
         // 弹窗层：设置弹窗等挂载在此，盖在首页之上（首页销毁了游戏界面的弹窗层，需重建）
         this.gm.modalLayerNode = this.gm.createNode('ModalLayer', this.gm.rootNode!, 0, 0, pageW, pageH);
@@ -190,6 +183,9 @@ export class HomePage {
 
         // 新人礼弹窗改在首页弹出（已领取的不会再弹）
         this.gm.scheduleOnce(() => this.tryShowRewards(), 0.6);
+
+        // 后台预热商城/道具远程图，用户之后点进商城/仓库时基本秒显示（不阻塞首页渲染）
+        this.gm.preloadShopAndResourceImages();
     }
 
     /** 首页按钮：整图 Sprite + 按压缩放反馈，高度按图片比例自适应 */
@@ -259,9 +255,9 @@ export class HomePage {
         }
         this.pageNode = null;
         this.signInGuideNode = null;
-        // 首页太阳余额引用随页面销毁置空（进游戏时 ensureTempSlotViews 检测到空引用会重建游戏内版本）
-        this.gm.sunCountLabel = null;
-        this.gm.sunIconNode = null;
+        // 首页金币余额引用随页面销毁置空（进游戏时 ensureTempSlotViews 检测到空引用会重建游戏内版本）
+        this.gm.coinCountLabel = null;
+        this.gm.coinIconNode = null;
         // 授权叠层只服务首页按钮，离开首页即销毁（重新 render 时会再创建）
         this.gm.destroyAuthOverlay('rank');
         this.gm.destroyAuthOverlay('signin');
@@ -354,7 +350,7 @@ export class HomePage {
         const ph = panelTransform.height;
 
         // 提示文案：面板下方
-        this.gm.createLabel(this.gm.modalLayerNode, `点击宝箱领取 +${amount} 小太阳`, 0, -ph / 2 - 36, 20, new Color(255, 235, 160, 255), true);
+        this.gm.createLabel(this.gm.modalLayerNode, `点击宝箱领取 +${amount} 金币`, 0, -ph / 2 - 36, 20, new Color(255, 235, 160, 255), true);
 
         // 整个面板都是领取热区（无 X 按钮，不能错过）
         let claiming = false;
@@ -363,30 +359,30 @@ export class HomePage {
             if (claiming) return;
             claiming = true;
 
-            const startSuns = this.gm.totalSuns;
-            this.gm.totalSuns += amount;
+            const startCoins = this.gm.totalCoins;
+            this.gm.totalCoins += amount;
             if (typeof wx !== 'undefined' && wx.setStorageSync) {
-                wx.setStorageSync('totalSuns', this.gm.totalSuns.toString());
+                wx.setStorageSync('totalCoins', this.gm.totalCoins.toString());
             } else {
-                localStorage.setItem('totalSuns', this.gm.totalSuns.toString());
+                localStorage.setItem('totalCoins', this.gm.totalCoins.toString());
             }
             // 领取成功，清除待领取标记（之后不再弹新人礼）
             this.setNewUserGiftPending(false);
 
-            // 宝箱弹一下 + "+N 小太阳" 上飘 + 金色太阳飞向顶部计数
+            // 宝箱弹一下 + "+N 金币" 上飘 + 金色金币飞向顶部计数
             if (breathTween) breathTween.stop();
             tween(panelNode)
                 .to(0.12, { scale: new Vec3(1.15, 1.15, 1) })
                 .to(0.12, { scale: new Vec3(1, 1, 1) })
                 .start();
-            const gainLabel = this.gm.createLabel(this.gm.modalLayerNode!, `+${amount} 小太阳`, 0, ph * 0.18, 30, new Color(255, 220, 80, 255), true);
+            const gainLabel = this.gm.createLabel(this.gm.modalLayerNode!, `+${amount} 金币`, 0, ph * 0.18, 30, new Color(255, 220, 80, 255), true);
             tween(gainLabel.node)
                 .by(0.8, { position: new Vec3(0, 70, 0) })
                 .start();
 
             // 起飞点取宝箱主体中心（面板中心略偏下）
             const chestWorldPos = panelTransform.convertToWorldSpaceAR(new Vec3(0, -ph * 0.1, 0));
-            this.gm.playDailyRewardSunFly(chestWorldPos, startSuns, amount, () => {
+            this.gm.playDailyRewardCoinFly(chestWorldPos, startCoins, amount, () => {
                 if (this.gm.modalLayerNode) this.gm.modalLayerNode.removeAllChildren();
             });
         }, this);
@@ -408,51 +404,51 @@ export class HomePage {
             .start();
     }
 
-    /** 免费太阳：看广告领小太阳（额度与每日签到一致），每天限 FREE_SUN_DAILY_LIMIT 次 */
-    private onFreeSunClick() {
-        const used = this.getFreeSunClaimsToday();
-        if (used >= this.FREE_SUN_DAILY_LIMIT) {
-            this.gm.renderCommonTip('免费太阳', '今天的免费太阳已经领完啦\n明天再来哦～');
+    /** 免费金币：看广告领金币（额度与每日签到一致），每天限 FREE_COIN_DAILY_LIMIT 次 */
+    private onFreeCoinClick() {
+        const used = this.getFreeCoinClaimsToday();
+        if (used >= this.FREE_COIN_DAILY_LIMIT) {
+            this.gm.renderCommonTip('免费金币', '今天的免费金币已经领完啦\n明天再来哦～');
             return;
         }
         this.gm.showAdThen(() => {
-            const amount = getGameConfig()?.dailyLoginReward ?? 200;
-            this.gm.totalSuns += amount;
+            const amount = getGameConfig()?.freeCoinReward ?? 200;
+            this.gm.totalCoins += amount;
             if (typeof wx !== 'undefined' && wx.setStorageSync) {
-                wx.setStorageSync('totalSuns', this.gm.totalSuns.toString());
+                wx.setStorageSync('totalCoins', this.gm.totalCoins.toString());
             } else {
-                localStorage.setItem('totalSuns', this.gm.totalSuns.toString());
+                localStorage.setItem('totalCoins', this.gm.totalCoins.toString());
             }
             const newUsed = used + 1;
-            this.setFreeSunClaimsToday(newUsed);
-            // 首页太阳余额同步刷新
-            if (this.gm.sunCountLabel && this.gm.sunCountLabel.isValid) {
-                this.gm.sunCountLabel.string = `${this.gm.totalSuns}`;
+            this.setFreeCoinClaimsToday(newUsed);
+            // 首页金币余额同步刷新
+            if (this.gm.coinCountLabel && this.gm.coinCountLabel.isValid) {
+                this.gm.coinCountLabel.string = `${this.gm.totalCoins}`;
             }
-            const left = this.FREE_SUN_DAILY_LIMIT - newUsed;
-            this.showTip(left > 0 ? `+${amount} 小太阳 今日还可领 ${left} 次` : `+${amount} 小太阳 今日次数已用完`);
-            if (left <= 0 && this.freeSunBtnNode && this.freeSunBtnNode.isValid) {
-                const sp = this.freeSunBtnNode.getComponent(Sprite);
+            const left = this.FREE_COIN_DAILY_LIMIT - newUsed;
+            this.showTip(left > 0 ? `+${amount} 金币 今日还可领 ${left} 次` : `+${amount} 金币 今日次数已用完`);
+            if (left <= 0 && this.freeCoinBtnNode && this.freeCoinBtnNode.isValid) {
+                const sp = this.freeCoinBtnNode.getComponent(Sprite);
                 if (sp) sp.grayscale = true;
             }
-        }, 'free_sun');
+        }, 'free_coin');
     }
 
-    /** 今日免费太阳已领次数（本地存储，格式 "日期:count"，跨天自动归零） */
-    private getFreeSunClaimsToday(): number {
+    /** 今日免费金币已领次数（本地存储，格式 "日期:count"，跨天自动归零） */
+    private getFreeCoinClaimsToday(): number {
         const raw = (typeof wx !== 'undefined' && wx.getStorageSync)
-            ? (wx.getStorageSync('freeSunClaims') || '')
-            : (localStorage.getItem('freeSunClaims') || '');
+            ? (wx.getStorageSync('freeCoinClaims') || '')
+            : (localStorage.getItem('freeCoinClaims') || '');
         const [date, cnt] = String(raw).split(':');
         return date === this.gm.getTodayStr() ? (parseInt(cnt, 10) || 0) : 0;
     }
 
-    private setFreeSunClaimsToday(count: number) {
+    private setFreeCoinClaimsToday(count: number) {
         const val = `${this.gm.getTodayStr()}:${count}`;
         if (typeof wx !== 'undefined' && wx.setStorageSync) {
-            wx.setStorageSync('freeSunClaims', val);
+            wx.setStorageSync('freeCoinClaims', val);
         } else {
-            localStorage.setItem('freeSunClaims', val);
+            localStorage.setItem('freeCoinClaims', val);
         }
     }
 
@@ -514,7 +510,12 @@ export class HomePage {
             if (isOn) this.gm.triggerVibration('light');
         });
 
-        // 游戏反馈按钮（图里的橙色立体按钮）：暂不可点击，不挂事件，仅占位
+        // 游戏反馈按钮（图里的橙色立体按钮）：位置为估算值，跟美术图核对后如有偏差再微调坐标
+        const feedbackBtn = this.gm.createNode('FeedbackBtn', panelNode, 0, py(0.75), panelW * 0.6, 56);
+        feedbackBtn.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+            new FeedbackPage(this.gm).open(() => this.showTip('提交成功，感谢反馈'));
+        }, this);
     }
 
     /** 点击签到按钮：打开七日签到弹窗（签到状态/今日已领判断都在弹窗内） */

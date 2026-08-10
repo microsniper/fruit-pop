@@ -1,4 +1,4 @@
-import { saveDailyClear, DailyClearResponse, getGameConfig } from './api';
+import { saveDailyClear, DailyClearResponse, getGameConfig, fetchRewardConfig, drawReward, GameRewardModeEnum, RewardItem } from './api';
 import type { ClearAction, ModeDriver, ToolButtonSpec, ToolType } from './ModeDriver';
 import { DEFAULT_LAYER_RULES, LayerRules } from './ModeDriver';
 import { PropStore } from './PropStore';
@@ -6,11 +6,11 @@ import { PropStore } from './PropStore';
 /**
  * 每日挑战驱动（省份 PK）：单关制（原第 2 关内容，配置 key "1"），通关上报后可重复挑战。
  * 进度存 localStorage 按天隔离（dailyLevel:日期），不上服务器；
- * 挑战开始时间前端计时（dailyStartTs:日期），通关时随上报带给后端；未通关仅本地，后端无感知。
+ * 挑战开始时间前端计时（dailyStartTs，不按天隔离，跨零点通关也能算对用时），通关时随上报带给后端；未通关仅本地，后端无感知。
  *
  * 道具规则：每关加果篮限 2 次，砸板子/清空果盘各限 1 次；
  * 特殊果每关限 1 次且彩虹果/炸弹果共享计数（二选一）；
- * 主按钮代价是求助好友（当日上限读后端 help_max 配置），不扣小太阳，界面隐藏小太阳余额与价格。
+ * 主按钮代价是求助好友（当日上限读后端 help_max 配置），不扣金币，界面隐藏金币余额与价格。
  */
 export class DailyDriver implements ModeDriver {
     readonly mode = 'daily' as const;
@@ -170,9 +170,8 @@ export class DailyDriver implements ModeDriver {
      * 1. 背包有该道具的免费次数 → 「免费使用」（点击直接扣免费道具）
      * 2. 当日求助未满 → 「求助好友」（点击走求助分享）
      * 3. 兜底 → 动作名（加果篮/砸板子/清空果盘），点击看广告，按钮右上角带视频小图标
-     * （每日挑战不扣小太阳，cost 参数忽略）
      */
-    getActionButton(tool: ToolType, _cost: number, _totalSuns: number): ToolButtonSpec {
+    getActionButton(tool: ToolType): ToolButtonSpec {
         if (PropStore.getToolCount(tool) > 0) {
             return { text: '免费使用', pay: 'free' };
         }
@@ -250,11 +249,25 @@ export class DailyDriver implements ModeDriver {
     }
 
     private startTsKey(): string {
-        return `dailyStartTs:${DailyDriver.todayStr()}`;
+        // 不按天隔离：23:59 开局、跨零点通关时按天的 key 会读不到开始时间导致用时算成 0；
+        // 开始时间每轮新开局都会覆盖写，单 key 即可
+        return 'dailyStartTs';
     }
 
     private reportedKey(): string {
         return `dailyClearReported:${DailyDriver.todayStr()}`;
+    }
+
+    /**
+     * 领取过关奖励：stage=1 查阶段1固定奖励（金币，包成单元素数组），stage=2 按权重无放回抽 2 条（池子不足有几条发几条）。
+     * 配置在数据库（game_reward_config），接口本身无副作用；结果的实际发放由调用方（GameManager）处理。
+     */
+    async claimStageReward(stage: number): Promise<RewardItem[] | null> {
+        if (stage === 1) {
+            const fixed = await fetchRewardConfig(GameRewardModeEnum.DAILY_CHALLENGE);
+            return fixed ? [fixed] : null;
+        }
+        return drawReward(GameRewardModeEnum.DAILY_CHALLENGE, stage, 2);
     }
 
     /** 今日进度（首页按钮状态展示复用）：1=在第1关 2=在第2关 */

@@ -1,4 +1,4 @@
-import { loginAndGetProgress, saveProgress, getGameConfig } from './api';
+import { loginAndGetProgress, saveProgress, getGameConfig, fetchRewardConfig, drawReward, GameRewardModeEnum, RewardItem } from './api';
 import type { ClearAction, ModeDriver, ToolButtonSpec, ToolType } from './ModeDriver';
 import { DEFAULT_LAYER_RULES, LayerRules } from './ModeDriver';
 import { PropStore } from './PropStore';
@@ -7,7 +7,7 @@ import { PropStore } from './PropStore';
  * 无限模式驱动：进度永久累积，存 user_progress.level_num。
  *
  * 道具规则：三个道具全部不限次。
- * 按钮代价按优先级：免费道具 > 求助好友（当日独立额度）> 扣小太阳 > 看广告兜底。
+ * 按钮代价按优先级：免费道具 > 求助好友（当日独立额度）> 看广告兜底。
  */
 export class EndlessDriver implements ModeDriver {
     readonly mode = 'endless' as const;
@@ -35,6 +35,20 @@ export class EndlessDriver implements ModeDriver {
     /** 无限模式没有终点，每关都弹常规过关弹窗 */
     getClearAction(_clearedLevel: number): ClearAction {
         return 'modal';
+    }
+
+    /**
+     * 过关结算奖励（mode=2 配置）：普通关=[金币]；5 的倍数关=[金币, 按权重抽1个]。
+     * 接口无副作用，实际发放由 GameManager 处理。
+     */
+    async getClearReward(clearedLevel: number): Promise<RewardItem[] | null> {
+        const fixed = await fetchRewardConfig(GameRewardModeEnum.ENDLESS_CHALLENGE);
+        const list: RewardItem[] = fixed ? [fixed] : [];
+        if (clearedLevel % 5 === 0) {
+            const drawn = await drawReward(GameRewardModeEnum.ENDLESS_CHALLENGE, 2, 1);
+            if (drawn) list.push(...drawn);
+        }
+        return list.length > 0 ? list : null;
     }
 
     // ===== 道具限次：全部不限 =====
@@ -146,10 +160,9 @@ export class EndlessDriver implements ModeDriver {
      * 独立按钮文案优先级规则：
      * 1. 背包有该道具的免费次数 → 「免费使用」
      * 2. 当日求助未满 → 「求助好友」
-     * 3. 小太阳付得起 → 动作名 + 太阳价格（点击扣太阳）
-     * 4. 兜底 → 动作名（点击看广告，按钮右上角带视频小图标）
+     * 3. 兜底 → 动作名（点击看广告，按钮右上角带视频小图标）
      */
-    getActionButton(tool: ToolType, cost: number, totalSuns: number): ToolButtonSpec {
+    getActionButton(tool: ToolType): ToolButtonSpec {
         if (PropStore.getToolCount(tool) > 0) {
             return { text: '免费使用', pay: 'free' };
         }
@@ -157,9 +170,6 @@ export class EndlessDriver implements ModeDriver {
             return { text: '求助好友', pay: 'help' };
         }
         const actionName = tool === 'addBasket' ? '加果篮' : (tool === 'smash' ? '砸板子' : (tool === 'addTray' ? '加果盘' : '清空果盘'));
-        if (totalSuns >= cost) {
-            return { text: actionName, pay: 'suns', cost };
-        }
         return { text: actionName, pay: 'ad' };
     }
 }

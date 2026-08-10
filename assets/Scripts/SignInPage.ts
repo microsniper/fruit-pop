@@ -16,7 +16,7 @@ const CLAIM_TIPS: Partial<Record<ResourceCodeTypeEnum, string>> = {
  * 奖励图由后端配置下发（OSS CDN），奖励状态全存前端本地：
  * - signInState = { days: 累计已签天数(1~7，满 7 轮回), lastDate: 最后签到日期 }
  * - 断签只累加不重置；删除小程序（存储清空）从第 1 天重新签
- * 发放全部纯前端：sun→小太阳；smash/clear/add→道具背包；rainbow/bomb→特殊果背包（PropStore）。
+ * 发放全部纯前端：sun→金币（枚举值 SUN 为后端契约字符串，不改）；smash/clear/add→道具背包；rainbow/bomb→特殊果背包（PropStore）。
  */
 export class SignInPage {
 
@@ -226,7 +226,7 @@ export class SignInPage {
             if (this.gm.modalLayerNode && this.gm.modalLayerNode.isValid) {
                 this.gm.modalLayerNode.removeAllChildren();
             }
-            this.gm.showSunShortageTip(claimTip);
+            this.gm.showCoinShortageTip(claimTip);
             return;
         }
 
@@ -247,26 +247,26 @@ export class SignInPage {
             .start();
     }
 
-    /** 按 rewardType 发放奖励，返回上飘文案（太阳类型走飞行动画不飘字） */
+    /** 按 rewardType 发放奖励，返回上飘文案（金币类型走飞行动画不飘字） */
     private grantReward(card: Node, item: SignInRewardItem): string {
         const amount = item.amount || 0;
         switch (item.rewardType) {
-            case ResourceCodeTypeEnum.SUN: {
+            case ResourceCodeTypeEnum.COIN: {
                 if (amount <= 0) return '';
-                const startSuns = this.gm.totalSuns;
-                this.gm.totalSuns += amount;
+                const startCoins = this.gm.totalCoins;
+                this.gm.totalCoins += amount;
                 if (typeof wx !== 'undefined' && wx.setStorageSync) {
-                    wx.setStorageSync('totalSuns', this.gm.totalSuns.toString());
+                    wx.setStorageSync('totalCoins', this.gm.totalCoins.toString());
                 } else {
-                    localStorage.setItem('totalSuns', this.gm.totalSuns.toString());
+                    localStorage.setItem('totalCoins', this.gm.totalCoins.toString());
                 }
                 const worldPos = card.getComponent(UITransform)!.convertToWorldSpaceAR(new Vec3(0, 0, 0));
-                this.gm.playDailyRewardSunFly(worldPos, startSuns, amount, () => {});
+                this.gm.playDailyRewardCoinFly(worldPos, startCoins, amount, () => {});
                 return '';
             }
-            case ResourceCodeTypeEnum.SMASH:
-                PropStore.addTools('smash', amount);
-                return `+${amount} 砸板子道具`;
+            case ResourceCodeTypeEnum.ADD_TRAY:
+                PropStore.addTools('addTray', amount);
+                return `+${amount} 加果盘道具`;
             case ResourceCodeTypeEnum.CLEAR:
                 PropStore.addTools('clear', amount);
                 return `+${amount} 清空果盘道具`;
@@ -279,7 +279,7 @@ export class SignInPage {
             case ResourceCodeTypeEnum.BOMB:
                 PropStore.addFruits('bomb', amount);
                 return `+${amount} 炸弹果`;
-            case ResourceCodeTypeEnum.COMBO:
+            case ResourceCodeTypeEnum.RAINBOW_BOMB:
                 PropStore.addFruits('rainbow', amount);
                 PropStore.addFruits('bomb', amount);
                 return `+${amount} 彩虹果 +${amount} 炸弹果`;

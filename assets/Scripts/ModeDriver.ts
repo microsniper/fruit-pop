@@ -8,7 +8,7 @@
  * 当前实现：EndlessDriver（无限模式，道具不限次）；DailyDriver（每日挑战，每局限次+求助好友）。
  */
 
-import type { HelpMode } from './api';
+import type { HelpMode, RewardItem } from './api';
 
 /** 道具类型（道具弹窗共用） */
 export type ToolType = 'addBasket' | 'smash' | 'clear' | 'addTray';
@@ -42,14 +42,13 @@ export const DEFAULT_LAYER_RULES: LayerRules = {
  */
 export type ClearAction = 'modal' | 'autoAdvance' | 'finish';
 
-/** 分离式独立按钮的点击付费方式：free=免费道具；help=求助好友；suns=扣小太阳；ad=看广告兜底 */
-export type ToolButtonPay = 'free' | 'help' | 'suns' | 'ad';
+/** 分离式独立按钮的点击付费方式：free=免费道具；help=求助好友；ad=看广告兜底 */
+export type ToolButtonPay = 'free' | 'help' | 'ad';
 
-/** 分离式独立按钮展示态：文案 + 点击后实际走的付费方式；cost 仅 suns 态使用 */
+/** 分离式独立按钮展示态：文案 + 点击后实际走的付费方式 */
 export interface ToolButtonSpec {
     text: string;
     pay: ToolButtonPay;
-    cost?: number;
 }
 
 export interface ModeDriver {
@@ -138,8 +137,20 @@ export interface ModeDriver {
     getPanelHeight(tool: ToolType): number;
     /**
      * 分离式按钮展示态：弹窗只含标题/示意图，面板下方渲染一个独立操作按钮（btn_action）。
-     * 文案优先级：免费道具 > 求助好友 > 小太阳购买（cost 为该道具太阳价）> 看广告兜底。
-     * totalSuns 供小太阳支付能力判断（每日挑战忽略）。
+     * 文案优先级：免费道具 > 求助好友 > 看广告兜底。
      */
-    getActionButton(tool: ToolType, cost: number, totalSuns: number): ToolButtonSpec;
+    getActionButton(tool: ToolType): ToolButtonSpec;
+
+    // ===== 过关奖励（可选：目前仅每日挑战实现，无限模式暂不支持）=====
+    /**
+     * 领取过关奖励：stage=1 查阶段1固定奖励（金币，单元素数组），stage=2 按权重无放回抽多条道具/皮肤。
+     * 配置在数据库，接口本身无副作用；调用方负责把结果实际发放到本地 PropStore/totalCoins。
+     */
+    claimStageReward?(stage: number): Promise<RewardItem[] | null>;
+
+    /**
+     * 过关一次性结算奖励（无限模式用）：普通关=[金币]，5 的倍数关=[金币, 按权重抽1个]。
+     * 配置在数据库按 mode 区分，接口无副作用；调用方负责发放。
+     */
+    getClearReward?(clearedLevel: number): Promise<RewardItem[] | null>;
 }

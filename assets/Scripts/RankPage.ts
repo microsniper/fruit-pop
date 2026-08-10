@@ -175,9 +175,17 @@ export class RankPage {
 
     private getRankDisplayName(item: RankItem): string {
         const nick = (item.nickname || '').trim();
-        if (nick) return nick.substring(0, 8);
-        const seed = Number(item.userId) || 0;
-        return `玩家${(seed * 73 + 1357) % 9000 + 1000}`;
+        // 未授权昵称：只显示「玩家」，不带数字后缀
+        return nick ? nick.substring(0, 8) : '玩家';
+    }
+
+    /** 排名行配色：自己=橙、前三名=金/银/铜、其余浅灰 */
+    private rowColors(rank: number, isMe: boolean): { bg: Color; text: Color } {
+        if (isMe) return { bg: new Color(255, 150, 0, 255), text: new Color(255, 255, 255, 255) };
+        if (rank === 1) return { bg: new Color(255, 200, 60, 255), text: new Color(110, 75, 45, 255) };
+        if (rank === 2) return { bg: new Color(215, 222, 228, 255), text: new Color(90, 100, 110, 255) };
+        if (rank === 3) return { bg: new Color(226, 168, 110, 255), text: new Color(110, 75, 45, 255) };
+        return { bg: new Color(242, 244, 240, 255), text: new Color(80, 100, 70, 255) };
     }
 
     // ===== 页面骨架 + Tab =====
@@ -198,8 +206,8 @@ export class RankPage {
         bg.getComponent(Graphics)!.rect(-pageW / 2, -pageH / 2, pageW, pageH);
         bg.getComponent(Graphics)!.fill();
 
-        // 顶部导航
-        const headerY = pageH / 2 - 40;
+        // 顶部导航（下移避刘海屏安全区）
+        const headerY = pageH / 2 - 80;
         const backBtn = this.gm.createNode('BackBtn', this.pageNode, -pageW / 2 + 30, headerY, 40, 40);
         this.gm.createLabel(backBtn, '❮', 0, 0, 24, new Color(100, 120, 90, 255), true);
         backBtn.on(Node.EventType.TOUCH_END, () => {
@@ -293,26 +301,20 @@ export class RankPage {
         const pageH = this.gm.screenHeight;
         const padX = 20;
         const listW = pageW - padX * 2;
-        const headerY = pageH / 2 - 40;
+        const headerY = pageH / 2 - 80;
         const data = this.endlessCache!;
         const list = data.list || [];
         const myRank = data.myRank;
 
-        // 列表底板
+        // 列表区域（卡片行直接铺在页面背景上，无大底板）
         const topY = headerY - 40;
         const myCardH = myRank ? 90 : 20;
         const listBgH = pageH / 2 + topY;
-        const listBgCenterY = topY - listBgH / 2;
-        const listBg = this.gm.createGraphicsNode('ListBg', parent, pageW, listBgH, 0, listBgCenterY);
-        const g = listBg.getComponent(Graphics)!;
-        g.fillColor = new Color(255, 255, 255, 255);
-        g.roundRect(-pageW / 2, -listBgH / 2, pageW, listBgH, 20);
-        g.fill();
+        const viewH = listBgH - 20 - myCardH;
+        const viewY = topY - listBgH / 2 - 10 + myCardH / 2;
 
         // ScrollView
-        const itemH = 60;
-        const viewH = listBgH - 20 - myCardH;
-        const viewY = listBgCenterY - 10 + myCardH / 2;
+        const itemH = 64;
         const scrollNode = this.gm.createNode('ScrollView', parent, 0, viewY, pageW, viewH);
         const scrollView = scrollNode.addComponent(ScrollView);
         scrollView.horizontal = false;
@@ -333,10 +335,14 @@ export class RankPage {
             const y = -i * itemH - itemH / 2;
             const leftX = -listW / 2 + 16;
             const isMe = !!item.isMe;
+            const colors = this.rowColors(item.rank, isMe);
+
+            // 行卡片
+            const rowBg = this.gm.createGraphicsNode('RowBg', contentNode, listW, 56, 0, y);
+            this.gm.drawRoundedRect(rowBg.getComponent(Graphics)!, listW, 56, colors.bg, 12);
 
             // 排名
-            const rankColor = isMe ? new Color(255, 150, 0, 255) : new Color(120, 140, 110, 255);
-            const rl = this.gm.createLabel(contentNode, `${item.rank}`, leftX + 8, y, 18, rankColor, true);
+            const rl = this.gm.createLabel(contentNode, `${item.rank}`, leftX + 8, y, 18, colors.text, true);
             rl.horizontalAlign = 0;
             rl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
@@ -345,24 +351,15 @@ export class RankPage {
 
             // 昵称
             const nick = this.getRankDisplayName(item);
-            const nameColor = isMe ? new Color(200, 140, 30, 255) : new Color(80, 100, 70, 255);
-            const nl = this.gm.createLabel(contentNode, nick, leftX + 82, y, 15, nameColor, isMe);
+            const nl = this.gm.createLabel(contentNode, nick, leftX + 82, y, 15, colors.text, isMe);
             nl.horizontalAlign = 0;
             nl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
             // 关卡数
             const rightX = listW / 2 - 16;
-            const vl = this.gm.createLabel(contentNode, `${item.levelNum}关`, rightX, y, 17, nameColor, true);
+            const vl = this.gm.createLabel(contentNode, `${item.levelNum}关`, rightX, y, 17, colors.text, true);
             vl.horizontalAlign = 2;
             vl.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
-
-            // 分割线
-            if (i < list.length - 1) {
-                const line = this.gm.createGraphicsNode('Line', contentNode, listW, 1, 0, y - itemH / 2);
-                line.getComponent(Graphics)!.fillColor = new Color(240, 245, 235, 255);
-                line.getComponent(Graphics)!.rect(-listW / 2, -0.5, listW, 1);
-                line.getComponent(Graphics)!.fill();
-            }
         }
 
         // 底部我的排名
@@ -378,26 +375,20 @@ export class RankPage {
         const pageH = this.gm.screenHeight;
         const padX = 20;
         const listW = pageW - padX * 2;
-        const headerY = pageH / 2 - 40;
+        const headerY = pageH / 2 - 80;
         const data = this.dailyCache!;
         const list = data.list || [];
         const myRank = data.myRank;
 
-        // 列表底板
+        // 列表区域（卡片行直接铺在页面背景上，无大底板）
         const topY = headerY - 40;
         const myCardH = myRank ? 90 : 40;
         const listBgH = pageH / 2 + topY;
-        const listBgCenterY = topY - listBgH / 2;
-        const listBg = this.gm.createGraphicsNode('ListBg', parent, pageW, listBgH, 0, listBgCenterY);
-        const g = listBg.getComponent(Graphics)!;
-        g.fillColor = new Color(255, 255, 255, 255);
-        g.roundRect(-pageW / 2, -listBgH / 2, pageW, listBgH, 20);
-        g.fill();
+        const viewH = listBgH - 20 - myCardH;
+        const viewY = topY - listBgH / 2 - 10 + myCardH / 2;
 
         // ScrollView
-        const itemH = 60;
-        const viewH = listBgH - 20 - myCardH;
-        const viewY = listBgCenterY - 10 + myCardH / 2;
+        const itemH = 64;
         const scrollNode = this.gm.createNode('ScrollView', parent, 0, viewY, pageW, viewH);
         const scrollView = scrollNode.addComponent(ScrollView);
         scrollView.horizontal = false;
@@ -418,32 +409,27 @@ export class RankPage {
             const y = -i * itemH - itemH / 2;
             const leftX = -listW / 2 + 16;
             const isMe = !!item.isMe;
+            const colors = this.rowColors(item.rank, isMe);
+
+            // 行卡片
+            const rowBg = this.gm.createGraphicsNode('RowBg', contentNode, listW, 56, 0, y);
+            this.gm.drawRoundedRect(rowBg.getComponent(Graphics)!, listW, 56, colors.bg, 12);
 
             // 排名
-            const rankColor = isMe ? new Color(255, 150, 0, 255) : new Color(120, 140, 110, 255);
-            const rl = this.gm.createLabel(contentNode, `${item.rank}`, leftX + 8, y, 18, rankColor, true);
+            const rl = this.gm.createLabel(contentNode, `${item.rank}`, leftX + 8, y, 18, colors.text, true);
             rl.horizontalAlign = 0;
             rl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
             // 省份名
-            const nameColor = isMe ? new Color(200, 140, 30, 255) : new Color(80, 100, 70, 255);
-            const nl = this.gm.createLabel(contentNode, item.regionName || '未知', leftX + 50, y, 17, nameColor, isMe);
+            const nl = this.gm.createLabel(contentNode, item.regionName || '未知', leftX + 50, y, 17, colors.text, isMe);
             nl.horizontalAlign = 0;
             nl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
             // 通关人数
             const rightX = listW / 2 - 16;
-            const vl = this.gm.createLabel(contentNode, `${item.clearCount}人通关`, rightX, y, 15, nameColor, true);
+            const vl = this.gm.createLabel(contentNode, `${item.clearCount}人通关`, rightX, y, 15, colors.text, true);
             vl.horizontalAlign = 2;
             vl.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
-
-            // 分割线
-            if (i < list.length - 1) {
-                const line = this.gm.createGraphicsNode('Line', contentNode, listW, 1, 0, y - itemH / 2);
-                line.getComponent(Graphics)!.fillColor = new Color(240, 245, 235, 255);
-                line.getComponent(Graphics)!.rect(-listW / 2, -0.5, listW, 1);
-                line.getComponent(Graphics)!.fill();
-            }
         }
 
         // 底部我的省份
