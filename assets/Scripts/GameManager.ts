@@ -1,5 +1,6 @@
 import { _decorator, Component, Node, Vec2, Vec3, Size, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, view, Layers, Sprite, SpriteFrame, resources, ImageAsset, LabelOutline, UIOpacity, RigidBody2D, BoxCollider2D, CircleCollider2D, ERigidBody2DType, PhysicsSystem2D, assetManager, Texture2D } from 'cc';
-import { consumeShareCount, reportEvent, fetchGameConfig, GameConfig, getDailyHelpStatus, getGameConfig, hasUserProfile, updateProfile, useDailyHelp, fetchResources, fetchShopList, ResourceCodeTypeEnum, getDailyStatus, DailyHelpResponse, RewardItem, ItemTypeEnum } from './api';
+import { consumeShareCount, reportEvent, fetchGameConfig, GameConfig, getDailyHelpStatus, getGameConfig, hasUserProfile, updateProfile, useDailyHelp, fetchResources, fetchShopList, fetchCollectList, ResourceCodeTypeEnum, getDailyStatus, DailyHelpResponse, RewardItem, ItemTypeEnum } from './api';
+import { CollectStore } from './CollectStore';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
 import { BundleManager } from './BundleManager';
@@ -957,6 +958,97 @@ export class GameManager extends Component {
     }
 
     /**
+     * 图片放大预览：纯图不带文字/按钮，遮罩或图片本身点击即关闭。
+     * 商城/仓库的收集品图标点开看大图用，imageUrl 空则不弹（调用方兜底判断）。
+     */
+    public renderImagePreview(imageUrl: string) {
+        if (!this.modalLayerNode || !imageUrl) return;
+        this.modalLayerNode.removeAllChildren();
+
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 200), 0);
+        mask.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode!.removeAllChildren();
+        }, this);
+
+        // 大图：正方形安全尺寸（屏宽的 78%），加载后按实际比例校正，避免拉伸变形
+        const size = Math.min(this.screenWidth, this.screenHeight) * 0.78;
+        const imgNode = this.createNode('PreviewImg', this.modalLayerNode, 0, 0, size, size);
+        const imgTransform = imgNode.getComponent(UITransform)!;
+        const sprite = imgNode.addComponent(Sprite);
+        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        this.loadRemoteImage(imageUrl, sprite, () => {
+            // 加载失败：关掉这个空壳弹窗，不留一张打不开的黑框
+            if (this.modalLayerNode) this.modalLayerNode.removeAllChildren();
+        });
+        imgNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+            this.modalLayerNode!.removeAllChildren();
+        }, this);
+
+        imgNode.setScale(new Vec3(0.7, 0.7, 1));
+        tween(imgNode).to(0.22, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+    }
+
+    /**
+     * 伙伴详情弹窗：大图 + 名字 + 「应用于游戏」按钮。仓库页收集格子整块点击打开，
+     * 点按钮把这个伙伴设为当前展示（回调交给调用方处理，这里不关心 CollectStore）。
+     */
+    public renderCollectDetail(name: string, imageUrl: string, onApply: () => void) {
+        if (!this.modalLayerNode) return;
+        this.modalLayerNode.removeAllChildren();
+
+        const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
+        this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 200), 0);
+        mask.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode!.removeAllChildren();
+        }, this);
+
+        const panelW = Math.min(300, this.screenWidth * 0.82);
+        const panelH = panelW * 1.25;
+        const panelNode = this.createNode('CollectDetailPanel', this.modalLayerNode, 0, 0, panelW, panelH);
+        const panelBg = this.createGraphicsNode('PanelBg', panelNode, panelW, panelH, 0, 0);
+        this.drawRoundedRect(panelBg.getComponent(Graphics)!, panelW, panelH, new Color(250, 248, 240, 255), 24);
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 大图：正方形，占面板上半部分
+        const imgSize = panelW * 0.72;
+        const imgY = panelH / 2 - imgSize / 2 - 24;
+        const imgNode = this.createNode('DetailImg', panelNode, 0, imgY, imgSize, imgSize);
+        const sprite = imgNode.addComponent(Sprite);
+        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        if (imageUrl) {
+            this.loadRemoteImage(imageUrl, sprite, () => {
+                if (!imgNode.isValid) return;
+                const ph = imgNode.addComponent(Graphics);
+                ph.fillColor = new Color(220, 214, 198, 255);
+                ph.circle(0, 0, imgSize / 2 - 4);
+                ph.fill();
+            });
+        }
+
+        // 名字：图下方
+        this.createLabel(panelNode, name, 0, imgY - imgSize / 2 - 30, 22, new Color(96, 64, 32, 255), true);
+
+        // 应用于游戏按钮
+        const btnY = -panelH / 2 + 46;
+        const btnNode = this.createNode('BtnApply', panelNode, 0, btnY, panelW * 0.64, 48);
+        const btnBg = this.createGraphicsNode('BtnBg', btnNode, panelW * 0.64, 48, 0, 0);
+        this.drawRoundedRect(btnBg.getComponent(Graphics)!, panelW * 0.64, 48, new Color(255, 150, 60, 255), 24);
+        this.createLabel(btnNode, '应用于游戏', 0, 0, 18, new Color(255, 255, 255, 255), true);
+        btnNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+            onApply();
+            if (this.modalLayerNode) this.modalLayerNode.removeAllChildren();
+        }, this);
+
+        panelNode.setScale(new Vec3(0.7, 0.7, 1));
+        tween(panelNode).to(0.22, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+    }
+
+    /**
      * 通用提示弹窗：panel_common_tip.png（标题“提示”与“知道了”按钮已画在图里）
      * 内容文案写在白色面板区域，点“知道了”关闭。新手/彩虹果/挑战关提示共用。
      */
@@ -1671,21 +1763,10 @@ export class GameManager extends Component {
         const container = this.createNode('CatProgressIcon', this.boardAreaNode, x, y, iconSize, iconSize);
         this.catIconNode = container;
 
-        // 灰色底图：常驻显示，代表「未点亮」部分。图片本身不是正方形（Creator 自动 trim 掉透明边后
-        // 实际内容是瘦高的猫咪轮廓），固定显示高度=iconSize，宽度按 sf.rect 实际比例换算，
-        // 避免 CUSTOM 模式把节点尺寸和图片比例不一致的部分强行拉伸变形
+        // 灰色底图：常驻显示，代表「未点亮」部分
         const grayNode = this.createNode('CatGray', container, 0, 0, iconSize, iconSize);
         const graySprite = grayNode.addComponent(Sprite);
         graySprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        BundleManager.getInstance().loadAsset<SpriteFrame>('gift/icon_cat_gray/spriteFrame', SpriteFrame).then((sf) => {
-            if (sf && graySprite && graySprite.isValid) {
-                graySprite.spriteFrame = sf;
-                const rect = sf.rect;
-                if (rect && rect.height > 0) {
-                    grayNode.getComponent(UITransform)!.setContentSize(iconSize * (rect.width / rect.height), iconSize);
-                }
-            }
-        }).catch(() => {});
 
         // 彩色遮罩：Mask 节点锚点设为底边中心（0.5,0），固定在容器底部，
         // 之后只改高度（setContentSize）就能让裁切区域从底边往上长，不用每次都重算位置。
@@ -1694,25 +1775,54 @@ export class GameManager extends Component {
         maskNode.getComponent(UITransform)!.setAnchorPoint(0.5, 0);
         maskNode.addComponent(Mask);
         this.catColorMaskNode = maskNode;
-        // colorNode 相对 maskNode 的底边锚点定位：整张彩色图完整贴住底边往上铺满 iconSize 高度，
-        // 宽度同样按 sf.rect 实际比例换算，加载完成后连带修正 maskNode 的裁切宽度
         const colorNode = this.createNode('CatColor', maskNode, 0, 0, iconSize, iconSize);
         colorNode.getComponent(UITransform)!.setAnchorPoint(0.5, 0);
         const colorSprite = colorNode.addComponent(Sprite);
         colorSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        BundleManager.getInstance().loadAsset<SpriteFrame>('gift/icon_cat_color/spriteFrame', SpriteFrame).then((sf) => {
-            if (sf && colorSprite && colorSprite.isValid) {
-                colorSprite.spriteFrame = sf;
-                const rect = sf.rect;
-                if (rect && rect.height > 0) {
-                    const w = iconSize * (rect.width / rect.height);
-                    colorNode.getComponent(UITransform)!.setContentSize(w, iconSize);
-                    if (maskNode.isValid) {
-                        maskNode.getComponent(UITransform)!.width = w;
+        // 遮罩宽度先按满宽算好，彩色图不管走本地图（换算实际比例）还是远程图（固定方形）都不用额外改宽度
+        maskNode.getComponent(UITransform)!.width = iconSize;
+
+        // 图片本身不是正方形（Creator 自动 trim 掉透明边后实际内容是瘦高的猫咪轮廓），
+        // 固定显示高度=iconSize，宽度按 sf.rect 实际比例换算，避免 CUSTOM 模式强行拉伸变形
+        const loadLocalFallback = () => {
+            BundleManager.getInstance().loadAsset<SpriteFrame>('gift/icon_cat_gray/spriteFrame', SpriteFrame).then((sf) => {
+                if (sf && graySprite && graySprite.isValid) {
+                    graySprite.spriteFrame = sf;
+                    const rect = sf.rect;
+                    if (rect && rect.height > 0) {
+                        grayNode.getComponent(UITransform)!.setContentSize(iconSize * (rect.width / rect.height), iconSize);
                     }
                 }
+            }).catch(() => {});
+            BundleManager.getInstance().loadAsset<SpriteFrame>('gift/icon_cat_color/spriteFrame', SpriteFrame).then((sf) => {
+                if (sf && colorSprite && colorSprite.isValid) {
+                    colorSprite.spriteFrame = sf;
+                    const rect = sf.rect;
+                    if (rect && rect.height > 0) {
+                        const w = iconSize * (rect.width / rect.height);
+                        colorNode.getComponent(UITransform)!.setContentSize(w, iconSize);
+                        if (maskNode.isValid) {
+                            maskNode.getComponent(UITransform)!.width = w;
+                        }
+                    }
+                }
+            }).catch(() => {});
+        };
+
+        // 收集品仓库接管：新用户补领默认玩偶后取当前展示项的远程图；本地无拥有记录/目录未配置/加载失败
+        // 均退回本地写死的猫图（老用户、后端未配置 game_collect 灰彩图字段时不受影响）
+        fetchCollectList().then((catalog) => {
+            CollectStore.grantIfEmpty(catalog);
+            const current = CollectStore.getCurrentCollect(catalog);
+            if (!current || !current.grayUrl || !current.colorUrl) {
+                loadLocalFallback();
+                return;
             }
-        }).catch(() => {});
+            this.loadRemoteImage(current.grayUrl, graySprite, loadLocalFallback);
+            this.loadRemoteImage(current.colorUrl, colorSprite, loadLocalFallback);
+        }).catch(() => {
+            loadLocalFallback();
+        });
 
         this.catPercentLabel = this.createLabel(container, '0%', 0, -iconSize / 2 - 14, 14, new Color(80, 60, 35, 255), true);
         this.updateCatProgress();
@@ -6647,7 +6757,7 @@ export class GameManager extends Component {
     }
 
     /** 绘制五角星 */
-    private drawStar(graphics: Graphics, size: number, fill: Color) {
+    public drawStar(graphics: Graphics, size: number, fill: Color) {
         graphics.clear();
         graphics.fillColor = fill;
         const spikes = 5;

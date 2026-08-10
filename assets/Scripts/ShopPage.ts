@@ -1,6 +1,8 @@
-import { Node, Color, Graphics, Sprite, SpriteFrame, Label, UITransform } from 'cc';
+import { Node, Color, Graphics, Sprite, SpriteFrame, Label, UITransform, UIOpacity, tween, ScrollView, Mask } from 'cc';
 import { fetchShopList, ShopItem, ItemTypeEnum, RewardItem } from './api';
 import { BundleManager } from './BundleManager';
+import { CollectStore } from './CollectStore';
+import { drawTitlePlate, drawSegmentedTabs } from './PageTabs';
 import type { GameManager } from './GameManager';
 
 /**
@@ -76,7 +78,7 @@ export class ShopPage {
             this.close();
             this.gm.homePage.render();
         }, this);
-        this.gm.createLabel(this.pageNode, '商城', 0, headerY, 26, BROWN, true);
+        drawTitlePlate(this.gm, this.pageNode, headerY, '商城');
         this.balanceLabel = this.gm.createLabel(this.pageNode, `金币 x${this.gm.totalCoins}`, pageW / 2 - 20, headerY, 15, new Color(200, 140, 30, 255), true);
         this.balanceLabel.horizontalAlign = 2; // RIGHT
         this.balanceLabel.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
@@ -84,6 +86,16 @@ export class ShopPage {
         // 主 tab
         this.tabY = headerY - 56;
         this.renderMainTabs();
+
+        // 掉落提示：主 tab 下方、内容列表上方，页面级别只画一次（不随 tab 切换重画），橙色呼吸小字
+        const dropLabel = this.gm.createLabel(this.pageNode, '可通过每日挑战/无限模式掉落', 0, this.tabY - 50, 15, ORANGE, false);
+        const dropOpacity = dropLabel.node.addComponent(UIOpacity);
+        tween(dropOpacity)
+            .to(0.9, { opacity: 100 }, { easing: 'sineInOut' })
+            .to(0.9, { opacity: 255 }, { easing: 'sineInOut' })
+            .union()
+            .repeatForever()
+            .start();
 
         // 内容层（目录异步拉取后填充）
         this.contentNode = this.gm.createNode('ShopContent', this.pageNode, 0, 0, pageW, pageH);
@@ -96,36 +108,16 @@ export class ShopPage {
     }
 
     private renderMainTabs() {
-        ['MainTab_tools', 'MainTab_collect'].forEach((n) => {
-            const old = this.pageNode?.getChildByName(n);
-            if (old) old.destroy();
-        });
-        const tabs: { key: 'tools' | 'collect'; name: string; x: number }[] = [
-            { key: 'tools', name: '道具', x: -62 },
-            { key: 'collect', name: '收集', x: 62 },
-        ];
-        tabs.forEach((tab) => {
-            const active = this.mainTab === tab.key;
-            const pill = this.gm.createNode(`MainTab_${tab.key}`, this.pageNode!, tab.x, this.tabY, 112, 38);
-            const g = pill.addComponent(Graphics);
-            g.fillColor = active ? BLUE : BEIGE;
-            g.roundRect(-56, -19, 112, 38, 19);
-            g.fill();
-            if (!active) {
-                g.strokeColor = BEIGE_LINE;
-                g.lineWidth = 2;
-                g.roundRect(-56, -19, 112, 38, 19);
-                g.stroke();
+        drawSegmentedTabs(
+            this.gm, this.pageNode!, 'MainSegBar', this.tabY,
+            [{ key: 'tools', name: '道具' }, { key: 'collect', name: '收集' }],
+            this.mainTab, 'main',
+            (key) => {
+                this.mainTab = key as 'tools' | 'collect';
+                this.renderMainTabs();
+                this.renderContent();
             }
-            this.gm.createLabel(pill, tab.name, 0, 0, 18, active ? new Color(255, 255, 255, 255) : BROWN, true);
-            pill.on(Node.EventType.TOUCH_END, () => {
-                if (this.mainTab !== tab.key) {
-                    this.mainTab = tab.key;
-                    this.renderMainTabs();
-                    this.renderContent();
-                }
-            }, this);
-        });
+        );
     }
 
     // ===== 内容层 =====
@@ -140,111 +132,131 @@ export class ShopPage {
         }
     }
 
-    /** 道具商城行：图标 + 名称 + 价格 + 购买按钮 */
+    /** 道具商城：一行两卡（名称/图片/价格/购买），超出屏幕可滚动 */
     private renderToolsShop() {
         const items = this.shopList.filter((s) => s.category === 1);
-        const firstRowY = this.tabY - 66;
-        items.forEach((item, i) => {
-            const y = firstRowY - i * 76;
-            this.drawShopRow(item, y);
-        });
+        const topY = this.tabY - 70;
         if (items.length === 0) {
-            this.gm.createLabel(this.contentNode!, '暂无上架道具', 0, firstRowY - 40, 15, new Color(150, 160, 140, 255), true);
+            this.gm.createLabel(this.contentNode!, '暂无上架道具', 0, topY - 40, 15, new Color(150, 160, 140, 255), true);
+            return;
         }
+        this.renderCardGrid(items, topY);
     }
 
     /** 收集商城：按 groupCode 分子 tab；无数据时占位分组+敬请期待 */
     private renderCollectShop() {
         const collectItems = this.shopList.filter((s) => s.category === 2);
         const groups = collectItems.length > 0
-            ? Array.from(new Map(collectItems.map((c) => [c.groupCode, { key: c.groupCode, name: this.groupName(c.groupCode) }])).values())
+            ? Array.from(new Map(collectItems.map((c) => [c.groupCode, { key: c.groupCode, name: c.groupName }])).values())
             : COLLECT_GROUP_FALLBACK;
         if (!groups.some((g) => g.key === this.subTab)) this.subTab = groups[0]?.key || 'animal';
 
-        const subY = this.tabY - 56;
-        const gap = 8;
-        const pillW = Math.min(100, (300 - gap * (groups.length - 1)) / groups.length);
-        const startX = -((pillW * groups.length + gap * (groups.length - 1)) / 2) + pillW / 2;
-        groups.forEach((group, gi) => {
-            const active = this.subTab === group.key;
-            const pill = this.gm.createNode(`SubTab_${group.key}`, this.contentNode!, startX + gi * (pillW + gap), subY, pillW, 34);
-            const g = pill.addComponent(Graphics);
-            g.fillColor = active ? BLUE : BEIGE;
-            g.roundRect(-pillW / 2, -17, pillW, 34, 17);
-            g.fill();
-            if (!active) {
-                g.strokeColor = BEIGE_LINE;
-                g.lineWidth = 2;
-                g.roundRect(-pillW / 2, -17, pillW, 34, 17);
-                g.stroke();
+        const subY = this.tabY - 80;
+        // 子 tab 分段条（二级导航：小一号、米色容器、橙色选中段）
+        drawSegmentedTabs(
+            this.gm, this.contentNode!, 'SubSegBar', subY,
+            groups, this.subTab, 'sub',
+            (key) => {
+                this.subTab = key;
+                this.renderContent();
             }
-            this.gm.createLabel(pill, group.name, 0, 0, 16, active ? new Color(255, 255, 255, 255) : BROWN, true);
-            pill.on(Node.EventType.TOUCH_END, () => {
-                if (this.subTab !== group.key) {
-                    this.subTab = group.key;
-                    this.renderContent();
-                }
-            }, this);
-        });
+        );
 
         const rows = collectItems.filter((c) => c.groupCode === this.subTab);
-        const firstRowY = subY - 62;
+        const topY = subY - 40;
         if (rows.length === 0) {
-            this.gm.createLabel(this.contentNode!, '敬请期待', 0, firstRowY - 20, 15, new Color(150, 160, 140, 255), true);
+            this.gm.createLabel(this.contentNode!, '敬请期待', 0, topY - 40, 15, new Color(150, 160, 140, 255), true);
             return;
         }
-        rows.forEach((item, i) => {
-            const y = firstRowY - i * 76;
-            this.drawShopRow(item, y);
+        this.renderCardGrid(rows, topY);
+    }
+
+    /** 商品卡片网格：一行两张，内容自上而下 名称→图片→价格→购买按钮；行数超屏走 ScrollView */
+    private renderCardGrid(items: ShopItem[], topY: number) {
+        const pageW = this.gm.screenWidth;
+        const pageH = this.gm.screenHeight;
+        const cardW = 160, cardH = 176, gapX = 12, gapY = 12;
+        const pitch = cardH + gapY;
+        const rowCount = Math.ceil(items.length / 2);
+        const contentH = Math.max(rowCount * pitch + gapY, 100);
+
+        const bottomY = -pageH / 2 + 8;
+        const viewH = Math.max(topY - bottomY, 100);
+        const viewY = (topY + bottomY) / 2;
+        const scrollNode = this.gm.createNode('GridScroll', this.contentNode!, 0, viewY, pageW - 24, viewH);
+        const scrollView = scrollNode.addComponent(ScrollView);
+        scrollView.horizontal = false;
+        scrollView.vertical = true;
+        const viewNode = this.gm.createNode('View', scrollNode, 0, 0, pageW - 24, viewH);
+        const mask = viewNode.addComponent(Mask);
+        mask.type = Mask.Type.GRAPHICS_RECT;
+        const gridNode = this.gm.createNode('GridContent', viewNode, 0, 0, pageW - 24, contentH);
+        gridNode.getComponent(UITransform)!.setAnchorPoint(0.5, 1);
+        gridNode.setPosition(0, viewH / 2, 0);
+        scrollView.content = gridNode;
+
+        items.forEach((item, i) => {
+            const r = Math.floor(i / 2);
+            const c = i % 2;
+            const x = c === 0 ? -(cardW / 2 + gapX / 2) : (cardW / 2 + gapX / 2);
+            const y = -r * pitch - cardH / 2;
+            this.drawShopCard(gridNode, item, x, y);
         });
     }
 
-    private groupName(code: string): string {
-        const map: Record<string, string> = { animal: '动物', car: '豪车', house: '房子', doll: '公仔' };
-        return map[code] || code;
-    }
-
-    /** 商品行：卡片 + 图标 + 名称 + 价格 + 购买按钮 */
-    private drawShopRow(item: ShopItem, y: number) {
-        const pageW = this.gm.screenWidth;
-        const rowW = pageW - 40;
-        const row = this.gm.createNode(`ShopRow_${item.id}`, this.contentNode!, 0, y, rowW, 64);
-        const g = row.addComponent(Graphics);
+    /** 单张商品卡：米色圆角框，自上而下 名称→图片→价格→购买按钮 */
+    private drawShopCard(parent: Node, item: ShopItem, x: number, y: number) {
+        const cardW = 160, cardH = 176;
+        const card = this.gm.createNode(`ShopCard_${item.id}`, parent, x, y, cardW, cardH);
+        const g = card.addComponent(Graphics);
         g.fillColor = BEIGE;
-        g.roundRect(-rowW / 2, -32, rowW, 64, 12);
+        g.roundRect(-cardW / 2, -cardH / 2, cardW, cardH, 14);
         g.fill();
         g.strokeColor = BEIGE_LINE;
         g.lineWidth = 2;
-        g.roundRect(-rowW / 2, -32, rowW, 64, 12);
+        g.roundRect(-cardW / 2, -cardH / 2, cardW, cardH, 14);
         g.stroke();
 
-        // 图标
-        const imgNode = this.gm.createNode('Icon', row, -rowW / 2 + 34, 0, 44, 44);
+        // 名称（顶部居中）
+        this.gm.createLabel(card, item.name, 0, 66, 15, BROWN, true);
+
+        // 图片：收集品（category=2）点击可放大查看，道具不加此交互
+        const imgNode = this.gm.createNode('Icon', card, 0, 12, 72, 72);
         const imgSprite = imgNode.addComponent(Sprite);
         imgSprite.sizeMode = Sprite.SizeMode.CUSTOM;
         this.gm.loadRemoteImage(item.imageUrl, imgSprite, () => {
             if (!imgNode.isValid) return;
             const ph = imgNode.addComponent(Graphics);
             ph.fillColor = new Color(220, 214, 198, 255);
-            ph.circle(0, 0, 19);
+            ph.circle(0, 0, 30);
             ph.fill();
         });
+        if (item.category === 2 && item.imageUrl) {
+            imgNode.on(Node.EventType.TOUCH_END, (e: any) => {
+                e.propagationStopped = true;
+                this.gm.renderImagePreview(item.imageUrl);
+            }, this);
 
-        // 名称
-        const nameLabel = this.gm.createLabel(row, item.name, -rowW / 2 + 62, 0, 15, BROWN, true);
-        nameLabel.horizontalAlign = 0;
-        nameLabel.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+            // 右下角放大镜角标：纯视觉提示"这张图可以点开看大图"，本身不挂点击事件
+            const hintNode = this.gm.createNode('ZoomHint', card, 15 + 15, 12 - 28, 16, 16);
+            const hintG = hintNode.addComponent(Graphics);
+            hintG.strokeColor = ORANGE;
+            hintG.lineWidth = 2;
+            hintG.circle(-2, 2, 4.5);
+            hintG.stroke();
+            hintG.moveTo(1.5, -1.5);
+            hintG.lineTo(5, -5);
+            hintG.stroke();
+        }
 
         // 价格
-        const priceLabel = this.gm.createLabel(row, `${item.price}金币`, rowW / 2 - 84, 0, 14, new Color(200, 140, 30, 255), true);
-        priceLabel.horizontalAlign = 2;
-        priceLabel.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
+        this.gm.createLabel(card, `${item.price}金币`, 0, -36, 14, new Color(200, 140, 30, 255), true);
 
         // 购买按钮
-        const buyBtn = this.gm.createNode('BuyBtn', row, rowW / 2 - 40, 0, 64, 32);
+        const buyBtn = this.gm.createNode('BuyBtn', card, 0, -66, 84, 30);
         const bg2 = buyBtn.addComponent(Graphics);
         bg2.fillColor = ORANGE;
-        bg2.roundRect(-32, -16, 64, 32, 16);
+        bg2.roundRect(-42, -15, 84, 30, 15);
         bg2.fill();
         this.gm.createLabel(buyBtn, '购买', 0, 0, 15, new Color(255, 255, 255, 255), true);
         buyBtn.on(Node.EventType.TOUCH_END, () => this.onBuy(item), this);
@@ -362,6 +374,8 @@ export class ShopPage {
             if (item.category === 1 && item.resourceCode != null) {
                 const reward: RewardItem = { itemType: ItemTypeEnum.PROP, resourceCode: item.resourceCode, amount: qty, imageUrl: item.imageUrl };
                 this.gm.grantRewardSilently(reward);
+            } else if (item.category === 2 && item.collectId != null) {
+                CollectStore.own(item.collectId, qty);
             }
             this.gm.renderTools();
             layer.removeAllChildren();

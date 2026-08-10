@@ -1,30 +1,19 @@
 import { Node, Color, Graphics, Sprite, Label, UITransform } from 'cc';
-import { fetchResources, ResourceCodeTypeEnum } from './api';
+import { fetchResources, fetchCollectList, ResourceCodeTypeEnum, CollectItem } from './api';
 import { PropStore } from './PropStore';
+import { CollectStore } from './CollectStore';
+import { drawTitlePlate, drawSegmentedTabs } from './PageTabs';
 import type { GameManager } from './GameManager';
 
 /**
  * 个人仓库页：整页切换（与排行榜页同款架构），纯代码绘制、无底图素材。
- * 顶栏返回+标题；主 tab 横排「道具 | 收集」；收集页内横排子 tab「关卡收集 | 比赛收集」。
- * 格子全由数据数组驱动：道具 6 条固定目录（数量实时读 PropStore/totalCoins），
- * 收集目录 COLLECT_CATALOG 预留后端化（皮肤系统上线后随返回数据增减格子）。
- * 数据全本地，零后端依赖。
+ * 顶栏返回+标题；主 tab 横排「道具 | 收集」；收集页内横排子 tab 按 group_code 动态分组。
+ * 道具 6 条固定目录（数量实时读 PropStore/totalCoins）；
+ * 收集目录来自后端 game_collect 全量配置，拥有/当前展示状态读本地 CollectStore。
  */
 
-/** 收集品目录（code 与 game_collect.collect_code 对齐；group 与收集表 group_code 同口径） */
-const COLLECT_CATALOG = [
-    { code: 'cat', name: '小猫', group: 'animal' },
-    { code: 'dog', name: '小狗', group: 'animal' },
-    { code: 'car', name: '汽车', group: 'car' },
-    { code: 'doll', name: '公仔', group: 'doll' },
-];
-
-/** 收集分组显示名（顺序即子 tab 顺序） */
-const COLLECT_GROUPS = [
-    { key: 'animal', name: '动物' },
-    { key: 'car', name: '车辆' },
-    { key: 'doll', name: '公仔' },
-];
+/** 收集分组显示名兜底（后端目录为空时的占位子 tab） */
+const COLLECT_GROUP_FALLBACK = [{ key: 'animal', name: '动物' }];
 
 const BROWN = new Color(110, 75, 45, 255);
 const BEIGE = new Color(240, 230, 205, 255);
@@ -83,9 +72,9 @@ export class StoragePage {
             this.close();
             this.gm.homePage.render();
         }, this);
-        this.gm.createLabel(this.pageNode, '仓库', 0, headerY, 26, BROWN, true);
+        drawTitlePlate(this.gm, this.pageNode, headerY, '仓库');
 
-        // 主 tab：横排两药丸
+        // 主 tab：分段控制条（一级导航）
         this.tabY = headerY - 56;
         this.renderMainTabs();
 
@@ -94,39 +83,18 @@ export class StoragePage {
         this.renderContent();
     }
 
-    /** 主 tab 药丸（选中蓝底白字 / 未选中米色棕字），整块可点 */
+    /** 主 tab 分段条（选中蓝底白字 / 未选中浅灰字），整段可点 */
     private renderMainTabs() {
-        // 旧 tab 节点挂在 pageNode 上按名字清理
-        ['MainTab_tools', 'MainTab_collect'].forEach((n) => {
-            const old = this.pageNode?.getChildByName(n);
-            if (old) old.destroy();
-        });
-        const tabs: { key: 'tools' | 'collect'; name: string; x: number }[] = [
-            { key: 'tools', name: '道具', x: -62 },
-            { key: 'collect', name: '收集', x: 62 },
-        ];
-        tabs.forEach((tab) => {
-            const active = this.mainTab === tab.key;
-            const pill = this.gm.createNode(`MainTab_${tab.key}`, this.pageNode!, tab.x, this.tabY, 112, 38);
-            const g = pill.addComponent(Graphics);
-            g.fillColor = active ? BLUE : BEIGE;
-            g.roundRect(-56, -19, 112, 38, 19);
-            g.fill();
-            if (!active) {
-                g.strokeColor = BEIGE_LINE;
-                g.lineWidth = 2;
-                g.roundRect(-56, -19, 112, 38, 19);
-                g.stroke();
+        drawSegmentedTabs(
+            this.gm, this.pageNode!, 'MainSegBar', this.tabY,
+            [{ key: 'tools', name: '道具' }, { key: 'collect', name: '收集' }],
+            this.mainTab, 'main',
+            (key) => {
+                this.mainTab = key as 'tools' | 'collect';
+                this.renderMainTabs();
+                this.renderContent();
             }
-            this.gm.createLabel(pill, tab.name, 0, 0, 18, active ? new Color(255, 255, 255, 255) : BROWN, true);
-            pill.on(Node.EventType.TOUCH_END, () => {
-                if (this.mainTab !== tab.key) {
-                    this.mainTab = tab.key;
-                    this.renderMainTabs();
-                    this.renderContent();
-                }
-            }, this);
-        });
+        );
     }
 
     // ===== 内容层 =====
@@ -168,56 +136,68 @@ export class StoragePage {
         });
     }
 
-    /** 收集页：子 tab 按 group_code 分组（动物/车辆/公仔）+ 目录格子（收集系统未落地，全部置灰未拥有） */
+    /** 收集页：子 tab 按后端目录的 group_code 动态分组 + 格子（已拥有/未拥有读本地 CollectStore） */
     private renderCollectContent() {
         const subY = this.tabY - 56;
-        const groupCount = COLLECT_GROUPS.length;
-        const gap = 8;
-        const pillW = Math.min(128, (300 - gap * (groupCount - 1)) / groupCount);
-        const startX = -((pillW * groupCount + gap * (groupCount - 1)) / 2) + pillW / 2;
-        COLLECT_GROUPS.forEach((group, gi) => {
-            const active = this.subTab === group.key;
-            const pill = this.gm.createNode(`SubTab_${group.key}`, this.contentNode!, startX + gi * (pillW + gap), subY, pillW, 34);
-            const g = pill.addComponent(Graphics);
-            g.fillColor = active ? BLUE : BEIGE;
-            g.roundRect(-pillW / 2, -17, pillW, 34, 17);
-            g.fill();
-            if (!active) {
-                g.strokeColor = BEIGE_LINE;
-                g.lineWidth = 2;
-                g.roundRect(-pillW / 2, -17, pillW, 34, 17);
-                g.stroke();
-            }
-            this.gm.createLabel(pill, group.name, 0, 0, 16, active ? new Color(255, 255, 255, 255) : BROWN, true);
-            pill.on(Node.EventType.TOUCH_END, () => {
-                if (this.subTab !== group.key) {
-                    this.subTab = group.key;
-                    this.renderContent();
-                }
-            }, this);
+        fetchCollectList().then((catalog) => {
+            if (!this.contentNode || !this.contentNode.isValid) return;
+            this.renderCollectGroups(catalog, subY);
         });
+    }
 
-        // 当前分组的收集格子：2 列排布（目录数组驱动，以后加收集品自动加格）
-        const items = COLLECT_CATALOG.filter((c) => c.group === this.subTab);
+    private renderCollectGroups(catalog: CollectItem[], subY: number) {
+        const groups = catalog.length > 0
+            ? Array.from(new Map(catalog.map((c) => [c.groupCode, { key: c.groupCode, name: c.groupName }])).values())
+            : COLLECT_GROUP_FALLBACK;
+        if (!groups.some((g) => g.key === this.subTab)) this.subTab = groups[0]?.key || 'animal';
+
+        // 子 tab 分段条（二级导航：小一号、米色容器、橙色选中段）
+        drawSegmentedTabs(
+            this.gm, this.contentNode!, 'SubSegBar', subY,
+            groups, this.subTab, 'sub',
+            (key) => {
+                this.subTab = key;
+                this.renderContent();
+            }
+        );
+
+        // 当前分组的收集格子：只显示已拥有的（仓库不展示"未拥有"占位，避免名称与状态文字挤在一起）
+        const ownedIds = CollectStore.getOwnedIds();
+        const currentId = CollectStore.getCurrentId();
+        const items = catalog.filter((c) => c.groupCode === this.subTab && ownedIds.indexOf(c.id) !== -1);
         const cols = [-82, 82];
         const firstRowY = subY - 62;
+        if (items.length === 0) {
+            this.gm.createLabel(this.contentNode!, '暂未收集到该分类的玩偶', 0, firstRowY - 20, 15, new Color(150, 160, 140, 255), true);
+            return;
+        }
         items.forEach((item, i) => {
             const x = cols[i % 2];
             const y = firstRowY - Math.floor(i / 2) * 80;
+            const isCurrent = item.id === currentId || (currentId == null && item.id === ownedIds[0]);
             this.drawSlot(this.contentNode!, x, y, {
-                iconUrl: '',
+                iconUrl: item.colorUrl,
                 name: item.name,
-                rightText: '未拥有',
-                rightColor: new Color(150, 140, 120, 255),
-                grayed: true,
+                showStar: isCurrent,
+                rightText: `x${CollectStore.getCount(item.id)}`,
+                rightColor: BROWN,
+                onTap: () => {
+                    this.gm.renderCollectDetail(item.name, item.colorUrl, () => {
+                        CollectStore.setCurrent(item.id);
+                        this.renderContent();
+                    });
+                },
             });
         });
     }
 
-    /** 单个格子：米色圆角框 + 图标 + 名称 + 右侧数量/状态 */
+    /**
+     * 单个格子：米色圆角框 + 图标 + 名称 + 右侧数量/状态（道具页用 rightText/rightColor）。
+     * onTap 有值时整块可点；showStar 为真时左上角画金色五角星角标（收集页"当前应用于游戏"标记）。
+     */
     private drawSlot(
         parent: Node, x: number, y: number,
-        opts: { iconUrl: string; name: string; rightText: string; rightColor: Color; grayed?: boolean }
+        opts: { iconUrl: string; name: string; rightText?: string; rightColor?: Color; grayed?: boolean; onTap?: () => void; showStar?: boolean }
     ) {
         const slot = this.gm.createNode(`Slot_${opts.name}`, parent, x, y, 152, 64);
         const g = slot.addComponent(Graphics);
@@ -249,16 +229,30 @@ export class StoragePage {
         }
         if (opts.grayed) imgSprite.grayscale = true;
 
+        // 当前应用于游戏的角标：格子左上角一颗金色五角星
+        if (opts.showStar) {
+            const starNode = this.gm.createNode('StarBadge', slot, -68, 24, 20, 20);
+            const starG = starNode.addComponent(Graphics);
+            this.gm.drawStar(starG, 20, new Color(255, 200, 40, 255));
+        }
+
         // 名称（左对齐）
         const nameLabel = this.gm.createLabel(slot, opts.name, -20, 0, 15, BROWN, true);
         const nameTransform = nameLabel.node.getComponent(UITransform);
         if (nameTransform) nameTransform.setAnchorPoint(0, 0.5);
         nameLabel.horizontalAlign = 0; // LEFT
 
-        // 右侧数量/状态（右对齐）
-        const rightLabel = this.gm.createLabel(slot, opts.rightText, 70, 0, 16, opts.rightColor, true);
-        const rightTransform = rightLabel.node.getComponent(UITransform);
-        if (rightTransform) rightTransform.setAnchorPoint(1, 0.5);
-        rightLabel.horizontalAlign = 2; // RIGHT
+        // 右侧数量/状态（右对齐，仅道具页传了 rightText 时才画）
+        if (opts.rightText) {
+            const rightLabel = this.gm.createLabel(slot, opts.rightText, 70, 0, 16, opts.rightColor || BROWN, true);
+            const rightTransform = rightLabel.node.getComponent(UITransform);
+            if (rightTransform) rightTransform.setAnchorPoint(1, 0.5);
+            rightLabel.horizontalAlign = 2; // RIGHT
+        }
+
+        if (opts.onTap) {
+            const onTap = opts.onTap;
+            slot.on(Node.EventType.TOUCH_END, () => onTap(), this);
+        }
     }
 }

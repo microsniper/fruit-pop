@@ -510,8 +510,8 @@ export class HomePage {
             if (isOn) this.gm.triggerVibration('light');
         });
 
-        // 游戏反馈按钮（图里的橙色立体按钮）：位置为估算值，跟美术图核对后如有偏差再微调坐标
-        const feedbackBtn = this.gm.createNode('FeedbackBtn', panelNode, 0, py(0.75), panelW * 0.6, 56);
+        // 游戏反馈按钮（图里的橙色立体按钮）：底图 640x841 实测按钮中心 (0.484, 0.848)、宽约 0.57 面板宽
+        const feedbackBtn = this.gm.createNode('FeedbackBtn', panelNode, px(0.484), py(0.848), panelW * 0.57, 62);
         feedbackBtn.on(Node.EventType.TOUCH_END, (e: any) => {
             e.propagationStopped = true;
             new FeedbackPage(this.gm).open(() => this.showTip('提交成功，感谢反馈'));

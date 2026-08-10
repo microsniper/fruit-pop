@@ -952,8 +952,12 @@ export interface ShopItem {
   sortOrder: number
   resourceCode?: ResourceCodeTypeEnum
   groupCode: string
+  /** 分组中文名（category=2 时有值，后端按 CollectGroupEnum 下发） */
+  groupName: string
   name: string
   imageUrl: string
+  /** category=2 时的 game_collect.id（购买成功后写入本地 CollectStore 用） */
+  collectId?: number
 }
 
 let shopCache: ShopItem[] | null = null;
@@ -999,5 +1003,36 @@ export const submitFeedback = async (feedbackType: FeedbackTypeEnum, content: st
       ? e.message
       : ((e as { message?: string } | null)?.message || '提交失败，请重试')
     return { success: false, message }
+  }
+}
+
+/** 收集品目录条目（game_collect 全量下发，只读配置；拥有/当前展示状态由前端本地 CollectStore 维护） */
+export interface CollectItem {
+  id: number
+  collectCode: string
+  groupCode: string
+  /** 分组中文名（后端按 CollectGroupEnum 下发，不用前端再维护一份翻译表） */
+  groupName: string
+  name: string
+  grayUrl: string
+  colorUrl: string
+  isStarterGift: boolean
+}
+
+let collectCache: CollectItem[] | null = null;
+
+/** 拉取收集品全量目录（会话内缓存一次） */
+export const fetchCollectList = async (): Promise<CollectItem[]> => {
+  if (collectCache) return collectCache;
+  try {
+    const res = await request<CollectItem[]>({
+      url: '/api/game/collect/list',
+      method: 'POST'
+    })
+    collectCache = res.data || [];
+    return collectCache;
+  } catch (e) {
+    console.error('[API] fetch collect list failed:', e)
+    return []
   }
 }

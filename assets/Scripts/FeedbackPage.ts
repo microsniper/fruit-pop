@@ -2,11 +2,24 @@ import { Node, Vec3, UITransform, Color, tween, Graphics, EditBox, Label } from 
 import { submitFeedback, FeedbackTypeEnum } from './api';
 import type { GameManager } from './GameManager';
 
-/** 反馈类型 Tab 文案，跟后端 FeedbackTypeEnum 一一对应 */
+/** 反馈类型 Tab 文案，跟后端 FeedbackTypeEnum 一一对应（左=意见反馈 右=游戏反馈） */
 const TYPE_TABS: { type: FeedbackTypeEnum; label: string }[] = [
-    { type: FeedbackTypeEnum.GAME, label: '游戏反馈' },
-    { type: FeedbackTypeEnum.SUGGESTION, label: '意见反馈' }
+    { type: FeedbackTypeEnum.SUGGESTION, label: '意见反馈' },
+    { type: FeedbackTypeEnum.GAME, label: '游戏反馈' }
 ];
+
+/** 反馈内容字符白名单：汉字/数字/英文字母/空白/常见中英文标点；不允许表情及其他特殊字符（与后端校验同一套规则） */
+const CONTENT_WHITELIST = /^[一-龥a-zA-Z0-9\s,.!?;:'"()\[\]{}\-_+=@#$%^*~，。！？；：“”‘’（）【】《》「」～、…·]*$/;
+const MAX_CONTENT_LENGTH = 200;
+
+/** 过滤掉不在白名单里的字符（逐字符过滤，保留合法字符原有顺序） */
+function filterContent(text: string): string {
+    let result = '';
+    for (const ch of text) {
+        if (CONTENT_WHITELIST.test(ch)) result += ch;
+    }
+    return result.slice(0, MAX_CONTENT_LENGTH);
+}
 
 /**
  * 用户反馈弹窗：设置页"游戏反馈"按钮点开，选类型 + 填文字 + 提交。
@@ -14,7 +27,7 @@ const TYPE_TABS: { type: FeedbackTypeEnum; label: string }[] = [
  */
 export class FeedbackPage {
 
-    private selectedType: FeedbackTypeEnum = FeedbackTypeEnum.GAME;
+    private selectedType: FeedbackTypeEnum = FeedbackTypeEnum.SUGGESTION;
     private tabNodes: { bg: Node; label: Label; type: FeedbackTypeEnum }[] = [];
     private editBox: EditBox | null = null;
     private submitting = false;
@@ -82,16 +95,32 @@ export class FeedbackPage {
         const editBoxNode = this.gm.createNode('EditBox', panelNode, 0, editBoxY, panelW - 56, editBoxH - 16);
         const editBox = editBoxNode.addComponent(EditBox);
         editBox.inputMode = EditBox.InputMode.ANY;
-        editBox.maxLength = 500;
+        editBox.maxLength = MAX_CONTENT_LENGTH;
+
+        // 手动建 text/placeholder 两个 Label 并显式挂到 EditBox 上（引擎运行时默认子节点定位会飘到面板外）
+        const mkBoxLabel = (name: string, color: Color) => {
+            const n = this.gm.createNode(name, editBoxNode, 4, 4, panelW - 64, editBoxH - 24);
+            const l = n.addComponent(Label);
+            l.fontSize = 16;
+            l.lineHeight = 22;
+            l.color = color;
+            l.horizontalAlign = Label.HorizontalAlign.LEFT;
+            l.verticalAlign = Label.VerticalAlign.TOP;
+            l.overflow = Label.Overflow.CLAMP;
+            return l;
+        };
+        editBox.textLabel = mkBoxLabel('Text', new Color(60, 50, 40, 255));
+        editBox.placeholderLabel = mkBoxLabel('Placeholder', new Color(180, 170, 160, 255));
+        // 引擎给 EditBox 自动挂的默认 Label（白字"Label"）会飘在面板外，清掉只留我们自建的两个
+        editBoxNode.children.forEach((c) => {
+            if (c.name !== 'Text' && c.name !== 'Placeholder') c.destroy();
+        });
         editBox.placeholder = '请描述你遇到的问题或建议...';
-        if (editBox.textLabel) {
-            editBox.textLabel.fontSize = 16;
-            editBox.textLabel.color = new Color(60, 50, 40, 255);
-        }
-        if (editBox.placeholderLabel) {
-            editBox.placeholderLabel.fontSize = 16;
-            editBox.placeholderLabel.color = new Color(180, 170, 160, 255);
-        }
+        // 实时过滤：只保留白名单字符（汉字/数字/字母/常见标点），表情及其他特殊字符边输入边被清掉
+        editBox.node.on(EditBox.EventType.TEXT_CHANGED, (text: string) => {
+            const filtered = filterContent(text);
+            if (filtered !== text) editBox.string = filtered;
+        }, this);
         this.editBox = editBox;
 
         // 提交按钮
@@ -125,7 +154,8 @@ export class FeedbackPage {
 
     private async onSubmit(onSubmitted?: () => void) {
         if (this.submitting || !this.editBox) return;
-        const content = this.editBox.string.trim();
+        // 提交前再过滤一遍：防止粘贴等个别输入路径没触发 TEXT_CHANGED 实时过滤
+        const content = filterContent(this.editBox.string).trim();
         if (!content) {
             this.showInlineTip('请先填写反馈内容');
             return;
