@@ -102,7 +102,7 @@ export class HomePage {
         const sideBtnW = 58;
         const sideBtnY = pageH * 0.10;
         const signInBtnNode = this.createHomeButton('btn_signin', -pageW / 2 + 42, sideBtnY, sideBtnW, () => this.onSignInClick());
-        // 个人仓库（签到按钮正下方，间距与「设置-签到」间距同款 0.12*pageH）：整页切换，看道具与收集品
+        // 个人仓库（签到按钮下方，间距与「设置-签到」间距同款 0.12*pageH）：整页切换，看道具与收集品
         this.createHomeButton('btn_storage', -pageW / 2 + 42, sideBtnY - pageH * 0.12, sideBtnW, () => this.gm.storagePage.open());
         // 今天未签到：签到按钮右上角红点提醒
         if (signInBtnNode && !SignInPage.isSignedToday()) {

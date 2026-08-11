@@ -1,5 +1,5 @@
 import { _decorator, Component, Node, Vec2, Vec3, Size, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, view, Layers, Sprite, SpriteFrame, resources, ImageAsset, LabelOutline, UIOpacity, RigidBody2D, BoxCollider2D, CircleCollider2D, ERigidBody2DType, PhysicsSystem2D, assetManager, Texture2D } from 'cc';
-import { consumeShareCount, reportEvent, fetchGameConfig, GameConfig, getDailyHelpStatus, getGameConfig, hasUserProfile, updateProfile, useDailyHelp, fetchResources, fetchShopList, fetchCollectList, ResourceCodeTypeEnum, getDailyStatus, DailyHelpResponse, RewardItem, ItemTypeEnum } from './api';
+import { consumeShareCount, reportEvent, fetchGameConfig, GameConfig, getDailyHelpStatus, getGameConfig, hasUserProfile, updateProfile, useDailyHelp, fetchResources, fetchShopList, fetchCollectList, ResourceCodeTypeEnum, getDailyStatus, DailyHelpResponse, RewardItem, ItemTypeEnum, CollectItem } from './api';
 import { CollectStore } from './CollectStore';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
@@ -186,7 +186,7 @@ interface TempSlotView {
     node: Node;
     hole: Graphics;
     fruitHost: Node;
-    /** 锁定图标（右侧两个孔位默认带锁，加果盘解锁后隐藏） */
+    /** 锁定图标（右侧孔位默认带锁，加果盘解锁后隐藏） */
     lock?: Node;
 }
 
@@ -414,8 +414,8 @@ export class GameManager extends Component {
     private _physicsReady = true;
     public rootNode: Node | null = null;
     public currentLevel = 1;
-    private maxTempHoles = 6;
-    /** 本局已解锁的果盘数（0~2）：暂存区共 6 孔，右侧 2 孔默认带锁，用「加果盘」逐个解开 */
+    private maxTempHoles = 5;
+    /** 本局已解锁的果盘数（0~1）：暂存区共 5 孔，右侧 1 孔默认带锁，用「加果盘」解开 */
     private traysUnlockedThisLevel = 0;
     /** 当前可用暂存容量：4 个常开孔 + 已解锁孔 */
     private getTempCapacity(): number {
@@ -472,6 +472,8 @@ export class GameManager extends Component {
     private toolContainerNode: Node | null = null;
     /** loadRemoteImage 按 URL 缓存 SpriteFrame：同一张远程图（商城/仓库来回切 tab、奖励弹窗重复出现）不重复下载 */
     private remoteImageCache = new Map<string, SpriteFrame>();
+    /** 收集品目录缓存：奖励弹窗按 collectCode 反查名称/id 用，fetchCollectList 本身有会话缓存，这里再缓存一份避免重复 await */
+    private collectCatalogCache: CollectItem[] | null = null;
     public modalLayerNode: Node | null = null;
     /** 首页与排行榜页：逻辑已拆到独立文件，通过 gm 引用协作 */
     public readonly homePage = new HomePage(this);
@@ -1871,7 +1873,7 @@ export class GameManager extends Component {
         GameManager._collisionMatrixConfigured = false;
         this.plates = [];
         this.tempHoles = [];
-        this.traysUnlockedThisLevel = 0; // 新一局果盘重新上锁（右侧 2 孔）
+        this.traysUnlockedThisLevel = 0; // 新一局果盘重新上锁（右侧 1 孔）
         this.tempGuideArmed = true;
         this.smashingPlateId = null;
         this.driver.resetPerLevel();
@@ -4127,7 +4129,7 @@ export class GameManager extends Component {
         if (color === 'empty' || color === 'locked') return 3;
     
         // 每日挑战第一关（单关制唯一关）：果篮按刷新次数递增孔数（3→4→5→6→6...），替代权重随机。
-        // 每个果篮独立计数：首次刷新（含刚解锁）3 孔，之后逐次 +1，封顶 6 孔
+        // 每个果篮独立计数：首次刷新（含刚解锁）3 孔，之后逐次 +1，封顶 5 孔
         if (this.driver.mode === 'daily' && this.currentLevel === 1) {
             const count = targetBox.refreshCount || 0;
             targetBox.refreshCount = count + 1;
@@ -4487,8 +4489,6 @@ export class GameManager extends Component {
 
         body.type = ERigidBody2DType.Dynamic;
         body.gravityScale = 1.5;
-        // 垂直向下的初速度，配合重力更快进入下落状态（不加水平分量，避免往外弹）
-        body.linearVelocity = new Vec2(0, -2);
     }
 
     /** 找砸板子目标：最上层（wave 最小）那批未埋未掉落板子里，屏幕最靠下（y 最小）的一块 */
@@ -4574,6 +4574,8 @@ export class GameManager extends Component {
         rigidBody.gravityScale = 0;
         rigidBody.linearDamping = 0.5;
         rigidBody.angularDamping = 0.2;
+        // 长条板又薄又贴脸铺，掉落旋转时容易一帧内穿过相邻长条板，开 CCD 防穿透
+        rigidBody.bullet = plate.texture === 'plate_bar';
 
         // 第一个物理组件创建后，物理系统一定就绪，此时设重力
         if (!GameManager._physicsGravitySet) {
@@ -5198,8 +5200,8 @@ export class GameManager extends Component {
                 this.showCoinShortageTip('本局加果盘次数已用完');
                 return;
             }
-            // 先校验还有锁着的果盘（两个都解完则不消耗）
-            if (this.traysUnlockedThisLevel >= 2) {
+            // 先校验还有锁着的果盘（解完则不消耗）
+            if (this.traysUnlockedThisLevel >= 1) {
                 this.showCoinShortageTip('果盘已全部解锁');
                 return;
             }
@@ -5231,7 +5233,7 @@ export class GameManager extends Component {
 
     /** 解锁一个果盘：关弹窗 + 已解锁数+1（锁的显隐由 renderTempSlots 按计数刷新） */
     private unlockOneTray() {
-        if (this.traysUnlockedThisLevel >= 2) return;
+        if (this.traysUnlockedThisLevel >= 1) return;
         this.traysUnlockedThisLevel++;
         this.modalLayerNode?.removeAllChildren();
         this.renderTopUI();
@@ -5366,12 +5368,12 @@ export class GameManager extends Component {
         const slotTextColor = new Color(110, 75, 45, 255);
         const daily = this.getDailyDriverForResult();
 
-        // 第一条槽：本次用时（本地计时，立即可显示）
+        // 第一条槽：本次用时（本地计时，立即可显示）；击败历史最快时接口回来后在数字旁贴「新纪录」
         const runSeconds = daily ? daily.getLastRunSeconds() : null;
         this.createLabel(panelNode, '本次用时', -48, -55, 17, slotTextColor, true);
-        this.createLabel(panelNode, this.formatDuration(runSeconds), 48, -55, 22, slotTextColor, true);
+        const runLabel = this.createLabel(panelNode, this.formatDuration(runSeconds), 48, -55, 22, slotTextColor, true);
 
-        // 第二条槽：今日最快（等上报接口返回后回填，先占位）
+        // 第二条槽：今日最快（不含本次，等上报接口返回后回填，先占位）——与「本次用时」并排对比
         this.createLabel(panelNode, '今日最快', -48, -105, 17, slotTextColor, true);
         const bestLabel = this.createLabel(panelNode, '--:--', 48, -105, 22, slotTextColor, true);
         const report = daily ? daily.getClearReport() : null;
@@ -5381,6 +5383,9 @@ export class GameManager extends Component {
                 // 接口没给有效计时就退回本地耗时，避免一直显示占位
                 const best = res && res.bestSeconds != null ? res.bestSeconds : runSeconds;
                 bestLabel.string = this.formatDuration(best);
+                if (res && res.newRecord && runLabel && runLabel.isValid) {
+                    this.showDailyNewRecordBadge(runLabel);
+                }
             }).catch(() => {});
         } else {
             bestLabel.string = this.formatDuration(runSeconds);
@@ -5393,6 +5398,37 @@ export class GameManager extends Component {
 
         panelNode.setScale(new Vec3(0.6, 0.6, 1));
         tween(panelNode).to(0.25, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
+    }
+
+    /**
+     * 「本次用时」击败历史最快时的强调效果：数字变金色 + 弹跳，右侧贴「新纪录」小标签常驻显示，
+     * 让用户即使划走弹窗也能确认自己看到了这个提示（不是一闪而过的动效）。
+     */
+    private showDailyNewRecordBadge(runLabel: Label) {
+        const runNode = runLabel.node;
+        runLabel.color = new Color(255, 170, 20, 255);
+        runNode.setScale(0.4, 0.4, 1);
+        tween(runNode)
+            .to(0.35, { scale: new Vec3(1.15, 1.15, 1) }, { easing: 'backOut' })
+            .to(0.15, { scale: new Vec3(1, 1, 1) })
+            .start();
+
+        const parent = runNode.parent;
+        if (!parent) return;
+        // 往右挪开时间数字，字号加大+粗描边+小角度斜切，做出艺术字的跳出感
+        const badge = this.createLabel(parent, '新纪录', runNode.position.x + 68, runNode.position.y, 22, new Color(255, 170, 20, 255), true);
+        badge.node.angle = -8;
+        const badgeOutline = badge.node.addComponent(LabelOutline);
+        if (badgeOutline) {
+            badgeOutline.color = new Color(140, 80, 10, 255);
+            badgeOutline.width = 3;
+        }
+        badge.node.setScale(0.3, 0.3, 1);
+        tween(badge.node)
+            .delay(0.1)
+            .to(0.35, { scale: new Vec3(1.15, 1.15, 1) }, { easing: 'backOut' })
+            .to(0.15, { scale: new Vec3(1, 1, 1) })
+            .start();
     }
 
     /**
@@ -5446,16 +5482,20 @@ export class GameManager extends Component {
         }, this);
     }
 
-    /** 链式奖励弹窗：逐个展示 rewards[idx]，点「领取奖励」入账后弹下一个，全领完走 onDone */
+    /** 链式奖励弹窗：逐个展示 rewards[idx]，点「领取奖励」入账后弹下一个，全领完走 onDone。
+     * 先确保收集品目录到位，rewardDisplayName/grantRewardSilently 才能正确按 collectCode 查到名字/id */
     private showRewardChain(rewards: RewardItem[], idx: number, onDone: () => void) {
-        const reward = rewards[idx];
-        this.renderRewardRevealModal(reward, () => {
-            this.grantRewardSilently(reward);
-            if (idx + 1 < rewards.length) {
-                this.showRewardChain(rewards, idx + 1, onDone);
-            } else {
-                onDone();
-            }
+        this.ensureCollectCatalog().then(() => {
+            if (!this.modalLayerNode) return;
+            const reward = rewards[idx];
+            this.renderRewardRevealModal(reward, () => {
+                this.grantRewardSilently(reward);
+                if (idx + 1 < rewards.length) {
+                    this.showRewardChain(rewards, idx + 1, onDone);
+                } else {
+                    onDone();
+                }
+            });
         });
     }
 
@@ -5509,10 +5549,22 @@ export class GameManager extends Component {
         tween(panelNode).to(0.25, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
     }
 
-    /** 奖励展示名：按枚举硬映射（组合果两个都显示）；皮肤展示皮肤编码 */
+    /** 收集品目录缓存：命中过就直接返回，否则拉一次并缓存（fetchCollectList 本身也有会话缓存） */
+    private ensureCollectCatalog(): Promise<CollectItem[]> {
+        if (this.collectCatalogCache) return Promise.resolve(this.collectCatalogCache);
+        return fetchCollectList().then((catalog) => {
+            this.collectCatalogCache = catalog;
+            return catalog;
+        }).catch(() => []);
+    }
+
+    /** 奖励展示名：按枚举硬映射（组合果两个都显示）；收集品按 collectCode 从目录查真实名字，查不到兜底显示编码 */
     private rewardDisplayName(reward: RewardItem): string {
         const amount = reward.amount || 0;
-        if (reward.itemType === ItemTypeEnum.COLLECT) return `收集品「${reward.collectCode}」`;
+        if (reward.itemType === ItemTypeEnum.COLLECT) {
+            const item = this.collectCatalogCache?.find((c) => c.collectCode === reward.collectCode);
+            return item ? item.name : `伙伴「${reward.collectCode}」`;
+        }
         switch (reward.resourceCode) {
             case ResourceCodeTypeEnum.COIN: return `金币x${amount}`;
             case ResourceCodeTypeEnum.ADD_TRAY: return `加果盘x${amount}`;
@@ -5525,9 +5577,14 @@ export class GameManager extends Component {
         }
     }
 
-    /** 奖励纯入账（展示由金光弹窗负责）；COLLECT 收集品系统未落地，空操作。商城购买复用 */
+    /** 奖励纯入账（展示由金光弹窗负责）。商城购买复用（COLLECT 分支目前只走每日挑战/无限模式弹窗链，
+     * 调用前已由 showRewardChain/showEndlessClearChain 的 ensureCollectCatalog 确保目录到位） */
     grantRewardSilently(reward: RewardItem) {
-        if (reward.itemType === ItemTypeEnum.COLLECT) return;
+        if (reward.itemType === ItemTypeEnum.COLLECT) {
+            const item = this.collectCatalogCache?.find((c) => c.collectCode === reward.collectCode);
+            if (item) CollectStore.own(item.id, reward.amount || 1);
+            return;
+        }
         const amount = reward.amount || 0;
         if (amount <= 0) return;
         switch (reward.resourceCode) {
@@ -5589,24 +5646,28 @@ export class GameManager extends Component {
         });
     }
 
-    /** 无限结算链：逐个展示奖励（null 时只显横幅），领完进下一关 */
+    /** 无限结算链：逐个展示奖励（null 时只显横幅），领完进下一关。
+     * 先确保收集品目录到位，rewardDisplayName/grantRewardSilently 才能正确按 collectCode 查到名字/id */
     private showEndlessClearChain(list: RewardItem[] | null, idx: number) {
-        const reward = list ? list[idx] : null;
-        this.renderEndlessClearModal(reward, () => {
-            if (reward) {
-                this.grantRewardSilently(reward);
-                this.renderTools();
-            } else {
-                this.showCoinShortageTip('奖励领取失败，请稍后再试');
-            }
-            if (list && idx + 1 < list.length) {
-                this.showEndlessClearChain(list, idx + 1);
-                return;
-            }
-            // 领完（或失败）：进下一关
-            this.modalLayerNode?.removeAllChildren();
-            this.currentLevel = this.driver.advanceLevel(this.currentLevel);
-            this.transitionToNewLevel();
+        this.ensureCollectCatalog().then(() => {
+            if (!this.modalLayerNode) return;
+            const reward = list ? list[idx] : null;
+            this.renderEndlessClearModal(reward, () => {
+                if (reward) {
+                    this.grantRewardSilently(reward);
+                    this.renderTools();
+                } else {
+                    this.showCoinShortageTip('奖励领取失败，请稍后再试');
+                }
+                if (list && idx + 1 < list.length) {
+                    this.showEndlessClearChain(list, idx + 1);
+                    return;
+                }
+                // 领完（或失败）：进下一关
+                this.modalLayerNode?.removeAllChildren();
+                this.currentLevel = this.driver.advanceLevel(this.currentLevel);
+                this.transitionToNewLevel();
+            });
         });
     }
 
@@ -6120,6 +6181,8 @@ export class GameManager extends Component {
             rigidBody.linearDamping = 0.5;
             // 角阻尼取较小值：板子被角支撑时，重力力矩能明显推动板子旋转倾覆，呈真实物理感
             rigidBody.angularDamping = 0.2;
+            // 长条板又薄又贴脸铺，掉落旋转时容易一帧内穿过相邻长条板，开 CCD 防穿透
+            rigidBody.bullet = plate.texture === 'plate_bar';
 
             // 第一个物理组件创建后，物理系统一定就绪，此时设重力
             if (!GameManager._physicsGravitySet) {
@@ -6411,7 +6474,7 @@ export class GameManager extends Component {
             const hole = holeNode.addComponent(Graphics); // 保留 component 引用以兼容旧代码结构，但不绘制
             
             const fruitHost = this.createNode(`TempFruitHost_${index}`, slotNode, 0, 0, slotRadius * 2, slotRadius * 2);
-            // 锁定图标：右侧 2 个孔位（index 4/5）默认带锁，随加果盘逐个解开
+            // 锁定图标：右侧 1 个孔位（index 4）默认带锁，用加果盘解开
             // 图 62x90 竖版，按原比例显示 20x29（孔位 24px 内不压不变形）
             const lockNode = this.createNode(`TempLock_${index}`, slotNode, 0, 0, 20, 29);
             const lockSprite = lockNode.addComponent(Sprite);

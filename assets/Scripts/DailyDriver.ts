@@ -17,11 +17,11 @@ export class DailyDriver implements ModeDriver {
     /** 每日挑战总关数（单关制：原第 2 关内容作为唯一挑战关） */
     static readonly TOTAL_LEVELS = 1;
 
-    // ===== 每关道具上限（加果篮/加果盘可解两次，其余道具本局各一次）=====
+    // ===== 每关道具上限（加果篮可解两次，加果盘可解一次，其余道具本局各一次）=====
     static readonly ADD_BASKET_LIMIT = 2;
     static readonly SMASH_LIMIT = 1;
     static readonly CLEAR_TRAY_LIMIT = 1;
-    static readonly ADD_TRAY_LIMIT = 2;
+    static readonly ADD_TRAY_LIMIT = 1;
     /** 特殊果本局上限：彩虹果/炸弹果共享计数，只能选其中一个用一次 */
     static readonly SPECIAL_FRUIT_LIMIT = 1;
     /** 当日求助上限兜底值（实际以后端 help_max 配置 dailyChallenge 为准） */
