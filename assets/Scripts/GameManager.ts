@@ -109,6 +109,9 @@ interface PlateData {
     stuck?: boolean;
     /** 卡住帧计数（内部用，连续多帧速度过小才判 stuck） */
     stuckFrames?: number;
+    /** 上一帧的下落速度，用来判断"本帧速度是否比上一帧小"——自由下落靠重力驱动只会逐帧递增，
+     * 真实落地碰撞会在一帧内把速度打下来，用这个特征区分"真落地"和"还在下落"，不受板间距大小影响 */
+    prevFallSpeed?: number;
     supportPlateId?: string;
     supportY?: number;
     isFalling?: boolean;
@@ -1760,7 +1763,7 @@ export class GameManager extends Component {
         if (!this.boardAreaNode) return;
         const iconSize = CAT_ICON_SIZE;
         const x = this.screenWidth / 2 - iconSize / 2 - 16;
-        const y = this.boardHeight / 2 - iconSize / 2 - 8;
+        const y = this.boardHeight / 2 - iconSize / 2 - 2;
 
         const container = this.createNode('CatProgressIcon', this.boardAreaNode, x, y, iconSize, iconSize);
         this.catIconNode = container;
@@ -1826,7 +1829,7 @@ export class GameManager extends Component {
             loadLocalFallback();
         });
 
-        this.catPercentLabel = this.createLabel(container, '0%', 0, -iconSize / 2 - 14, 14, new Color(80, 60, 35, 255), true);
+        this.catPercentLabel = this.createLabel(container, '进度0%', 0, -iconSize / 2 - 14, 14, new Color(80, 60, 35, 255), true);
         this.updateCatProgress();
     }
 
@@ -1839,7 +1842,7 @@ export class GameManager extends Component {
             // 宽度维持当前值（彩色图加载完成后已按实际比例设好），只更新高度
             maskTransform.setContentSize(maskTransform.width, CAT_ICON_SIZE * ratio);
         }
-        this.catPercentLabel.string = `${Math.floor(ratio * 100)}%`;
+        this.catPercentLabel.string = `进度${Math.floor(ratio * 100)}%`;
     }
 
     private buildStaticTopUI() {
@@ -3802,7 +3805,7 @@ export class GameManager extends Component {
         const scaledStrip = this.scaleTemplate(STRIP_PLATE_TEMPLATE);
         for (let i = 0; i < stripFirst; i++) {
             if (plates.length >= maxPlates) break;
-            const placement = this.findPackedPlacement(scaledStrip, placedBodies, paddingX, paddingTop, paddingBottom, fromLeft, fromTop);
+            const placement = this.findPackedPlacement(scaledStrip, placedBodies, paddingX, paddingTop, paddingBottom, fromLeft, fromTop, 6);
             if (!placement) break;
             pushPlate(scaledStrip, placement);
         }
@@ -3988,9 +3991,9 @@ export class GameManager extends Component {
         paddingTop: number,
         paddingBottom: number,
         fromLeft: boolean,
-        fromTop: boolean
+        fromTop: boolean,
+        gap: number = 1
     ): { x: number; y: number; rotation: number; renderW: number; renderH: number } | null {
-        const gap = 1;
         // 造型板有专属底图，转了图就歪，只能 0 度；方板可以转 90 度
         const rotations = (template.type === 'circle' || template.texture) ? [0] : [0, 90];
 
@@ -4486,9 +4489,17 @@ export class GameManager extends Component {
         plate.state = 'falling';
         plate.gravityOrigin = undefined;
         plate.rotation = 0;
+        plate.stuckFrames = 0;
+        plate.stuck = false;
+        plate.prevFallSpeed = 0;
 
         body.type = ERigidBody2DType.Dynamic;
         body.gravityScale = 1.5;
+
+        // 掉落板提到最前渲染：长条板 layer 偏小（stripFirst 阶段生成，同层内 layer 靠后），
+        // 不提的话掉落被下方板 B 顶住时，A 会渲染在 B 后面（板面重叠 + 层级低 → "A在B后面"）。
+        // 掉落是视觉焦点，本就该盖在静态板前面；掉出屏幕后节点销毁，层级自然归位
+        pivotNode.setSiblingIndex(pivotNode.parent!.children.length - 1);
     }
 
     /** 找砸板子目标：最上层（wave 最小）那批未埋未掉落板子里，屏幕最靠下（y 最小）的一块 */
@@ -4574,8 +4585,9 @@ export class GameManager extends Component {
         rigidBody.gravityScale = 0;
         rigidBody.linearDamping = 0.5;
         rigidBody.angularDamping = 0.2;
-        // 长条板又薄又贴脸铺，掉落旋转时容易一帧内穿过相邻长条板，开 CCD 防穿透
-        rigidBody.bullet = plate.texture === 'plate_bar';
+        // 长条板原开 CCD(bullet) 防"旋转一帧穿过相邻长条板"，但实测 bullet 在"初始贴合(gap=1)切 Dynamic"
+        // 瞬间会把板回退进下层板内部 → 两块板完全重叠、半透明板面透出下层水果。先关闭验证
+        rigidBody.bullet = false;
 
         // 第一个物理组件创建后，物理系统一定就绪，此时设重力
         if (!GameManager._physicsGravitySet) {
@@ -4612,11 +4624,16 @@ export class GameManager extends Component {
                     boxCol.group = plateGroup;
                     boxCol.offset = new Vec2(px, py);
                     boxCol.size = new Size(col.w, col.h);
+                    // addComponent 时已经用默认尺寸(1x1)同步建好了 Box2D 的物理形状，
+                    // 上面这几行只是改了 JS 侧的属性值，必须 apply() 才会真正重建 fixture，
+                    // 否则真实碰撞体一直是那个几乎为 0 的默认尺寸——这正是同层板子"几乎完全重叠才碰撞"的根因
+                    boxCol.apply();
                 } else {
                     const circleCol = pivotNode.addComponent(CircleCollider2D);
                     circleCol.group = plateGroup;
                     circleCol.offset = new Vec2(px, py);
                     circleCol.radius = col.r;
+                    circleCol.apply();
                 }
             });
         } else {
@@ -4624,6 +4641,7 @@ export class GameManager extends Component {
             boxCol.group = plateGroup;
             boxCol.offset = new Vec2(-offsetX, -offsetY);
             boxCol.size = new Size(plate.w, plate.h);
+            boxCol.apply();
         }
     }
 
@@ -4642,14 +4660,33 @@ export class GameManager extends Component {
             plate.x = pos.x;
             plate.y = pos.y;
 
-            // 卡住检测：掉落板被下层板支撑停住（速度持续很小）时标记 stuck，
-            // 此时它仍停在画面上遮挡别的果子，这些果子应判为不可点
+            // 长条板又长又扁，一旦只有一角搭在邻居板上，重力力矩会把它甩得转得很快，
+            // 悬空那一头的线速度（角速度×半宽）可能在一步内扫过邻居板的整个厚度，把邻居"甩穿"。
+            // 钳制角速度上限（弧度/秒，Box2D 角速度单位），把甩动幅度压小，减少这种情况
+            if (plate.texture === 'plate_bar') {
+                const MAX_STRIP_ANGULAR_SPEED = Math.PI; // 约180度/秒
+                const angSpeed = body.angularVelocity;
+                if (angSpeed > MAX_STRIP_ANGULAR_SPEED) {
+                    body.angularVelocity = MAX_STRIP_ANGULAR_SPEED;
+                } else if (angSpeed < -MAX_STRIP_ANGULAR_SPEED) {
+                    body.angularVelocity = -MAX_STRIP_ANGULAR_SPEED;
+                }
+            }
+
+            // 卡住检测：掉落板被下层板支撑停住时标记 stuck，此时它仍停在画面上遮挡别的果子，这些果子应判为不可点。
+            // 用"本帧速度比上一帧还小"判断真落地：自由下落靠重力驱动，每一帧速度只会递增（实测下落全程无一帧例外），
+            // 真实碰撞会在一帧内把速度打下来，是唯一会让速度变小的情况——不受板间距大小影响，
+            // 之前按"下落距离"判断时，间距很小的板子（比如只掉 7px 就到底）永远也够不着固定的距离门槛，导致永远判不了 stuck
             const vel = body.linearVelocity;
             const speed = Math.sqrt(vel.x * vel.x + vel.y * vel.y);
-            if (speed < 8) {
+            const prevSpeed = plate.prevFallSpeed ?? 0;
+            const speedDropped = prevSpeed > 0.5 && speed < prevSpeed;
+            plate.prevFallSpeed = speed;
+
+            if ((speedDropped && speed < 8) || (plate.stuck && speed < 8)) {
                 plate.stuckFrames = (plate.stuckFrames || 0) + 1;
-                if (plate.stuckFrames > 18) plate.stuck = true;
-            } else {
+                plate.stuck = true;
+            } else if (speed >= 8) {
                 plate.stuckFrames = 0;
                 plate.stuck = false;
             }
@@ -5752,10 +5789,12 @@ export class GameManager extends Component {
         const totalSamples = samplePoints.length;
 
         for (const other of this.plates) {
-            // 卡住不动的掉落板（stuck）无视层级：它物理停在上层板子上，遮住的果子不可点
-            const stuckCover = other.state === 'falling' && other.stuck;
             if (other.id === plate.id || other.removed) continue;
-            if (!stuckCover && (other.state === 'falling' || other.layer <= plate.layer)) continue;
+            // 掉落中但还没卡住的板子：马上就走了，不算遮挡
+            if (other.state === 'falling' && !other.stuck) continue;
+            // 卡住不动的掉落板仍按层级判断：只有排在 plate 前面（layer 更大）的才能挡它的果子，
+            // 避免卡住的板子无视层级去挡本该在它前面、露在外面的果子
+            if (other.layer <= plate.layer) continue;
 
             let coveredCount = 0;
             for (const point of samplePoints) {
@@ -6181,8 +6220,9 @@ export class GameManager extends Component {
             rigidBody.linearDamping = 0.5;
             // 角阻尼取较小值：板子被角支撑时，重力力矩能明显推动板子旋转倾覆，呈真实物理感
             rigidBody.angularDamping = 0.2;
-            // 长条板又薄又贴脸铺，掉落旋转时容易一帧内穿过相邻长条板，开 CCD 防穿透
-            rigidBody.bullet = plate.texture === 'plate_bar';
+            // 长条板原开 CCD(bullet) 防"旋转一帧穿过相邻长条板"，但实测 bullet 在"初始贴合(gap=1)切 Dynamic"
+            // 瞬间会把板回退进下层板内部 → 两块板完全重叠、半透明板面透出下层水果。先关闭验证
+            rigidBody.bullet = false;
 
             // 第一个物理组件创建后，物理系统一定就绪，此时设重力
             if (!GameManager._physicsGravitySet) {
@@ -6222,11 +6262,15 @@ export class GameManager extends Component {
                         boxCol.group = plateGroup;
                         boxCol.offset = new Vec2(px, py);
                         boxCol.size = new Size(col.w, col.h);
+                        // addComponent 时已经用默认尺寸(1x1)同步建好了 Box2D 的物理形状，
+                        // 改属性只是改了 JS 侧的值，必须 apply() 才会真正重建 fixture
+                        boxCol.apply();
                     } else {
                         const circleCol = pivotNode.addComponent(CircleCollider2D);
                         circleCol.group = plateGroup;
                         circleCol.offset = new Vec2(px, py);
                         circleCol.radius = col.r;
+                        circleCol.apply();
                     }
                 });
             } else {
@@ -6234,6 +6278,7 @@ export class GameManager extends Component {
                 boxCol.group = plateGroup;
                 boxCol.offset = new Vec2(-offsetX, -offsetY);
                 boxCol.size = new Size(plate.w, plate.h);
+                boxCol.apply();
             }
         }
 
