@@ -1,4 +1,4 @@
-import { saveDailyClear, DailyClearResponse, getGameConfig, fetchRewardConfig, drawReward, GameRewardModeEnum, RewardItem } from './api';
+import { saveDailyClear, DailyClearResponse, getGameConfig, fetchDailyStageReward, RewardItem } from './api';
 import type { ClearAction, ModeDriver, ToolButtonSpec, ToolType } from './ModeDriver';
 import { DEFAULT_LAYER_RULES, LayerRules } from './ModeDriver';
 import { PropStore } from './PropStore';
@@ -259,15 +259,11 @@ export class DailyDriver implements ModeDriver {
     }
 
     /**
-     * 领取过关奖励：stage=1 查阶段1固定奖励（金币，包成单元素数组），stage=2 按权重无放回抽 2 条（池子不足有几条发几条）。
-     * 配置在数据库（game_reward_config），接口本身无副作用；结果的实际发放由调用方（GameManager）处理。
+     * 领取过关奖励：stage 1=金币200 2=道具抽1 3=收集抽1，规则硬编码在后端 RewardService；
+     * 接口无副作用，结果的实际发放由调用方（GameManager）处理。
      */
-    async claimStageReward(stage: number): Promise<RewardItem[] | null> {
-        if (stage === 1) {
-            const fixed = await fetchRewardConfig(GameRewardModeEnum.DAILY_CHALLENGE);
-            return fixed ? [fixed] : null;
-        }
-        return drawReward(GameRewardModeEnum.DAILY_CHALLENGE, stage, 2);
+    async claimStageReward(stage: number, ownedCollectCodes?: string[]): Promise<RewardItem[] | null> {
+        return fetchDailyStageReward(stage, ownedCollectCodes);
     }
 
     /** 今日进度（首页按钮状态展示复用）：1=在第1关 2=在第2关 */

@@ -2786,7 +2786,7 @@ export class GameManager extends Component {
      * exhausted=true（本局该道具次数已用完）时置灰并显示「本局已用完」；整个按钮为一个热区。
      * 返回按钮节点，由调用方挂点击（免费→求助→看广告链路）。
      */
-    private createSeparatedActionButton(
+    public createSeparatedActionButton(
         panelNode: Node, panelH: number, spec: ToolButtonSpec, exhausted = false,
         opts?: { asset?: string; x?: number; yOffset?: number; width?: number; name?: string; outlineColor?: Color }
     ): Node {
@@ -3329,54 +3329,22 @@ export class GameManager extends Component {
             this.renderSettingsModal(false);
         }, this);
 
-        // 设置面板：使用图片 panel_settings.png（新版立体风 640x993）
-        // 按宽 320 缩放（scale 0.5），高约 496
-        const panelW = 320;
-        const panelH = 496;
-        const panelNode = this.createNode('SettingsPanel', this.modalLayerNode, 0, 0, panelW, panelH);
-        
-        const panelSprite = panelNode.addComponent(Sprite);
-        panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
-        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_settings/spriteFrame', SpriteFrame).then((sf) => {
-            if (sf && panelSprite && panelSprite.isValid) {
-                panelSprite.spriteFrame = sf;
-            }
-        }).catch(() => {});
+        // 每日挑战：panel_home_settings 面板 + 底部唯一「返回主页」按钮（无重新挑战/回第一关）
+        if (this.driver.mode === 'daily') {
+            this.renderDailySettingsPanel();
+            return;
+        }
 
-        // 阻止点击穿透到遮罩
-        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
-            e.propagationStopped = true;
-        }, this);
+        // 无限模式：与每日挑战同款 panel_home_settings 面板（下方竖排两按钮，整体上移 70 居中）
+        const panelNode = this.renderSettingsPanelBase(70);
+        if (!panelNode) return;
+        const panelH = 300 * 699 / 640;
 
-        // 使用图片上自带的关闭按钮，只保留一个隐形的点击区域
-        const closeBtnSize = 60;
-        // 新图右上红色 X 钮实测中心 (133, 194)
-        const closeBtn = this.createNode('CloseBtn', panelNode, 133, 194, closeBtnSize, closeBtnSize);
-        closeBtn.on(Node.EventType.TOUCH_END, () => {
-            this.renderSettingsModal(false);
-        }, this);
-
-        // 声音开关：与图上喇叭图标垂直中心对齐（新图实测 cocos y=113，开关落在内嵌条右侧留白区）
-        const toggleSound = this.createToggle(panelNode, 0, 113, this.soundEnabled, (isOn) => {
-            this.soundEnabled = isOn;
-            localStorage.setItem('soundEnabled', String(isOn));
-            SoundManager.getInstance()?.setMute(!isOn);
-            if (isOn) {
-                SoundManager.getInstance()?.playBGM();
-            } else {
-                SoundManager.getInstance()?.stopBGM();
-            }
-        });
-
-        // 震动开关：与图上震动图标垂直中心对齐（新图实测 cocos y=38）
-        const toggleVibration = this.createToggle(panelNode, 0, 38, this.vibrationEnabled, (isOn) => {
-            this.vibrationEnabled = isOn;
-            localStorage.setItem('vibrationEnabled', String(isOn));
-            if (isOn) this.triggerVibration('light');
-        });
-
-        // 重新挑战（橙黄按钮）：热区中心对齐新图实测位置 (-5, -51)
-        const btnRestart = this.createNode('BtnRestart', panelNode, -5, -51, 200, 52);
+        // 重新挑战：面板下方独立按钮 btn_action（二次确认后放弃本局重开）
+        const btnRestart = this.createSeparatedActionButton(
+            panelNode, panelH, { text: '重新挑战', pay: 'free' }, false,
+            { width: 160, name: 'BtnRestart' },
+        );
         btnRestart.on(Node.EventType.TOUCH_END, () => {
             this.renderConfirmTip(
                 '重新挑战',
@@ -3391,28 +3359,94 @@ export class GameManager extends Component {
             );
         }, this);
 
-        // 回第一关（蓝色按钮）：热区中心对齐新图实测位置 (-6, -110)
-        const btnFirstLevel = this.createNode('BtnFirstLevel', panelNode, -6, -110, 200, 52);
-        btnFirstLevel.on(Node.EventType.TOUCH_END, () => {
+        // 返回主页：btn_action_blue 蓝钮，竖排在重新挑战下方
+        const btnContinue = this.createSeparatedActionButton(
+            panelNode, panelH, { text: '返回主页', pay: 'free' }, false,
+            { asset: 'btn_action_blue', width: 160, name: 'BtnHome', yOffset: 71 },
+        );
+        btnContinue.on(Node.EventType.TOUCH_END, () => {
             this.renderConfirmTip(
-                '回第一关',
-                '本局进度将被放弃，\n重新开始一局新关卡。\n确定要从第 1 关重新开始吗？',
+                '返回主页',
+                '本局进度将被放弃，\n重新开始一局新关卡。\n确定要返回主页吗？',
                 '继续游戏',
-                '回第一关',
+                '返回主页',
                 () => {
-                    this.currentLevel = 1;
-                    this.driver.saveLevel(this.currentLevel);
-                    this.ensureGameUI();
-                    // 进度条加载页 + 分帧初始化
-                    this.transitionToNewLevel();
+                    this.homePage.render();
                 },
                 () => this.renderSettingsModal(true),
             );
         }, this);
+    }
 
-        // 返回主页（绿色按钮）：热区中心对齐新图实测位置 (-5, -186)
-        const btnContinue = this.createNode('BtnContinue', panelNode, -5, -186, 204, 56);
-        btnContinue.on(Node.EventType.TOUCH_END, () => {
+    /**
+     * 设置面板公共主体：panel_home_settings.png（640x699，与首页设置弹窗同图），
+     * 图内相对坐标复用首页实测值（关闭 0.909/0.074、声音 0.317、震动 0.645）。
+     * 遮罩已由 renderSettingsModal 铺好；这里只画面板主体，面板下方按钮由各模式自挂。
+     */
+    private renderSettingsPanelBase(panelY: number): Node | null {
+        if (!this.modalLayerNode) return null;
+
+        const panelW = 300;
+        const panelH = panelW * 699 / 640;
+        const panelNode = this.createNode('SettingsPanel', this.modalLayerNode, 0, panelY, panelW, panelH);
+        const panelSprite = panelNode.addComponent(Sprite);
+        panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_home_settings/spriteFrame', SpriteFrame).then((sf) => {
+            if (sf && panelSprite && panelSprite.isValid) {
+                panelSprite.spriteFrame = sf;
+            }
+        }).catch(() => {});
+
+        // 阻止点击穿透到遮罩
+        panelNode.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+        }, this);
+
+        // 图内相对定位（与首页设置弹窗一致）
+        const px = (fx: number) => (fx - 0.5) * panelW;
+        const py = (fy: number) => (0.5 - fy) * panelH;
+
+        // 右上角 X 关闭热区
+        const closeBtn = this.createNode('CloseBtn', panelNode, px(0.909), py(0.074), 48, 48);
+        closeBtn.on(Node.EventType.TOUCH_END, () => {
+            this.renderSettingsModal(false);
+        }, this);
+
+        // 声音开关：与图上喇叭图标同一水平线（createToggle 内部会 +60 偏移）
+        const toggleX = 28;
+        this.createToggle(panelNode, toggleX, py(0.317), this.soundEnabled, (isOn) => {
+            this.soundEnabled = isOn;
+            localStorage.setItem('soundEnabled', String(isOn));
+            SoundManager.getInstance()?.setMute(!isOn);
+            if (isOn) {
+                SoundManager.getInstance()?.playBGM();
+            } else {
+                SoundManager.getInstance()?.stopBGM();
+            }
+        });
+
+        // 震动开关：与图上震动图标同一水平线
+        this.createToggle(panelNode, toggleX, py(0.645), this.vibrationEnabled, (isOn) => {
+            this.vibrationEnabled = isOn;
+            localStorage.setItem('vibrationEnabled', String(isOn));
+            if (isOn) this.triggerVibration('light');
+        });
+
+        return panelNode;
+    }
+
+    /** 每日挑战设置：公共面板 + 面板下方唯一「返回主页」按钮 */
+    private renderDailySettingsPanel() {
+        const panelNode = this.renderSettingsPanelBase(40);
+        if (!panelNode) return;
+        const panelH = 300 * 699 / 640;
+
+        // 面板下方唯一按钮：btn_action「返回主页」（二次确认与旧版一致）
+        const btnHome = this.createSeparatedActionButton(
+            panelNode, panelH, { text: '返回主页', pay: 'free' }, false,
+            { width: 160, name: 'BtnHome' },
+        );
+        btnHome.on(Node.EventType.TOUCH_END, () => {
             this.renderConfirmTip(
                 '返回主页',
                 '本局进度将被放弃，\n重新开始一局新关卡。\n确定要返回主页吗？',
@@ -5287,7 +5321,9 @@ export class GameManager extends Component {
                 reportEvent(scene);
             }
             callback();
-        }).catch(() => {
+        }).catch((reason) => {
+            // 防重入拒绝（连点）：静默忽略，不弹失败提示
+            if (reason === '广告进行中') return;
             if (scene) {
                 reportEvent(scene + '_skip');
             }
@@ -5470,8 +5506,8 @@ export class GameManager extends Component {
 
     /**
      * 每日挑战过关奖励：通关页点一次「领取奖励」→ stage=1 弹金币金光弹窗；
-     * 弹窗点「领取奖励」入账后自动拉 stage=2 抽签弹第二个金光弹窗；第二弹领完自动回主页。
-     * 配置在数据库（game_reward_config），发放仍写本地 PropStore/totalCoins。
+     * 每弹领完自动拉下一 stage（1=金币 2=道具抽 3=收集抽，规则在后端代码里），
+     * 后端返回空列表即链条结束，自动回主页。发放仍写本地 PropStore/totalCoins。
      * 无 claimStageReward 实现（如无限模式）时按钮直接是「返回主页」，行为与改造前一致。
      */
     private bindDailyRewardButton(btnNode: Node, label: Label, panelNode: Node) {
@@ -5492,30 +5528,32 @@ export class GameManager extends Component {
         const failTip = () => this.showCoinShortageTip('奖励领取失败，请稍后再试');
 
         let claiming = false;
+        // 递归领 stage：领完当前串拉下一 stage；后端返空=链条结束回主页（stage1 空视为异常，横幅允许重试）
+        // 收集抽奖前先取已拥有的 collectCode 列表传给后端排除（全部拥有则后端回退全量抽）
+        const claimStage = (stage: number) => {
+            this.ensureCollectCatalog().then((catalog) => {
+                return driver.claimStageReward!(stage, CollectStore.getOwnedCodes(catalog));
+            }).then((list) => {
+                claiming = false;
+                if (!list || list.length === 0) {
+                    if (stage === 1) { failTip(); return; }
+                    this.renderTools();
+                    goHome();
+                    return;
+                }
+                this.showRewardChain(list, 0, () => claimStage(stage + 1));
+            }).catch(() => {
+                claiming = false;
+                if (stage === 1) { failTip(); return; }
+                failTip();
+                goHome();
+            });
+        };
+
         btnNode.on(Node.EventType.TOUCH_END, () => {
             if (claiming) return;
             claiming = true;
-            driver.claimStageReward!(1).then((list1) => {
-                claiming = false;
-                if (!list1 || list1.length === 0) {
-                    // 配置缺失/接口异常：横幅提示，允许再次点击重试
-                    failTip();
-                    return;
-                }
-                // 第一串（金币）领完自动拉 stage=2 抽两条弹第二串；失败横幅后回主页
-                this.showRewardChain(list1, 0, () => {
-                    driver.claimStageReward!(2).then((list2) => {
-                        if (!list2 || list2.length === 0) { failTip(); goHome(); return; }
-                        this.showRewardChain(list2, 0, () => {
-                            this.renderTools();
-                            goHome();
-                        });
-                    }).catch(() => { failTip(); goHome(); });
-                });
-            }).catch(() => {
-                claiming = false;
-                failTip();
-            });
+            claimStage(1);
         }, this);
     }
 
@@ -5670,8 +5708,10 @@ export class GameManager extends Component {
         this.modalLayerNode.removeAllChildren();
 
         const driver = this.driver;
+        // 收集抽奖前先取已拥有的 collectCode 列表传给后端排除（全部拥有则后端回退全量抽）
         const pending = driver.getClearReward
-            ? driver.getClearReward(this.currentLevel)
+            ? this.ensureCollectCatalog().then((catalog) =>
+                driver.getClearReward!(this.currentLevel, CollectStore.getOwnedCodes(catalog)))
             : Promise.resolve(null);
         pending.then((rewards) => {
             if (!this.modalLayerNode) return;

@@ -221,14 +221,14 @@ export class ShopPage {
         this.gm.createLabel(card, item.name, 0, 66, 15, BROWN, true);
 
         // 图片：收集品（category=2）点击可放大查看，道具不加此交互
-        const imgNode = this.gm.createNode('Icon', card, 0, 12, 72, 72);
+        const imgNode = this.gm.createNode('Icon', card, 0, 16, 64, 64);
         const imgSprite = imgNode.addComponent(Sprite);
         imgSprite.sizeMode = Sprite.SizeMode.CUSTOM;
         this.gm.loadRemoteImage(item.imageUrl, imgSprite, () => {
             if (!imgNode.isValid) return;
             const ph = imgNode.addComponent(Graphics);
             ph.fillColor = new Color(220, 214, 198, 255);
-            ph.circle(0, 0, 30);
+            ph.circle(0, 0, 27);
             ph.fill();
         });
         if (item.category === 2 && item.imageUrl) {
@@ -238,7 +238,7 @@ export class ShopPage {
             }, this);
 
             // 右下角放大镜角标：纯视觉提示"这张图可以点开看大图"，本身不挂点击事件
-            const hintNode = this.gm.createNode('ZoomHint', card, 15 + 15, 12 - 28, 16, 16);
+            const hintNode = this.gm.createNode('ZoomHint', card, 28, -10, 16, 16);
             const hintG = hintNode.addComponent(Graphics);
             hintG.strokeColor = ORANGE;
             hintG.lineWidth = 2;
@@ -249,11 +249,16 @@ export class ShopPage {
             hintG.stroke();
         }
 
+        // 商品说明小字（后端 game_shop.item_desc 配置，如彩虹果「可任意匹配果篮」）
+        if (item.itemDesc) {
+            this.gm.createLabel(card, item.itemDesc, 0, -26, 11, BEIGE_LINE, true);
+        }
+
         // 价格
-        this.gm.createLabel(card, `${item.price}金币`, 0, -36, 14, new Color(200, 140, 30, 255), true);
+        this.gm.createLabel(card, `${item.price}金币`, 0, -44, 14, new Color(200, 140, 30, 255), true);
 
         // 购买按钮
-        const buyBtn = this.gm.createNode('BuyBtn', card, 0, -66, 84, 30);
+        const buyBtn = this.gm.createNode('BuyBtn', card, 0, -70, 84, 30);
         const bg2 = buyBtn.addComponent(Graphics);
         bg2.fillColor = ORANGE;
         bg2.roundRect(-42, -15, 84, 30, 15);

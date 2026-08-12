@@ -86,6 +86,12 @@ export class AdManager extends Component {
 
     showRewardedAd(): Promise<void> {
         return new Promise((resolve, reject) => {
+            // 防重入：广告进行中再来的请求直接拒绝，避免覆盖回调槽位导致看完不发奖
+            if (this.pendingResolve || this.pendingReject) {
+                reject('广告进行中');
+                return;
+            }
+
             if (!this.ensureAd()) {
                 // 无广告环境（编辑器/未配置 adUnitId）直接放行，不影响功能流程
                 resolve();

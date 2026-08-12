@@ -64,8 +64,8 @@ export class StoragePage {
         bg.getComponent(Graphics)!.rect(-pageW / 2, -pageH / 2, pageW, pageH);
         bg.getComponent(Graphics)!.fill();
 
-        // 顶栏：返回 + 标题
-        const headerY = pageH / 2 - 40;
+        // 顶栏：返回 + 标题（与商城页同高：pageH/2 - 80）
+        const headerY = pageH / 2 - 80;
         const backBtn = this.gm.createNode('BackBtn', this.pageNode, -pageW / 2 + 30, headerY, 40, 40);
         this.gm.createLabel(backBtn, '❮', 0, 0, 24, new Color(100, 120, 90, 255), true);
         backBtn.on(Node.EventType.TOUCH_END, () => {

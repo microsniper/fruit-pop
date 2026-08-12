@@ -146,11 +146,11 @@ export interface ModeDriver {
      * 领取过关奖励：stage=1 查阶段1固定奖励（金币，单元素数组），stage=2 按权重无放回抽多条道具/皮肤。
      * 配置在数据库，接口本身无副作用；调用方负责把结果实际发放到本地 PropStore/totalCoins。
      */
-    claimStageReward?(stage: number): Promise<RewardItem[] | null>;
+    claimStageReward?(stage: number, ownedCollectCodes?: string[]): Promise<RewardItem[] | null>;
 
     /**
      * 过关一次性结算奖励（无限模式用）：普通关=[金币]，5 的倍数关=[金币, 按权重抽1个]。
      * 配置在数据库按 mode 区分，接口无副作用；调用方负责发放。
      */
-    getClearReward?(clearedLevel: number): Promise<RewardItem[] | null>;
+    getClearReward?(clearedLevel: number, ownedCollectCodes?: string[]): Promise<RewardItem[] | null>;
 }

@@ -887,14 +887,6 @@ export const saveUserRegion = async (regionId: number): Promise<boolean> => {
 
 // ========== 过关奖励（配置放数据库，发放仍走前端本地记账）==========
 
-/** 过关奖励适用模式（与后端 GameRewardModeEnum 的 code 一致） */
-export enum GameRewardModeEnum {
-  /** 每日挑战 */
-  DAILY_CHALLENGE = 1,
-  /** 无限模式 */
-  ENDLESS_CHALLENGE = 2
-}
-
 /** 物品类型（与后端 ItemTypeEnum 的 code 一致） */
 export enum ItemTypeEnum {
   /** 道具（含金币） */
@@ -912,32 +904,41 @@ export interface RewardItem {
   imageUrl: string
 }
 
-/** 查阶段1固定奖励（通常是金币） */
-export const fetchRewardConfig = async (mode: GameRewardModeEnum): Promise<RewardItem | null> => {
+/** 每日挑战过关奖励：stage 1=金币200 2=道具抽1 3=收集抽1（规则在后端代码里）。
+ *  ownedCollectCodes：玩家当前已拥有的收集品编码，收集抽奖时后端会排除；全部拥有则回退全量抽。
+ *  空列表视为 null */
+export const fetchDailyStageReward = async (
+  stage: number,
+  ownedCollectCodes?: string[]
+): Promise<RewardItem[] | null> => {
   try {
-    const res = await request<RewardItem>({
-      url: '/api/game/reward/config',
+    const res = await request<RewardItem[]>({
+      url: '/api/game/reward/daily',
       method: 'POST',
-      data: { mode }
+      data: { stage, ownedCollectCodes }
     })
-    return res.data || null
+    return res.data && res.data.length > 0 ? res.data : null
   } catch (e) {
-    console.error('[API] fetch reward config failed:', e)
+    console.error('[API] fetch daily stage reward failed:', e)
     return null
   }
 }
 
-/** 阶段2按权重无放回抽 count 条；无副作用，不落用户状态，发放仍由前端处理。空列表视为 null */
-export const drawReward = async (mode: GameRewardModeEnum, stage: number, count: number): Promise<RewardItem[] | null> => {
+/** 无限模式过关结算：普通关=[金币]；5 的倍数关=[金币+随机道具/收集抽1]。
+ *  ownedCollectCodes：同上，收集抽奖时排除已拥有。空列表视为 null */
+export const fetchEndlessClearReward = async (
+  level: number,
+  ownedCollectCodes?: string[]
+): Promise<RewardItem[] | null> => {
   try {
     const res = await request<RewardItem[]>({
-      url: '/api/game/reward/draw',
+      url: '/api/game/reward/endless',
       method: 'POST',
-      data: { mode, stage, count }
+      data: { level, ownedCollectCodes }
     })
     return res.data && res.data.length > 0 ? res.data : null
   } catch (e) {
-    console.error('[API] draw reward failed:', e)
+    console.error('[API] fetch endless clear reward failed:', e)
     return null
   }
 }
@@ -958,6 +959,8 @@ export interface ShopItem {
   imageUrl: string
   /** category=2 时的 game_collect.id（购买成功后写入本地 CollectStore 用） */
   collectId?: number
+  /** 商品说明小字（后端 game_shop.item_desc，可选） */
+  itemDesc?: string
 }
 
 let shopCache: ShopItem[] | null = null;

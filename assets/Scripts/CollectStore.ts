@@ -66,6 +66,13 @@ export const CollectStore = {
         return Object.keys(owned).map(Number);
     },
 
+    /** 结合目录数据把已拥有的 id 列表转成 collectCode 列表（供过关抽奖排除已拥有用） */
+    getOwnedCodes(catalog: CollectItem[]): string[] {
+        const ownedIds = new Set(this.getOwnedIds());
+        if (ownedIds.size === 0) return [];
+        return catalog.filter((item) => ownedIds.has(item.id)).map((item) => item.collectCode);
+    },
+
     /** 指定收集品拥有数量，未拥有为 0 */
     getCount(collectId: number): number {
         return readState().owned[collectId] || 0;

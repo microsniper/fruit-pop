@@ -426,7 +426,8 @@ export class HomePage {
                 this.gm.coinCountLabel.string = `${this.gm.totalCoins}`;
             }
             const left = this.FREE_COIN_DAILY_LIMIT - newUsed;
-            this.showTip(left > 0 ? `+${amount} 金币 今日还可领 ${left} 次` : `+${amount} 金币 今日次数已用完`);
+            // 看完广告：panel_tip_common 横幅「恭喜获得金币xN」，停 2 秒飞出
+            this.gm.showCoinShortageTip(`恭喜获得金币x${amount}`);
             if (left <= 0 && this.freeCoinBtnNode && this.freeCoinBtnNode.isValid) {
                 const sp = this.freeCoinBtnNode.getComponent(Sprite);
                 if (sp) sp.grayscale = true;
@@ -452,7 +453,7 @@ export class HomePage {
         }
     }
 
-    /** 首页设置弹窗：只有音量/震动开关 + 游戏反馈按钮（暂不可点击），面板图 panel_home_settings.png */
+    /** 首页设置弹窗：音量/震动开关，面板图 panel_home_settings.png */
     private renderHomeSettingsModal() {
         if (!this.gm.modalLayerNode || !this.gm.modalLayerNode.isValid) return;
         this.gm.modalLayerNode.removeAllChildren();
@@ -464,10 +465,11 @@ export class HomePage {
             this.gm.modalLayerNode!.removeAllChildren();
         }, this);
 
-        // 面板：panel_home_settings.png（640x841，分包）
+        // 面板：panel_home_settings.png（640x699，分包）
         const panelW = 300;
-        const panelH = panelW * 841 / 640;
-        const panelNode = this.gm.createNode('HomeSettingsPanel', this.gm.modalLayerNode, 0, 0, panelW, panelH);
+        const panelH = panelW * 699 / 640;
+        // 分离式布局（面板+下方按钮）：整体上移 40 居中
+        const panelNode = this.gm.createNode('HomeSettingsPanel', this.gm.modalLayerNode, 0, 40, panelW, panelH);
         const panelSprite = panelNode.addComponent(Sprite);
         panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
         BundleManager.getInstance().loadAsset<SpriteFrame>('ui/panel_home_settings/spriteFrame', SpriteFrame).then((sf) => {
@@ -484,7 +486,7 @@ export class HomePage {
         const py = (fy: number) => (0.5 - fy) * panelH;
 
         // 右上角 X 关闭热区
-        const closeBtn = this.gm.createNode('CloseBtn', panelNode, px(0.901), py(0.061), 48, 48);
+        const closeBtn = this.gm.createNode('CloseBtn', panelNode, px(0.909), py(0.074), 48, 48);
         closeBtn.on(Node.EventType.TOUCH_END, (e: any) => {
             e.propagationStopped = true;
             this.gm.modalLayerNode!.removeAllChildren();
@@ -492,7 +494,7 @@ export class HomePage {
 
         // 音量开关：与图上喇叭图标同一水平线，开关放右侧（createToggle 内部会 +60 偏移）
         const toggleX = 28;
-        this.gm.createToggle(panelNode, toggleX, py(0.361), this.gm.soundEnabled, (isOn) => {
+        this.gm.createToggle(panelNode, toggleX, py(0.317), this.gm.soundEnabled, (isOn) => {
             this.gm.soundEnabled = isOn;
             localStorage.setItem('soundEnabled', String(isOn));
             SoundManager.getInstance()?.setMute(!isOn);
@@ -504,14 +506,17 @@ export class HomePage {
         });
 
         // 震动开关：与图上震动图标同一水平线
-        this.gm.createToggle(panelNode, toggleX, py(0.577), this.gm.vibrationEnabled, (isOn) => {
+        this.gm.createToggle(panelNode, toggleX, py(0.645), this.gm.vibrationEnabled, (isOn) => {
             this.gm.vibrationEnabled = isOn;
             localStorage.setItem('vibrationEnabled', String(isOn));
             if (isOn) this.gm.triggerVibration('light');
         });
 
-        // 游戏反馈按钮（图里的橙色立体按钮）：底图 640x841 实测按钮中心 (0.484, 0.848)、宽约 0.57 面板宽
-        const feedbackBtn = this.gm.createNode('FeedbackBtn', panelNode, px(0.484), py(0.848), panelW * 0.57, 62);
+        // 面板下方唯一按钮：btn_action「游戏反馈」，打开现有 FeedbackPage
+        const feedbackBtn = this.gm.createSeparatedActionButton(
+            panelNode, panelH, { text: '游戏反馈', pay: 'free' }, false,
+            { width: 160, name: 'BtnFeedback' },
+        );
         feedbackBtn.on(Node.EventType.TOUCH_END, (e: any) => {
             e.propagationStopped = true;
             new FeedbackPage(this.gm).open(() => this.showTip('提交成功，感谢反馈'));

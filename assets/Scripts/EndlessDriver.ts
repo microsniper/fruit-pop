@@ -1,4 +1,4 @@
-import { loginAndGetProgress, saveProgress, getGameConfig, fetchRewardConfig, drawReward, GameRewardModeEnum, RewardItem } from './api';
+import { loginAndGetProgress, saveProgress, getGameConfig, fetchEndlessClearReward, RewardItem } from './api';
 import type { ClearAction, ModeDriver, ToolButtonSpec, ToolType } from './ModeDriver';
 import { DEFAULT_LAYER_RULES, LayerRules } from './ModeDriver';
 import { PropStore } from './PropStore';
@@ -38,17 +38,11 @@ export class EndlessDriver implements ModeDriver {
     }
 
     /**
-     * 过关结算奖励（mode=2 配置）：普通关=[金币]；5 的倍数关=[金币, 按权重抽1个]。
+     * 过关结算奖励：普通关=[金币200]；5 的倍数关=[金币200 + 随机道具/收集抽1]，规则硬编码在后端 RewardService。
      * 接口无副作用，实际发放由 GameManager 处理。
      */
-    async getClearReward(clearedLevel: number): Promise<RewardItem[] | null> {
-        const fixed = await fetchRewardConfig(GameRewardModeEnum.ENDLESS_CHALLENGE);
-        const list: RewardItem[] = fixed ? [fixed] : [];
-        if (clearedLevel % 5 === 0) {
-            const drawn = await drawReward(GameRewardModeEnum.ENDLESS_CHALLENGE, 2, 1);
-            if (drawn) list.push(...drawn);
-        }
-        return list.length > 0 ? list : null;
+    async getClearReward(clearedLevel: number, ownedCollectCodes?: string[]): Promise<RewardItem[] | null> {
+        return fetchEndlessClearReward(clearedLevel, ownedCollectCodes);
     }
 
     // ===== 道具限次：全部不限 =====
