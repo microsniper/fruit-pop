@@ -768,9 +768,15 @@ export class HomePage {
     }
 
     /**
-     * 点「每日挑战」：先检测是否选过地区。没选过→弹选地区（选完确定直接进）；选过→经 Loading 直进对局。
+     * 点「每日挑战」：先查后端今日是否已通关，已通关弹提示拦截；未通关再检测地区→经 Loading 直进对局。
      */
-    private onDailyChallengeClick() {
+    private async onDailyChallengeClick() {
+        // 先查后端：今日已通关则弹提示拦截
+        const status = await getDailyStatus();
+        if (status?.cleared) {
+            this.showTip('今日已通关，明日再来！');
+            return;
+        }
         if (getLocalRegionId() == null) {
             // 未选省份：先选省（省份榜按省统计通关人数，选完再进）
             this.renderRegionSelectModal();
