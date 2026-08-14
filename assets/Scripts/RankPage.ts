@@ -1,6 +1,8 @@
-import { Node, UITransform, Color, Graphics, Mask, Sprite, SpriteFrame, ImageAsset, ScrollView, assetManager, Texture2D } from 'cc';
-import { fetchRank, RankItem, hasUserProfile, updateProfile, getDailyRank, DailyRankResponse } from './api';
+import { Node, UITransform, Color, Graphics, Mask, Sprite, SpriteFrame, ScrollView } from 'cc';
+import { fetchRankConfig, RankItem, hasUserProfile, updateProfile, getDailyRankConfig, DailyRankResponse } from './api';
 import { BundleManager } from './BundleManager';
+import { drawTitlePlate } from './PageTabs';
+import { SoundManager } from './SoundManager';
 import type { GameManager } from './GameManager';
 
 declare const wx: any;
@@ -128,15 +130,9 @@ export class RankPage {
         const url = (avatarUrl || '').trim();
         if (url.startsWith('http')) {
             this.setDefaultAvatarFrame(sprite);
-            assetManager.loadRemote<ImageAsset>(url, { ext: '.png' }, (err, imageAsset) => {
-                if (!err && imageAsset && sprite.isValid) {
-                    const texture = new Texture2D();
-                    texture.image = imageAsset;
-                    const spriteFrame = new SpriteFrame();
-                    spriteFrame.texture = texture;
-                    sprite.spriteFrame = spriteFrame;
-                }
-            });
+            // 走 GameManager 统一的远程图 LRU 缓存（按 URL 复用纹理，超限自动释放），
+            // 避免排行榜每次渲染都重新下载/新建 Texture2D 导致显存只增不减
+            this.gm.loadRemoteImage(url, sprite, () => this.setDefaultAvatarFrame(sprite, url));
         } else {
             this.setDefaultAvatarFrame(sprite, url);
         }
@@ -151,7 +147,7 @@ export class RankPage {
     private async loadAndShowRank() {
         this.gm.showLoadingOverlay();
         try {
-            const data = await fetchRank();
+            const data = await fetchRankConfig();
             this.endlessCache = { list: data.list, myRank: data.myRank };
             await this.loadDefaultAvatars();
             this.gm.hideLoadingOverlay();
@@ -193,7 +189,7 @@ export class RankPage {
     private renderPage() {
         this.close();
         this.destroyAuthOverlay();
-        if (this.gm.rootNode) this.gm.rootNode.removeAllChildren();
+        if (this.gm.rootNode) this.gm.rootNode.destroyAllChildren();
         this.gm.teardownGameView();
 
         const pageW = this.gm.screenWidth;
@@ -215,8 +211,11 @@ export class RankPage {
             else { this.gm.goBackToGame(); }
         }, this);
 
+        // 顶部「排行榜」金属铭牌（商城同款样式）；tab 下移到铭牌下方（与商城主 tab 位置一致）
+        drawTitlePlate(this.gm, this.pageNode, headerY, '排行榜');
+
         // Tab
-        this.renderTabs(headerY);
+        this.renderTabs(headerY - 56);
         this.renderTabContent();
     }
 
@@ -225,10 +224,18 @@ export class RankPage {
         const leftX = -(tabW * 2 + gap) / 2 + tabW / 2;
 
         this.tabEndlessNode = this.gm.createNode('TabEndless', this.pageNode!, leftX, headerY, tabW, tabH);
-        this.tabEndlessNode.on(Node.EventType.TOUCH_END, () => this.switchTab('endless'), this);
+        this.tabEndlessNode.on(Node.EventType.TOUCH_END, () => {
+            if (this.currentTab === 'endless') return;
+            SoundManager.getInstance()?.playSystemClick();
+            this.switchTab('endless');
+        }, this);
 
         this.tabDailyNode = this.gm.createNode('TabDaily', this.pageNode!, leftX + tabW + gap, headerY, tabW, tabH);
-        this.tabDailyNode.on(Node.EventType.TOUCH_END, () => this.switchTab('daily'), this);
+        this.tabDailyNode.on(Node.EventType.TOUCH_END, () => {
+            if (this.currentTab === 'daily') return;
+            SoundManager.getInstance()?.playSystemClick();
+            this.switchTab('daily');
+        }, this);
 
         this.updateTabStyle();
     }
@@ -239,20 +246,20 @@ export class RankPage {
         const dimText = new Color(150, 160, 140, 255);
 
         if (this.tabEndlessNode?.isValid) {
-            this.tabEndlessNode.removeAllChildren();
+            this.tabEndlessNode.destroyAllChildren();
             if (this.currentTab === 'endless') {
                 const g = this.gm.createGraphicsNode('TabBg', this.tabEndlessNode, 80, 32, 0, 0);
                 this.gm.drawRoundedRect(g.getComponent(Graphics)!, 80, 32, selBg, 16);
             }
-            this.gm.createLabel(this.tabEndlessNode, '无限榜', 0, 0, 16, this.currentTab === 'endless' ? selText : dimText, true);
+            this.gm.createLabel(this.tabEndlessNode, '全国', 0, 0, 16, this.currentTab === 'endless' ? selText : dimText, true);
         }
         if (this.tabDailyNode?.isValid) {
-            this.tabDailyNode.removeAllChildren();
+            this.tabDailyNode.destroyAllChildren();
             if (this.currentTab === 'daily') {
                 const g = this.gm.createGraphicsNode('TabBg', this.tabDailyNode, 80, 32, 0, 0);
                 this.gm.drawRoundedRect(g.getComponent(Graphics)!, 80, 32, selBg, 16);
             }
-            this.gm.createLabel(this.tabDailyNode, '挑战榜', 0, 0, 16, this.currentTab === 'daily' ? selText : dimText, true);
+            this.gm.createLabel(this.tabDailyNode, '全省', 0, 0, 16, this.currentTab === 'daily' ? selText : dimText, true);
         }
     }
 
@@ -267,10 +274,15 @@ export class RankPage {
         }
     }
 
+    /**
+     * 挑战榜列表 + 「我的排名」卡片统一用展示接口（叠加虚拟基数），避免出现
+     * 「排名第1、却只有1人通关」这种真实/虚拟两套口径混着看很矛盾的问题——
+     * 展示接口自己就会按同一份虚拟叠加后的列表算出 myRank（排名和人数口径与上面列表完全一致）。
+     */
     private async loadDailyRank() {
         this.gm.showLoadingOverlay();
         try {
-            this.dailyCache = await getDailyRank();
+            this.dailyCache = await getDailyRankConfig();
             this.gm.hideLoadingOverlay();
             this.renderTabContent();
         } catch {
@@ -306,8 +318,8 @@ export class RankPage {
         const list = data.list || [];
         const myRank = data.myRank;
 
-        // 列表区域（卡片行直接铺在页面背景上，无大底板）
-        const topY = headerY - 40;
+        // 列表区域（卡片行直接铺在页面背景上，无大底板）；tab 下移后列表顶部同步再让 56px
+        const topY = headerY - 96;
         const myCardH = myRank ? 90 : 20;
         const listBgH = pageH / 2 + topY;
         const viewH = listBgH - 20 - myCardH;
@@ -330,36 +342,54 @@ export class RankPage {
         contentNode.setPosition(0, viewH / 2, 0);
         scrollView.content = contentNode;
 
-        for (let i = 0; i < list.length; i++) {
-            const item = list[i];
-            const y = -i * itemH - itemH / 2;
-            const leftX = -listW / 2 + 16;
-            const isMe = !!item.isMe;
-            const colors = this.rowColors(item.rank, isMe);
+        // 分帧建行：每行含 Mask.GRAPHICS_ELLIPSE（头像圆形裁切）+ 3 个 Label + 1 个 Graphics，
+        // 20 行一次性同步建完会在一帧内堆约 140 个节点，中低端机上单帧耗时可达到卡顿级别、
+        // 期间主线程被占满导致点击无响应；每帧只建一批，把这份耗时摊到多帧，中间让主线程喘气
+        const ROW_CHUNK = 4;
+        let rowIndex = 0;
+        const buildRowStep = () => {
+            if (!contentNode.isValid) {
+                this.gm.unschedule(buildRowStep);
+                return;
+            }
+            const end = Math.min(rowIndex + ROW_CHUNK, list.length);
+            for (; rowIndex < end; rowIndex++) {
+                const item = list[rowIndex];
+                const y = -rowIndex * itemH - itemH / 2;
+                const leftX = -listW / 2 + 16;
+                const isMe = !!item.isMe;
+                const colors = this.rowColors(item.rank, isMe);
 
-            // 行卡片
-            const rowBg = this.gm.createGraphicsNode('RowBg', contentNode, listW, 56, 0, y);
-            this.gm.drawRoundedRect(rowBg.getComponent(Graphics)!, listW, 56, colors.bg, 12);
+                // 行卡片
+                const rowBg = this.gm.createGraphicsNode('RowBg', contentNode, listW, 56, 0, y);
+                this.gm.drawRoundedRect(rowBg.getComponent(Graphics)!, listW, 56, colors.bg, 12);
 
-            // 排名
-            const rl = this.gm.createLabel(contentNode, `${item.rank}`, leftX + 8, y, 18, colors.text, true);
-            rl.horizontalAlign = 0;
-            rl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+                // 排名
+                const rl = this.gm.createLabel(contentNode, `${item.rank}`, leftX + 8, y, 18, colors.text, true);
+                rl.horizontalAlign = 0;
+                rl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
-            // 头像
-            this.createAvatarSpriteNode(contentNode, leftX + 56, y, 36, item.avatarUrl);
+                // 头像
+                this.createAvatarSpriteNode(contentNode, leftX + 56, y, 36, item.avatarUrl);
 
-            // 昵称
-            const nick = this.getRankDisplayName(item);
-            const nl = this.gm.createLabel(contentNode, nick, leftX + 82, y, 15, colors.text, isMe);
-            nl.horizontalAlign = 0;
-            nl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+                // 昵称
+                const nick = this.getRankDisplayName(item);
+                const nl = this.gm.createLabel(contentNode, nick, leftX + 82, y, 15, colors.text, isMe);
+                nl.horizontalAlign = 0;
+                nl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
-            // 关卡数
-            const rightX = listW / 2 - 16;
-            const vl = this.gm.createLabel(contentNode, `${item.levelNum}关`, rightX, y, 17, colors.text, true);
-            vl.horizontalAlign = 2;
-            vl.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
+                // 关卡数
+                const rightX = listW / 2 - 16;
+                const vl = this.gm.createLabel(contentNode, `${item.levelNum}关`, rightX, y, 17, colors.text, true);
+                vl.horizontalAlign = 2;
+                vl.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
+            }
+            if (rowIndex >= list.length) {
+                this.gm.unschedule(buildRowStep);
+            }
+        };
+        if (list.length > 0) {
+            this.gm.schedule(buildRowStep, 0);
         }
 
         // 底部我的排名
@@ -380,8 +410,8 @@ export class RankPage {
         const list = data.list || [];
         const myRank = data.myRank;
 
-        // 列表区域（卡片行直接铺在页面背景上，无大底板）
-        const topY = headerY - 40;
+        // 列表区域（卡片行直接铺在页面背景上，无大底板）；我的省份卡片带水果人群，比无限榜的高；tab 下移后列表顶部同步再让 56px
+        const topY = headerY - 96;
         const myCardH = myRank ? 90 : 40;
         const listBgH = pageH / 2 + topY;
         const viewH = listBgH - 20 - myCardH;
@@ -404,32 +434,48 @@ export class RankPage {
         contentNode.setPosition(0, viewH / 2, 0);
         scrollView.content = contentNode;
 
-        for (let i = 0; i < list.length; i++) {
-            const item = list[i];
-            const y = -i * itemH - itemH / 2;
-            const leftX = -listW / 2 + 16;
-            const isMe = !!item.isMe;
-            const colors = this.rowColors(item.rank, isMe);
+        // 分帧建行：与无限榜同款手法，省份数增多时同样不会一次同步卡住主线程
+        const ROW_CHUNK = 4;
+        let rowIndex = 0;
+        const buildRowStep = () => {
+            if (!contentNode.isValid) {
+                this.gm.unschedule(buildRowStep);
+                return;
+            }
+            const end = Math.min(rowIndex + ROW_CHUNK, list.length);
+            for (; rowIndex < end; rowIndex++) {
+                const item = list[rowIndex];
+                const y = -rowIndex * itemH - itemH / 2;
+                const leftX = -listW / 2 + 16;
+                const isMe = !!item.isMe;
+                const colors = this.rowColors(item.rank, isMe);
 
-            // 行卡片
-            const rowBg = this.gm.createGraphicsNode('RowBg', contentNode, listW, 56, 0, y);
-            this.gm.drawRoundedRect(rowBg.getComponent(Graphics)!, listW, 56, colors.bg, 12);
+                // 行卡片
+                const rowBg = this.gm.createGraphicsNode('RowBg', contentNode, listW, 56, 0, y);
+                this.gm.drawRoundedRect(rowBg.getComponent(Graphics)!, listW, 56, colors.bg, 12);
 
-            // 排名
-            const rl = this.gm.createLabel(contentNode, `${item.rank}`, leftX + 8, y, 18, colors.text, true);
-            rl.horizontalAlign = 0;
-            rl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+                // 排名
+                const rl = this.gm.createLabel(contentNode, `${item.rank}`, leftX + 8, y, 18, colors.text, true);
+                rl.horizontalAlign = 0;
+                rl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
-            // 省份名
-            const nl = this.gm.createLabel(contentNode, item.regionName || '未知', leftX + 50, y, 17, colors.text, isMe);
-            nl.horizontalAlign = 0;
-            nl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+                // 省份名
+                const nl = this.gm.createLabel(contentNode, item.regionName || '未知', leftX + 50, y, 17, colors.text, isMe);
+                nl.horizontalAlign = 0;
+                nl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
-            // 通关人数
-            const rightX = listW / 2 - 16;
-            const vl = this.gm.createLabel(contentNode, `${item.clearCount}人通关`, rightX, y, 15, colors.text, true);
-            vl.horizontalAlign = 2;
-            vl.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
+                // 通关人数
+                const rightX = listW / 2 - 16;
+                const vl = this.gm.createLabel(contentNode, `${item.clearCount}人通关`, rightX, y, 15, colors.text, true);
+                vl.horizontalAlign = 2;
+                vl.node.getComponent(UITransform)!.setAnchorPoint(1, 0.5);
+            }
+            if (rowIndex >= list.length) {
+                this.gm.unschedule(buildRowStep);
+            }
+        };
+        if (list.length > 0) {
+            this.gm.schedule(buildRowStep, 0);
         }
 
         // 底部我的省份

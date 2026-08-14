@@ -1,18 +1,23 @@
 import { Node, Vec3, UITransform, Color, tween, Graphics, Mask, Sprite, SpriteFrame, Label, resources, ScrollView, director, UIOpacity } from 'cc';
-import { getGameConfig, isNewUserThisLogin, getLocalRegionId, fetchRegionList, saveUserRegion, RegionItem } from './api';
+import { getGameConfig, isNewUserThisLogin, getLocalRegionId, fetchRegionList, saveUserRegion, RegionItem, getDailyRankConfig, DailyRankResponse, fetchRandomFruits, CollectItem, getDailyStatus } from './api';
 import { SoundManager } from './SoundManager';
 import { BundleManager } from './BundleManager';
 import { LoadingPage } from './LoadingPage';
-import { DailyDriver } from './DailyDriver';
 import { SignInPage } from './SignInPage';
 import { FeedbackPage } from './FeedbackPage';
+import { CollectStore } from './CollectStore';
 import type { GameManager } from './GameManager';
+
+/** 首页排行牌圆盘水果人群：固定摆放数量，与通关人数无关，保证每个圆盘都站满 */
+const HOME_FRUIT_CROWD_MAX = 20;
+/** rank_disc.png 实际高宽比（512x395），几何计算要用真实比例，不能拿占位比例算位置 */
+const DISC_ASPECT = 395 / 512;
 
 declare const wx: any;
 
 /**
  * 首页：模式选择页（无限模式/每日挑战）及只在首页出现的功能——
- * 七日签到入口、首页设置弹窗、免费金币、新人礼弹窗。
+ * 签到入口、首页设置弹窗、免费金币、新人礼弹窗。
  * 纯逻辑类（非组件），共享工具与状态通过 GameManager 引用访问。
  */
 export class HomePage {
@@ -26,6 +31,10 @@ export class HomePage {
     private newUserGiftMarked = false;
     /** 签到引导手指（今天未签到时压在签到按钮上） */
     private signInGuideNode: Node | null = null;
+    /** 每日挑战省份榜数据缓存（本次 render 有效，随首页销毁失效） */
+    private dailyRankCache: DailyRankResponse | null = null;
+    /** 水果目录（game_collect 里 groupCode=fruit 的子集），供排行牌人群贴图随机挑选用 */
+    private fruitCatalog: CollectItem[] | null = null;
 
     constructor(private gm: GameManager) {}
 
@@ -36,7 +45,7 @@ export class HomePage {
         this.gm.storagePage.close();
         this.gm.shopPage.close();
         if (this.gm.rootNode) {
-            this.gm.rootNode.removeAllChildren();
+            this.gm.rootNode.destroyAllChildren();
         }
         this.gm.teardownGameView();
 
@@ -65,6 +74,11 @@ export class HomePage {
             }
         });
 
+        // 每日挑战省份排行牌+水果人群：铺在背景之上、所有按钮之下（图层意义上的"下面"）。
+        // 容器节点必须在这里同步创建（占好兄弟节点顺序），内容数据异步拉到后再往里填——
+        // 否则等异步回调触发时标题/按钮早已作为后续兄弟节点加入，反而会盖在它们上面。
+        this.renderRegionRankBoard(pageW, pageH);
+
         // 顶部标题「摘呀摘」（title_home.png，分包；启动时分包已随水果预载，此时必定可用）
         const titleW = pageW * 0.62;
         const titleNode = this.gm.createNode('HomeTitle', this.pageNode, 0, pageH * 0.34, titleW, titleW * 0.41);
@@ -87,20 +101,28 @@ export class HomePage {
             .repeatForever()
             .start();
 
-        // 两个模式入口按钮（每日挑战在上，无限模式在下）
-        this.createHomeButton('btn_daily', 0, -pageH * 0.08, 125, () => this.onDailyChallengeClick());
-                // 每日挑战按钮下方：今日状态小字（仅展示通关标记，不再有续玩进度）
-                const dailyStatusText = DailyDriver.readTodayCleared()
-                    ? '今日已通关·继续挑战'
-                    : '';
-                if (dailyStatusText) {
-                    this.gm.createLabel(this.pageNode!, dailyStatusText, 0, -pageH * 0.08 - 48, 14, new Color(120, 85, 45, 255), true);
-                }
-        this.createHomeButton('btn_endless', 0, -pageH * 0.22, 125, () => this.enterEndlessMode());
+        // 两个模式入口按钮（每日挑战在上，无限模式在下）：
+        // 无限模式离屏幕底边约 50px，每日挑战在无限模式上方 120px（两者按钮中心的距离）
+        const dailyBtnW = 125;
+        const dailyBtnH = dailyBtnW * (225 / 420); // btn_daily.png 实际宽高比
+        const endlessBtnW = 125;
+        const endlessBtnH = endlessBtnW * (252 / 420); // btn_endless.png 实际宽高比
+        const endlessBtnY = -pageH / 2 + 50 + endlessBtnH / 2;
+        const dailyBtnY = endlessBtnY + 120;
+        this.createHomeButton('btn_daily', 0, dailyBtnY, dailyBtnW, () => this.onDailyChallengeClick());
+                // 今日状态小字：叠在按钮图上，往下调 30px（26px 基础上再下移 4px 避开按钮文字），金色突出提醒。
+                // 查后端真实通关状态（不同设备/环境登录同一账号结果一致），不用本地缓存判断
+                const dailyStatusNode = this.pageNode;
+                getDailyStatus().then((res) => {
+                    if (!dailyStatusNode || !dailyStatusNode.isValid || !res?.cleared) return;
+                    this.gm.createLabel(dailyStatusNode, '今日已通关', 0, dailyBtnY + dailyBtnH * 0.18 - 30, 14, new Color(255, 200, 60, 255), true);
+                }).catch(() => {});
+        this.createHomeButton('btn_endless', 0, endlessBtnY, endlessBtnW, () => this.enterEndlessMode());
 
-        // 左右两侧功能图标：每日签到（左）、排行榜（右）
+        // 左右两侧功能图标：每日签到（左）、排行榜（右）；两侧整组按钮下移 80px 让位给排行牌板
         const sideBtnW = 58;
-        const sideBtnY = pageH * 0.10;
+        const sideBtnYOffset = 80;
+        const sideBtnY = pageH * 0.10 - sideBtnYOffset;
         const signInBtnNode = this.createHomeButton('btn_signin', -pageW / 2 + 42, sideBtnY, sideBtnW, () => this.onSignInClick());
         // 个人仓库（签到按钮下方，间距与「设置-签到」间距同款 0.12*pageH）：整页切换，看道具与收集品
         this.createHomeButton('btn_storage', -pageW / 2 + 42, sideBtnY - pageH * 0.12, sideBtnW, () => this.gm.storagePage.open());
@@ -126,20 +148,22 @@ export class HomePage {
             this.gm.rankPage.setupAuthOverlay(rankBtnNode);
         }
 
-        // 左上角设置按钮：放在树冠下方，避免遮挡背景上的树
-        this.createHomeButton('btn_home_settings', -pageW / 2 + 42, pageH * 0.22, sideBtnW, () => this.renderHomeSettingsModal());
+        // 左上角设置按钮：放在树冠下方，避免遮挡背景上的树；同样下移 80px 与两侧按钮组保持一致
+        const topSideBtnY = pageH * 0.22 - sideBtnYOffset;
+        this.createHomeButton('btn_home_settings', -pageW / 2 + 42, topSideBtnY, sideBtnW, () => this.renderHomeSettingsModal());
 
         // 免费金币（排行榜上方，与设置按钮同高）：看广告领金币，每天限 3 次
-        this.freeCoinBtnNode = this.createHomeButton('btn_free_coin', pageW / 2 - 42, pageH * 0.22, sideBtnW, () => this.onFreeCoinClick());
+        this.freeCoinBtnNode = this.createHomeButton('btn_free_coin', pageW / 2 - 42, topSideBtnY, sideBtnW, () => this.onFreeCoinClick());
         if (this.freeCoinBtnNode && this.getFreeCoinClaimsToday() >= this.FREE_COIN_DAILY_LIMIT) {
             const sp = this.freeCoinBtnNode.getComponent(Sprite);
             if (sp) sp.grayscale = true;
         }
 
-        // 金币余额（设置与免费金币之间，居中）：图标+文字平铺（方形 coin.png，无底框），
-        // 引用挂到 gm.coinCountLabel/coinIconNode 上，新人礼的金币飞行动画自动飞向这里
-        const balIconH = 28;
-        const balY = pageH * 0.22;
+        // 金币余额：图标+文字平铺（方形 coin.png，无底框），位置独立于两侧按钮组（不跟着下移），
+        // 图标和数字都调大、数字加粗，比之前更醒目。引用挂到 gm.coinCountLabel/coinIconNode 上，
+        // 新人礼的金币飞行动画自动飞向这里
+        const balIconH = 36;
+        const balY = pageH * 0.22 - 30; // 金币条整体下移 30px
         const balCoinNode = this.gm.createNode('HomeCoinIcon', this.pageNode, -balIconH / 2 - 4, balY, balIconH, balIconH);
         this.gm.coinIconNode = balCoinNode;
         const balCoinSprite = balCoinNode.addComponent(Sprite);
@@ -152,8 +176,9 @@ export class HomePage {
         // 数字紧贴图标右侧，左锚点+不缩放，数字变大时向右撑
         const balLabelNode = this.gm.createNode('HomeCoinCount', this.pageNode, balIconH / 2 + 2, balY, balIconH * 2, balIconH);
         const balLabel = balLabelNode.addComponent(Label);
-        balLabel.fontSize = 16;
+        balLabel.fontSize = 22;
         balLabel.lineHeight = balIconH;
+        balLabel.isBold = true;
         balLabel.color = new Color(46, 110, 30, 255);
         balLabel.string = `${this.gm.totalCoins}`;
         const balTransform = balLabelNode.getComponent(UITransform);
@@ -184,8 +209,8 @@ export class HomePage {
         // 新人礼弹窗改在首页弹出（已领取的不会再弹）
         this.gm.scheduleOnce(() => this.tryShowRewards(), 0.6);
 
-        // 后台预热商城/道具远程图，用户之后点进商城/仓库时基本秒显示（不阻塞首页渲染）
-        this.gm.preloadShopAndResourceImages();
+        // 商城/道具远程图改为按需加载（点商城/仓库入口时才预热），不在首页无差别全量下载解码，
+        // 避免不进商城/仓库的玩家也白白背上这份内存开销
     }
 
     /** 首页按钮：整图 Sprite + 按压缩放反馈，高度按图片比例自适应 */
@@ -212,9 +237,209 @@ export class HomePage {
         }, this);
         btnNode.on(Node.EventType.TOUCH_END, () => {
             tween(btnNode).to(0.08, { scale: new Vec3(1, 1, 1) }).start();
+            SoundManager.getInstance()?.playSystemClick();
             onTap();
         }, this);
         return btnNode;
+    }
+
+    // ===== 首页省份排行牌 + 水果人群：铺满全页，垫在按钮之下（图层顺序），可上下滑动 =====
+
+    /**
+     * 排行牌容器节点同步创建（占好兄弟节点顺序，保证垫在后续标题/按钮之下），
+     * 数据（省份榜+水果目录）异步拉取，拿到后再往容器里填内容。
+     */
+    private renderRegionRankBoard(pageW: number, pageH: number) {
+        if (!this.pageNode) return;
+        const boardParent = this.pageNode;
+        const boardNode = this.gm.createNode('RegionRankBoard', boardParent, 0, 0, pageW, pageH);
+        Promise.all([getDailyRankConfig(), this.ensureFruitCatalog(), CollectStore.ensureLoaded()]).then(([rank]) => {
+            if (!boardNode.isValid) return;
+            this.dailyRankCache = rank;
+            this.buildRegionRankList(boardNode, pageW, pageH);
+        }).catch(() => { /* 榜拉取失败：首页其余内容照常展示，静默跳过这块 */ });
+    }
+
+    /** 水果目录（后端随机抽取 30 个 fruit，每次进首页结果不同），会话内缓存一次 */
+    private async ensureFruitCatalog(): Promise<CollectItem[]> {
+        if (this.fruitCatalog) return this.fruitCatalog;
+        this.fruitCatalog = await fetchRandomFruits();
+        return this.fruitCatalog;
+    }
+
+    /** 一个排名人群贴图用的水果图标：随机挑一个装饰用；preferMine 时优先取玩家真实展示的水果 */
+    private pickFruitIconUrl(preferMine: boolean): string | null {
+        const catalog = this.fruitCatalog;
+        if (!catalog || catalog.length === 0) return null;
+        if (preferMine) {
+            const mine = CollectStore.getCurrentCollect(catalog);
+            if (mine) return mine.colorUrl;
+        }
+        return catalog[Math.floor(Math.random() * catalog.length)].colorUrl;
+    }
+
+    /**
+     * 可滑动的省份排行列表：每个排名一块「悬浮排名牌 + 圆盘水果人群」，居中片宽（两侧让给功能按钮），
+     * 外层滚动容器仍铺满整页高度撑滑动手势范围，行内容只占中间一列。
+     */
+    private buildRegionRankList(parent: Node, pageW: number, pageH: number) {
+        const data = this.dailyRankCache;
+        const list = data?.list || [];
+        if (list.length === 0) return;
+
+        const plateOverlap = -20; // 牌子底边与圆盘顶边的间距（负值=拉开距离，避免猫群贴着牌子挡字）
+        const plateH = 40;
+        const rowGap = 20;
+        const columnW = pageW * 0.6; // 居中片宽，两侧留给签到/仓库/排行榜/商城等按钮
+        const plateW = columnW * 0.86;
+        const discW = columnW;
+        const discH = discW * DISC_ASPECT; // 圆盘实际高度，按真实图片比例算，不用占位猜测值
+        // 单行总高 = 牌子 + 圆盘 - 重叠量 + 行间距
+        const itemH = plateH + discH - plateOverlap + rowGap;
+        // 列表起点：金币余额条下方留出间隙，不从屏幕最顶部开始（金币在 pageH*0.22，图标半高14）；第一名再整体下移 80px
+        const topPad = pageH * 0.28 + 14 + 24 + 80;
+
+        const scrollView = parent.addComponent(ScrollView);
+        scrollView.horizontal = false;
+        scrollView.vertical = true;
+
+        const viewNode = this.gm.createNode('RegionRankView', parent, 0, 0, pageW, pageH);
+        const mask = viewNode.addComponent(Mask);
+        mask.type = Mask.Type.GRAPHICS_RECT;
+
+        const contentH = Math.max(list.length * itemH + topPad, pageH);
+        const contentNode = this.gm.createNode('RegionRankContent', viewNode, 0, 0, pageW, contentH);
+        contentNode.getComponent(UITransform)!.setAnchorPoint(0.5, 1);
+        contentNode.setPosition(0, pageH / 2, 0);
+        scrollView.content = contentNode;
+
+        // 分帧建行：每行含圆盘+牌子+3文字+20个水果头像（约24个节点/行），省份数多时一次同步建完
+        // 会在首页刚进入时卡住主线程一整帧，与排行榜页列表同款分帧手法，摊到多帧完成
+        const ROW_CHUNK = 2;
+        let rowIndex = 0;
+        const buildRowStep = () => {
+            if (!contentNode.isValid) {
+                this.gm.unschedule(buildRowStep);
+                return;
+            }
+            const end = Math.min(rowIndex + ROW_CHUNK, list.length);
+            for (; rowIndex < end; rowIndex++) {
+                const item = list[rowIndex];
+                const rowTopY = -topPad - rowIndex * itemH; // 本行最顶部（牌子顶边）
+                const plateY = rowTopY - plateH / 2;
+                const discTopY = plateY - plateH / 2 + plateOverlap; // 圆盘顶边：牌子底边往上收 plateOverlap 像素，制造重叠悬浮感
+                const discCenterY = discTopY - discH / 2;
+                const isMe = !!item.isMe;
+
+                // 圆盘贴图：宽高按真实比例（DISC_ASPECT）设置
+                const discNode = this.gm.createNode('RankDisc', contentNode, 0, discCenterY, discW, discH);
+                const discSprite = discNode.addComponent(Sprite);
+                discSprite.sizeMode = Sprite.SizeMode.CUSTOM;
+                BundleManager.getInstance().loadAsset<SpriteFrame>('ui/rank_disc/spriteFrame', SpriteFrame).then((sf) => {
+                    if (sf && discSprite.isValid) {
+                        discSprite.spriteFrame = sf;
+                    }
+                }).catch(() => {});
+
+                // 悬浮排名牌：压在圆盘上沿之上（完全脱出圆盘范围，不会被圆盘或人群遮挡）；
+                // 每个名次给不同颜色（不止前三名），isMe 保留橙色高亮优先于名次配色
+                const plateBg = this.gm.createGraphicsNode('RankPlate', contentNode, plateW, plateH, 0, plateY);
+                const plateColor = isMe ? new Color(255, 150, 0, 255) : this.getRankPlateColor(item.rank);
+                const textColor = isMe || item.rank <= 3 ? new Color(90, 60, 30, 255) : new Color(255, 255, 255, 255);
+                this.gm.drawRoundedRect(plateBg.getComponent(Graphics)!, plateW, plateH, plateColor, plateH / 2, 2, new Color(255, 255, 255, 200));
+
+                const leftX = -plateW / 2 + 10;
+                const rl = this.gm.createLabel(contentNode, `第${item.rank}名`, leftX, plateY, 14, textColor, true);
+                rl.horizontalAlign = 0;
+                rl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
+
+                const nl = this.gm.createLabel(contentNode, item.regionName || '未知', 0, plateY + 9, 13, textColor, isMe);
+                nl.horizontalAlign = 1;
+                const vl = this.gm.createLabel(contentNode, `今日已通关${item.clearCount}`, 0, plateY - 9, 11, textColor, false);
+                vl.horizontalAlign = 1;
+
+                // 圆盘上的水果人群：按椭圆范围站位（贴合圆盘轮廓，不用矩形避免站出圆盘外），
+                // 不管 clearCount 多少，固定按圆盘容量站满；plateBottomY 传入用于夹住人群顶部，不让猫头顶穿排名牌
+                const plateBottomY = plateY - plateH / 2;
+                this.renderFruitCrowd(contentNode, 0, discCenterY, discW, discH, plateBottomY, isMe);
+            }
+            if (rowIndex >= list.length) {
+                this.gm.unschedule(buildRowStep);
+            }
+        };
+        this.gm.schedule(buildRowStep, 0);
+    }
+
+    /** 排名牌配色：前三名金/银/铜，其余按名次循环取一套鲜艳色板，不再是清一色白底 */
+    private getRankPlateColor(rank: number): Color {
+        if (rank === 1) return new Color(255, 200, 60, 255);   // 金
+        if (rank === 2) return new Color(192, 200, 210, 255);  // 银
+        if (rank === 3) return new Color(226, 168, 110, 255);  // 铜
+        const palette = [
+            new Color(90, 170, 230, 255),  // 蓝
+            new Color(235, 110, 110, 255), // 红
+            new Color(110, 200, 140, 255), // 绿
+            new Color(230, 170, 70, 255),  // 橙黄
+            new Color(170, 130, 220, 255), // 紫
+            new Color(90, 200, 200, 255)   // 青
+        ];
+        return palette[(rank - 4) % palette.length];
+    }
+
+    /**
+     * 圆盘上的水果人群：一群水果图标乱站、前后叠压，固定按区域容量站满（与通关人数无关，
+     * 没人通关的省份也照样站满一圈随机水果）。isMe 的圆盘里固定一个位置换成玩家自己真实展示的水果。
+     * discW/discH 是圆盘贴图的完整宽高——站位按椭圆（贴合圆盘轮廓）取点，不用矩形，
+     * 避免矩形四角超出圆盘边界；半径按图标半径内缩，保证图标中心到边界的留白够放下整个图标。
+     * plateBottomY：排名牌下沿的绝对 Y 坐标，用来夹住每个点的最高位置（点的 y + 图标半高 不能超过它），
+     * 防止图标本身有半个身子的高度，最上面几个贴图头顶顶穿排名牌。
+     */
+    private renderFruitCrowd(parent: Node, centerX: number, centerY: number, discW: number, discH: number, plateBottomY: number, isMe: boolean) {
+        if (!this.fruitCatalog || this.fruitCatalog.length === 0) return;
+        const count = HOME_FRUIT_CROWD_MAX;
+        const baseSize = 90; // 放大 3 倍（原 30）
+        const halfIcon = baseSize / 2;
+
+        // 站位落在圆盘视觉主体的上半区域（圆盘是俯视透视的扁圆台，站人应站在顶面偏上，不站到下边缘露馅）
+        const standCenterY = centerY + discH * 0.06;
+        const radiusX = Math.max(0, discW / 2 - baseSize * 0.15);
+        // 上下半区用不同的纵向半径（上大下小的椭圆拼接，不是简单夹逼）：
+        // 上半区受牌子下沿硬约束，能留多少空间就用多少；下半区没有遮挡，按原有比例放开，
+        // 这样上半区不会被压扁成一条线，下半区也不会因为让位而变得空旷
+        const maxPointY = plateBottomY - halfIcon - 4; // 图标顶部不超过牌子下沿，留 4px 安全间隙
+        const upRadiusY = Math.max(10, standCenterY - maxPointY);
+        const downRadiusY = Math.max(0, discH * 0.4 - baseSize * 0.08);
+
+        // 上下半椭圆拼接采样：sin(angle)<0（上半）用 upRadiusY，>=0（下半）用 downRadiusY，
+        // 两者在 angle=0/180 处都收于 standCenterY，拼接处连续不突变
+        const points: { x: number; y: number }[] = [];
+        for (let i = 0; i < count; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const r = Math.sqrt(Math.random());
+            const sinA = Math.sin(angle);
+            const radiusY = sinA < 0 ? upRadiusY : downRadiusY;
+            const x = centerX + Math.cos(angle) * radiusX * r;
+            const y = standCenterY + sinA * radiusY * r;
+            points.push({ x, y });
+        }
+        points.sort((a, b) => b.y - a.y); // y 大（靠后）先放，y 小（靠前）后放，压在别人上层
+
+        const meIndex = isMe ? points.length - 1 : -1;
+        const maxRadiusY = Math.max(upRadiusY, downRadiusY);
+        points.forEach((p, idx) => {
+            const depth = maxRadiusY > 0 ? (standCenterY - p.y) / maxRadiusY : 0; // >0 越往前（下半区），<0 越往后（上半区）
+            const scale = 1.05 - depth * 0.2 + (Math.random() * 0.1 - 0.05);
+            const url = this.pickFruitIconUrl(idx === meIndex);
+            if (url) this.createFruitIconNode(parent, p.x, p.y, baseSize * scale, url);
+        });
+    }
+
+    private createFruitIconNode(parent: Node, x: number, y: number, size: number, colorUrl: string): Node {
+        const node = this.gm.createNode('FruitIcon', parent, x, y, size, size);
+        const sprite = node.addComponent(Sprite);
+        sprite.sizeMode = Sprite.SizeMode.CUSTOM;
+        this.gm.loadRemoteImage(colorUrl, sprite, () => { /* 加载失败留空位，不影响其余水果展示 */ });
+        return node;
     }
 
     /**
@@ -322,7 +547,7 @@ export class HomePage {
 
     private renderNewUserGiftModal(amount: number) {
         if (!this.gm.modalLayerNode) return;
-        this.gm.modalLayerNode.removeAllChildren();
+        this.gm.modalLayerNode.destroyAllChildren();
 
         // 遮罩（点击不关闭，仅拦截穿透；新人礼无 X，必须点宝箱领取）
         const mask = this.gm.createGraphicsNode('Mask', this.gm.modalLayerNode, this.gm.screenWidth, this.gm.screenHeight, 0, 0);
@@ -383,7 +608,7 @@ export class HomePage {
             // 起飞点取宝箱主体中心（面板中心略偏下）
             const chestWorldPos = panelTransform.convertToWorldSpaceAR(new Vec3(0, -ph * 0.1, 0));
             this.gm.playDailyRewardCoinFly(chestWorldPos, startCoins, amount, () => {
-                if (this.gm.modalLayerNode) this.gm.modalLayerNode.removeAllChildren();
+                if (this.gm.modalLayerNode) this.gm.modalLayerNode.destroyAllChildren();
             });
         }, this);
 
@@ -456,18 +681,18 @@ export class HomePage {
     /** 首页设置弹窗：音量/震动开关，面板图 panel_home_settings.png */
     private renderHomeSettingsModal() {
         if (!this.gm.modalLayerNode || !this.gm.modalLayerNode.isValid) return;
-        this.gm.modalLayerNode.removeAllChildren();
+        this.gm.modalLayerNode.destroyAllChildren();
 
         // 遮罩：点击关闭
         const mask = this.gm.createGraphicsNode('Mask', this.gm.modalLayerNode, this.gm.screenWidth, this.gm.screenHeight, 0, 0);
         this.gm.drawRoundedRect(mask.getComponent(Graphics)!, this.gm.screenWidth, this.gm.screenHeight, new Color(0, 0, 0, 150), 0);
         mask.on(Node.EventType.TOUCH_END, () => {
-            this.gm.modalLayerNode!.removeAllChildren();
+            this.gm.modalLayerNode!.destroyAllChildren();
         }, this);
 
-        // 面板：panel_home_settings.png（640x699，分包）
+        // 面板：panel_home_settings.png（640x674，分包；2026-08-12 重出三行版：音乐/音效/震动）
         const panelW = 300;
-        const panelH = panelW * 699 / 640;
+        const panelH = panelW * 674 / 640;
         // 分离式布局（面板+下方按钮）：整体上移 40 居中
         const panelNode = this.gm.createNode('HomeSettingsPanel', this.gm.modalLayerNode, 0, 40, panelW, panelH);
         const panelSprite = panelNode.addComponent(Sprite);
@@ -485,16 +710,18 @@ export class HomePage {
         const px = (fx: number) => (fx - 0.5) * panelW;
         const py = (fy: number) => (0.5 - fy) * panelH;
 
-        // 右上角 X 关闭热区
-        const closeBtn = this.gm.createNode('CloseBtn', panelNode, px(0.909), py(0.074), 48, 48);
+        // 右上角 X 关闭热区（新图实测 0.930/0.073）
+        const closeBtn = this.gm.createNode('CloseBtn', panelNode, px(0.930), py(0.073), 48, 48);
         closeBtn.on(Node.EventType.TOUCH_END, (e: any) => {
             e.propagationStopped = true;
-            this.gm.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.gm.modalLayerNode!.destroyAllChildren();
         }, this);
 
-        // 音量开关：与图上喇叭图标同一水平线，开关放右侧（createToggle 内部会 +60 偏移）
-        const toggleX = 28;
-        this.gm.createToggle(panelNode, toggleX, py(0.317), this.gm.soundEnabled, (isOn) => {
+        // 开关 X：空槽中心 fx≈0.754 → 面板本地 76，createToggle 内部 +60，故传 16
+        const toggleX = 16;
+        // 音乐开关：第一行（音符图标同一水平线），只管 BGM
+        this.gm.createToggle(panelNode, toggleX, py(0.325), this.gm.soundEnabled, (isOn) => {
             this.gm.soundEnabled = isOn;
             localStorage.setItem('soundEnabled', String(isOn));
             SoundManager.getInstance()?.setMute(!isOn);
@@ -505,8 +732,15 @@ export class HomePage {
             }
         });
 
-        // 震动开关：与图上震动图标同一水平线
-        this.gm.createToggle(panelNode, toggleX, py(0.645), this.gm.vibrationEnabled, (isOn) => {
+        // 音效开关：第二行（喇叭图标同一水平线），只管点击音效
+        this.gm.createToggle(panelNode, toggleX, py(0.552), localStorage.getItem('sfxEnabled') !== 'false', (isOn) => {
+            localStorage.setItem('sfxEnabled', String(isOn));
+            SoundManager.getInstance()?.setSfxMute(!isOn);
+            if (isOn) SoundManager.getInstance()?.playSystemClick();
+        });
+
+        // 震动开关：第三行（震动图标同一水平线）
+        this.gm.createToggle(panelNode, toggleX, py(0.779), this.gm.vibrationEnabled, (isOn) => {
             this.gm.vibrationEnabled = isOn;
             localStorage.setItem('vibrationEnabled', String(isOn));
             if (isOn) this.gm.triggerVibration('light');
@@ -523,7 +757,7 @@ export class HomePage {
         }, this);
     }
 
-    /** 点击签到按钮：打开七日签到弹窗（签到状态/今日已领判断都在弹窗内） */
+    /** 点击签到按钮：打开签到弹窗（签到状态/今日已领判断都在弹窗内） */
     private onSignInClick() {
         // 点了签到按钮即撤掉引导手指
         if (this.signInGuideNode && this.signInGuideNode.isValid) {
@@ -560,7 +794,7 @@ export class HomePage {
             this.showTip('网络不好，稍后再试');
             return;
         }
-        this.gm.modalLayerNode.removeAllChildren();
+        this.gm.modalLayerNode.destroyAllChildren();
 
         const screenW = this.gm.screenWidth;
         const screenH = this.gm.screenHeight;
@@ -569,7 +803,7 @@ export class HomePage {
         const mask = this.gm.createGraphicsNode('Mask', this.gm.modalLayerNode, screenW, screenH, 0, 0);
         this.gm.drawRoundedRect(mask.getComponent(Graphics)!, screenW, screenH, new Color(0, 0, 0, 150), 0);
         mask.on(Node.EventType.TOUCH_END, () => {
-            this.gm.modalLayerNode!.removeAllChildren();
+            this.gm.modalLayerNode!.destroyAllChildren();
         }, this);
 
         // 面板：手搬圆角卡片（无专用底图）
@@ -667,7 +901,7 @@ export class HomePage {
                 return;
             }
             if (this.gm.modalLayerNode && this.gm.modalLayerNode.isValid) {
-                this.gm.modalLayerNode.removeAllChildren();
+                this.gm.modalLayerNode.destroyAllChildren();
             }
             // 选省完成：直接进入每日挑战（与已选省点按钮同路径，无需再点一次）
             LoadingPage.target = 'daily';

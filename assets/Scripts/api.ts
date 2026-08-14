@@ -444,7 +444,7 @@ export const useDailyHelp = async (mode: HelpMode): Promise<DailyHelpResponse | 
   }
 }
 
-/** 每日挑战省份榜（榜单 UI 后续接入，接口先备） */
+/** 每日挑战省份榜（真实数据，无虚拟叠加）：仅用于「我的排名」卡片展示，永远是真实通关数 */
 export const getDailyRank = async (): Promise<DailyRankResponse | null> => {
   try {
     await ensureToken()
@@ -456,6 +456,25 @@ export const getDailyRank = async (): Promise<DailyRankResponse | null> => {
     return res.data
   } catch (e) {
     console.error('[API] getDailyRank failed:', e)
+    return null
+  }
+}
+
+/**
+ * 每日挑战省份榜（展示专用，叠加 daily_rank_mock 虚拟基数）：首页排行牌方阵、排行榜页省份列表用这个。
+ * 不要用这个接口返回的 myRank——「我的排名」卡片必须用 getDailyRank() 的真实数据，避免玩家看到自己的排名是编的。
+ */
+export const getDailyRankConfig = async (): Promise<DailyRankResponse | null> => {
+  try {
+    await ensureToken()
+    const res = await request<DailyRankResponse>({
+      url: '/api/game/daily/rank/config',
+      method: 'POST',
+      data: { gameType: GameTypeEnum.FRUIT_PICKING }
+    })
+    return res.data
+  } catch (e) {
+    console.error('[API] getDailyRankConfig failed:', e)
     return null
   }
 }
@@ -616,14 +635,25 @@ export enum ResourceCodeTypeEnum {
   RAINBOW_BOMB = 7
 }
 
-/** 七日签到单日奖励（后端配置表 JOIN 资源表下发） */
+/**
+ * 七日签到单日奖励（后端配置表 JOIN 资源表/收集表下发）。
+ * itemType=PROP 时 rewardType 有值，itemType=COLLECT 时 collectId/collectCode/name 有值。
+ */
 export interface SignInRewardItem {
   /** 签到第几天（1-7） */
   dayNum: number
+  /** 奖励类型：1=道具(含金币) 2=收集品 */
+  itemType: ItemTypeEnum
   /** 奖励图 OSS CDN 地址 */
   imageUrl: string
-  /** 奖励类型（取自资源表 resource_code） */
-  rewardType: ResourceCodeTypeEnum
+  /** itemType=PROP 时的奖励类型（取自资源表 resource_code） */
+  rewardType?: ResourceCodeTypeEnum
+  /** itemType=COLLECT 时的 game_collect.id（领取后写入本地 CollectStore 用） */
+  collectId?: number
+  /** itemType=COLLECT 时的收集品编码 */
+  collectCode?: string
+  /** itemType=COLLECT 时的展示名称 */
+  name?: string
   /** 数量 */
   amount: number
 }
@@ -726,6 +756,23 @@ export const fetchRank = async (): Promise<RankResponse> => {
   } catch (e) {
     console.error("Fetch rank failed:", e)
     return { myRank: null, list: [] }
+  }
+}
+
+/** 无限榜展示专用：合并虚拟玩家的榜单（后端 endless_rank_mock 配置）；请求失败回退真实数据榜 */
+export const fetchRankConfig = async (): Promise<RankResponse> => {
+  try {
+    const res = await request<RankResponse>({
+      url: '/api/game/rank/config',
+      method: 'POST',
+      data: {
+        gameType: GameTypeEnum.FRUIT_PICKING
+      }
+    })
+    return res.data
+  } catch (e) {
+    console.error("Fetch rank config failed:", e)
+    return fetchRank()
   }
 }
 
@@ -963,21 +1010,43 @@ export interface ShopItem {
   itemDesc?: string
 }
 
-let shopCache: ShopItem[] | null = null;
+/** 商城分组 tab：仅 category=2（收集）时有值 */
+export interface ShopGroup {
+  groupCode: string
+  groupName: string
+}
 
-/** 拉取商城上架目录（会话内缓存一次） */
-export const fetchShopList = async (): Promise<ShopItem[]> => {
-  if (shopCache) return shopCache;
+export interface ShopPage {
+  items: ShopItem[]
+  /** category=2 时该分类下全部分组（与 groupCode 筛选无关，tab 栏用），category=1 时为空 */
+  groups: ShopGroup[]
+  /** 当前筛选条件下总条数（未分页前） */
+  total: number
+  page: number
+  pageSize: number
+}
+
+/**
+ * 拉取商城目录（按分类 + 分页，收集分类可选按 groupCode 筛选，默认每页 10 条）。
+ * 不做会话缓存：分页数据每次翻页/切 tab 都要拿最新一页。
+ * 失败返回空页，调用方按空列表渲染。
+ */
+export const fetchShopList = async (
+  category: number,
+  groupCode?: string,
+  page: number = 1,
+  pageSize: number = 10
+): Promise<ShopPage> => {
   try {
-    const res = await request<ShopItem[]>({
+    const res = await request<ShopPage>({
       url: '/api/game/shop/list',
-      method: 'POST'
+      method: 'POST',
+      data: { category, groupCode, page, pageSize }
     })
-    shopCache = res.data || [];
-    return shopCache;
+    return res.data || { items: [], groups: [], total: 0, page, pageSize }
   } catch (e) {
     console.error('[API] fetch shop list failed:', e)
-    return []
+    return { items: [], groups: [], total: 0, page, pageSize }
   }
 }
 
@@ -1037,5 +1106,175 @@ export const fetchCollectList = async (): Promise<CollectItem[]> => {
   } catch (e) {
     console.error('[API] fetch collect list failed:', e)
     return []
+  }
+}
+
+/** 拉取随机水果目录（首页圆盘人群用，后端 LIMIT 30 随机抽取，每次调用结果不同） */
+export const fetchRandomFruits = async (): Promise<CollectItem[]> => {
+  try {
+    const res = await request<CollectItem[]>({
+      url: '/api/game/collect/fruits',
+      method: 'POST'
+    })
+    return res.data || []
+  } catch (e) {
+    console.error('[API] fetch random fruits failed:', e)
+    return []
+  }
+}
+
+/**
+ * 按 id 批量查收集品目录：本地已知目标 id（猫咪图标查当前展示项、抽奖排除已拥有等）时用这个，
+ * 不必拉 fetchCollectList 整表下发。ids 为空直接返回空数组，不发请求。
+ */
+export const fetchCollectByIds = async (ids: number[]): Promise<CollectItem[]> => {
+  if (!ids || ids.length === 0) return []
+  try {
+    const res = await request<CollectItem[]>({
+      url: '/api/game/collect/by-ids',
+      method: 'POST',
+      data: { ids }
+    })
+    return res.data || []
+  } catch (e) {
+    console.error('[API] fetch collect by ids failed:', e)
+    return []
+  }
+}
+
+/**
+ * 按 collectCode 批量查收集品目录：奖励结果（RewardItem.collectCode）反查名称/id 用这个，
+ * 不必拉 fetchCollectList 整表下发。codes 为空直接返回空数组，不发请求。
+ */
+export const fetchCollectByCodes = async (codes: string[]): Promise<CollectItem[]> => {
+  if (!codes || codes.length === 0) return []
+  try {
+    const res = await request<CollectItem[]>({
+      url: '/api/game/collect/by-codes',
+      method: 'POST',
+      data: { codes }
+    })
+    return res.data || []
+  } catch (e) {
+    console.error('[API] fetch collect by codes failed:', e)
+    return []
+  }
+}
+
+/** 新用户默认赠送的收集品配置（未配置返回 null），补领判断用 */
+export const fetchStarterGift = async (): Promise<CollectItem | null> => {
+  try {
+    const res = await request<CollectItem | null>({
+      url: '/api/game/collect/starter-gift',
+      method: 'POST'
+    })
+    return res.data || null
+  } catch (e) {
+    console.error('[API] fetch starter gift failed:', e)
+    return null
+  }
+}
+
+export interface BackpackItem {
+  collectId: number
+  count: number
+  isCurrent: boolean
+}
+
+/** 拉取当前用户收集品背包（拥有数量/当前展示项），失败返回空数组，调用方按空仓库处理 */
+export const fetchBackpackList = async (): Promise<BackpackItem[]> => {
+  try {
+    const res = await request<BackpackItem[]>({
+      url: '/api/game/backpack/list',
+      method: 'POST'
+    })
+    return res.data || []
+  } catch (e) {
+    console.error('[API] fetch backpack list failed:', e)
+    return []
+  }
+}
+
+/** 我的仓库单条：后端已把目录配置和持有状态拼好，前端直接渲染，不用再自己关联两份数据 */
+export interface MyStorageItem {
+  collectId: number
+  collectCode: string
+  groupCode: string
+  groupName: string
+  name: string
+  grayUrl: string
+  colorUrl: string
+  /** 拥有数量 */
+  count: number
+  /** 是否当前展示项（后端已算好兜底，整个仓库没标记时第一件为 true） */
+  isCurrent: boolean
+}
+
+/** 仓库分组 tab：只含该用户有持有记录的分组，分页后前端算不出来所以由后端下发 */
+export interface StorageGroup {
+  groupCode: string
+  groupName: string
+}
+
+export interface MyStoragePage {
+  items: MyStorageItem[]
+  /** 该用户拥有的分组列表（与筛选条件无关，用于渲染二级 tab） */
+  groups: StorageGroup[]
+  /** 当前筛选条件下总条数（未分页前） */
+  total: number
+  page: number
+  pageSize: number
+}
+
+/**
+ * 拉取我的仓库（按分组筛选 + 分页，默认每页 10 条）。
+ * 不做会话缓存：持有数量/当前展示项会随购买、设为展示变化，每次进页/切 tab/翻页都要拿最新数据。
+ * 失败返回空页，调用方按空仓库渲染。
+ */
+export const fetchMyStorage = async (
+  groupCode?: string,
+  page: number = 1,
+  pageSize: number = 10
+): Promise<MyStoragePage> => {
+  try {
+    const res = await request<MyStoragePage>({
+      url: '/api/game/backpack/my-storage',
+      method: 'POST',
+      data: { groupCode, page, pageSize }
+    })
+    return res.data || { items: [], groups: [], total: 0, page, pageSize }
+  } catch (e) {
+    console.error('[API] fetch my storage failed:', e)
+    return { items: [], groups: [], total: 0, page, pageSize }
+  }
+}
+
+/** 拥有一个收集品：累加数量（支持重复拥有），amount 不传默认1 */
+export const ownBackpackItem = async (collectId: number, amount?: number): Promise<boolean> => {
+  try {
+    await request({
+      url: '/api/game/backpack/own',
+      method: 'POST',
+      data: { collectId, amount }
+    })
+    return true
+  } catch (e) {
+    console.error('[API] own backpack item failed:', e)
+    return false
+  }
+}
+
+/** 设置当前展示的收集品：需已拥有才生效 */
+export const setBackpackCurrent = async (collectId: number): Promise<boolean> => {
+  try {
+    await request({
+      url: '/api/game/backpack/set-current',
+      method: 'POST',
+      data: { collectId }
+    })
+    return true
+  } catch (e) {
+    console.error('[API] set backpack current failed:', e)
+    return false
   }
 }

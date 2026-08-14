@@ -1,5 +1,5 @@
 import { Node, Color, Graphics, Sprite, SpriteFrame, Label, UITransform, UIOpacity, tween, ScrollView, Mask } from 'cc';
-import { fetchShopList, ShopItem, ItemTypeEnum, RewardItem } from './api';
+import { fetchShopList, ShopItem, ShopGroup, ShopPage as ShopPageData, ItemTypeEnum, RewardItem } from './api';
 import { BundleManager } from './BundleManager';
 import { CollectStore } from './CollectStore';
 import { drawTitlePlate, drawSegmentedTabs } from './PageTabs';
@@ -7,7 +7,8 @@ import type { GameManager } from './GameManager';
 
 /**
  * 商城页：整页切换（与仓库页同款架构），纯代码绘制、无底图素材。
- * 目录来自后端 game_shop（道具关联资源表、收集关联收集表，价格表内配置）；
+ * 目录来自后端 game_shop（道具关联资源表、收集关联收集表，价格表内配置），道具/收集各自独立分页，
+ * 底部「上一页/下一页」按钮点击翻页（不是滚动自动加载）；切主 tab / 子 tab 时回到第一页重新拉取。
  * 购买纯前端扣币入账（totalCoins/PropStore），与道具/金币存储边界一致。
  * 收集页按 group_code 分子 tab；收集表暂无数据时占位「敬请期待」。
  */
@@ -17,8 +18,13 @@ const BEIGE = new Color(240, 230, 205, 255);
 const BEIGE_LINE = new Color(150, 110, 60, 255);
 const BLUE = new Color(30, 136, 229, 255);
 const ORANGE = new Color(255, 150, 0, 255);
+/** 翻页按钮不可点时的置灰色（首页无上一页/末页无下一页） */
+const DISABLED_GRAY = new Color(190, 190, 180, 255);
 
-/** 收集分组占位（收集表有数据后按返回的 groupCode 动态出 tab） */
+/** 商城每页条数 */
+const PAGE_SIZE = 10;
+
+/** 收集分组占位（收集表暂无上架商品时展示，仅视觉，不代表真实分组） */
 const COLLECT_GROUP_FALLBACK = [
     { key: 'animal', name: '动物' },
     { key: 'car', name: '豪车' },
@@ -30,9 +36,33 @@ export class ShopPage {
     private contentNode: Node | null = null;
     private balanceLabel: Label | null = null;
     private mainTab: 'tools' | 'collect' = 'tools';
-    private subTab = 'animal';
-    private shopList: ShopItem[] = [];
+    /** 收集页子 tab：按 group_code 分组，空串=还没拿到后端分组列表，首次请求不带 groupCode（返回全部） */
+    private subTab = '';
+    /** 顶栏 tab 的 Y 坐标（render 里算好，内容层布局复用） */
     private tabY = 0;
+
+    // ===== 分页状态（切主 tab / 子 tab 时由 resetPaging 清空回第一页；道具/收集各自独立计数，互不共享） =====
+    /** 当前页的条目（点击翻页整批替换，不是滚动追加） */
+    private items: ShopItem[] = [];
+    /** 当前页码，从 1 开始；0 表示还没加载过 */
+    private page = 0;
+    /**
+     * 是否还有下一页：以「当前页实际返回条数 = pageSize」判断，不用 total 计算页数。
+     * 原因：total 和明细查询若存在偏差（如排序不稳定导致翻页漏行/重复），按 total 算出的页数会不准，
+     * 「实际返回满一页」是唯一能直接验证、不依赖 total 的信号。
+     */
+    private hasNextPage = false;
+    /** 请求飞行中标记：防止连点翻页按钮触发多次重叠请求 */
+    private loading = false;
+    /** 收集页的分组列表（后端下发，与 groupCode 筛选无关，tab 栏用） */
+    private groups: ShopGroup[] = [];
+    /** 上一页/下一页按钮节点：每次翻页 buildContentView 整块重画，这里只留引用供 renderContent 清空用 */
+    private prevBtnNode: Node | null = null;
+    private nextBtnNode: Node | null = null;
+    /** 页码提示文字（第 X 页） */
+    private pageIndicator: Label | null = null;
+    /** 网格容器（每次翻页整块重画） */
+    private gridNode: Node | null = null;
 
     constructor(private gm: GameManager) {}
 
@@ -53,8 +83,12 @@ export class ShopPage {
 
     private render() {
         this.close();
-        if (this.gm.rootNode) this.gm.rootNode.removeAllChildren();
+        if (this.gm.rootNode) this.gm.rootNode.destroyAllChildren();
         this.gm.teardownGameView();
+
+        // 收集品购买（CollectStore.own）需要背包内存缓存已就位；不阻塞页面渐染，
+        // 缓存本身有去重保护，正常情况下用户点购买按钮前早已加载完成
+        CollectStore.ensureLoaded();
 
         const pageW = this.gm.screenWidth;
         const pageH = this.gm.screenHeight;
@@ -97,13 +131,8 @@ export class ShopPage {
             .repeatForever()
             .start();
 
-        // 内容层（目录异步拉取后填充）
+        // 内容层
         this.contentNode = this.gm.createNode('ShopContent', this.pageNode, 0, 0, pageW, pageH);
-        fetchShopList().then((list) => {
-            if (!this.contentNode || !this.contentNode.isValid) return;
-            this.shopList = list;
-            this.renderContent();
-        });
         this.renderContent();
     }
 
@@ -114,8 +143,9 @@ export class ShopPage {
             this.mainTab, 'main',
             (key) => {
                 this.mainTab = key as 'tools' | 'collect';
+                this.subTab = '';
                 this.renderMainTabs();
-                this.renderContent();
+                this.renderContent(); // 内部会 resetPaging，回到第一页
             }
         );
     }
@@ -124,55 +154,117 @@ export class ShopPage {
 
     private renderContent() {
         if (!this.contentNode || !this.contentNode.isValid) return;
-        this.contentNode.removeAllChildren();
+        this.contentNode.destroyAllChildren();
+        this.gridNode = null;
+        this.prevBtnNode = null;
+        this.nextBtnNode = null;
+        this.resetPaging();
+        this.loadPage(1);
+    }
+
+    /** 切主 tab / 子 tab / 重进商城页：清空条目回到第一页，节点引用由 renderContent 负责清 */
+    private resetPaging() {
+        this.items = [];
+        this.page = 0;
+        this.hasNextPage = false;
+        this.loading = false;
+        this.groups = [];
+    }
+
+    /**
+     * 拉取指定页码并整批替换当前展示内容。
+     * loading 兜住连点：按钮点击后到数据回来之前再点无效。
+     */
+    private loadPage(targetPage: number) {
+        if (this.loading) return;
+        if (targetPage < 1) return;
+
+        this.loading = true;
+        const category = this.mainTab === 'tools' ? 1 : 2;
+        const requestedMainTab = this.mainTab;
+        const requestedSubTab = this.subTab;
+        fetchShopList(category, this.mainTab === 'collect' ? (this.subTab || undefined) : undefined, targetPage, PAGE_SIZE).then((data) => {
+            this.loading = false;
+            if (!this.contentNode || !this.contentNode.isValid) return;
+            // 请求飞行期间用户切了 tab：这批数据已经不属于当前筛选，丢弃
+            if (requestedMainTab !== this.mainTab || requestedSubTab !== this.subTab) return;
+
+            this.page = targetPage;
+            this.groups = data.groups;
+            this.items = data.items;
+            // 权威判断：实际返回条数满一页才可能有下一页，不依赖 total 算页数
+            this.hasNextPage = data.items.length >= PAGE_SIZE;
+
+            this.buildContentView(data);
+        }).catch(() => {
+            this.loading = false;
+        });
+    }
+
+    /** 数据到位：先清空旧内容（翻页/切子 tab 都会走到这），道具直接铺网格；收集需先画子 tab 再铺网格 */
+    private buildContentView(data: ShopPageData) {
+        if (!this.contentNode || !this.contentNode.isValid) return;
+        this.contentNode.destroyAllChildren();
+        this.gridNode = null;
+        this.prevBtnNode = null;
+        this.nextBtnNode = null;
         if (this.mainTab === 'tools') {
-            this.renderToolsShop();
+            this.buildToolsView(data);
         } else {
-            this.renderCollectShop();
+            this.buildCollectView(data);
         }
     }
 
-    /** 道具商城：一行两卡（名称/图片/价格/购买），超出屏幕可滚动 */
-    private renderToolsShop() {
-        const items = this.shopList.filter((s) => s.category === 1);
+    /** 道具商城：一行两卡（名称/图片/价格/购买），底部「上一页/下一页」按钮翻页 */
+    private buildToolsView(data: ShopPageData) {
         const topY = this.tabY - 70;
-        if (items.length === 0) {
+        if (data.items.length === 0) {
             this.gm.createLabel(this.contentNode!, '暂无上架道具', 0, topY - 40, 15, new Color(150, 160, 140, 255), true);
             return;
         }
-        this.renderCardGrid(items, topY);
+        this.buildGridContainer(topY, data.items);
+        this.drawPager();
     }
 
-    /** 收集商城：按 groupCode 分子 tab；无数据时占位分组+敬请期待 */
-    private renderCollectShop() {
-        const collectItems = this.shopList.filter((s) => s.category === 2);
-        const groups = collectItems.length > 0
-            ? Array.from(new Map(collectItems.map((c) => [c.groupCode, { key: c.groupCode, name: c.groupName }])).values())
-            : COLLECT_GROUP_FALLBACK;
-        if (!groups.some((g) => g.key === this.subTab)) this.subTab = groups[0]?.key || 'animal';
-
+    /** 收集商城：按 groupCode 分子 tab；无上架分组时占位分组+敬请期待 */
+    private buildCollectView(data: ShopPageData) {
         const subY = this.tabY - 80;
+        const groups = this.groups.length > 0
+            ? this.groups.map((g) => ({ key: g.groupCode, name: g.groupName }))
+            : COLLECT_GROUP_FALLBACK;
+
+        // 首次进页 subTab 为空（不带 groupCode 拿第一个分组的数据），或当前分组已不存在：锁到第一个分组重来一次
+        if (this.groups.length > 0 && !groups.some((g) => g.key === this.subTab)) {
+            this.subTab = groups[0].key;
+            this.renderContent();
+            return;
+        }
+
         // 子 tab 分段条（二级导航：小一号、米色容器、橙色选中段）
         drawSegmentedTabs(
             this.gm, this.contentNode!, 'SubSegBar', subY,
             groups, this.subTab, 'sub',
             (key) => {
                 this.subTab = key;
-                this.renderContent();
+                this.renderContent(); // 内部会 resetPaging，回到第一页
             }
         );
 
-        const rows = collectItems.filter((c) => c.groupCode === this.subTab);
         const topY = subY - 40;
-        if (rows.length === 0) {
+        if (data.items.length === 0) {
             this.gm.createLabel(this.contentNode!, '敬请期待', 0, topY - 40, 15, new Color(150, 160, 140, 255), true);
             return;
         }
-        this.renderCardGrid(rows, topY);
+        this.buildGridContainer(topY, data.items);
+        this.drawPager();
     }
 
-    /** 商品卡片网格：一行两张，内容自上而下 名称→图片→价格→购买按钮；行数超屏走 ScrollView */
-    private renderCardGrid(items: ShopItem[], topY: number) {
+    /**
+     * 商品卡片网格：一行两张，内容自上而下 名称→图片→价格→购买按钮。
+     * 每页固定 PAGE_SIZE 条，用 ScrollView+Mask 裁切纯为兼容小屏内容超高时能手动滚一下看完整页，
+     * 不再有「触底自动加载下一页」的逻辑——翻页只靠底部按钮点击触发。
+     */
+    private buildGridContainer(topY: number, items: ShopItem[]) {
         const pageW = this.gm.screenWidth;
         const pageH = this.gm.screenHeight;
         const cardW = 160, cardH = 176, gapX = 12, gapY = 12;
@@ -180,20 +272,26 @@ export class ShopPage {
         const rowCount = Math.ceil(items.length / 2);
         const contentH = Math.max(rowCount * pitch + gapY, 100);
 
-        const bottomY = -pageH / 2 + 8;
+        // 底部留出翻页按钮行的空间（PAGER_AREA_H），网格可视区在它上方
+        const pagerAreaH = 60;
+        const bottomY = -pageH / 2 + 8 + pagerAreaH;
         const viewH = Math.max(topY - bottomY, 100);
         const viewY = (topY + bottomY) / 2;
-        const scrollNode = this.gm.createNode('GridScroll', this.contentNode!, 0, viewY, pageW - 24, viewH);
+        const viewW = pageW - 24;
+
+        const scrollNode = this.gm.createNode('GridScroll', this.contentNode!, 0, viewY, viewW, viewH);
         const scrollView = scrollNode.addComponent(ScrollView);
         scrollView.horizontal = false;
         scrollView.vertical = true;
-        const viewNode = this.gm.createNode('View', scrollNode, 0, 0, pageW - 24, viewH);
+        const viewNode = this.gm.createNode('View', scrollNode, 0, 0, viewW, viewH);
         const mask = viewNode.addComponent(Mask);
         mask.type = Mask.Type.GRAPHICS_RECT;
-        const gridNode = this.gm.createNode('GridContent', viewNode, 0, 0, pageW - 24, contentH);
+        const gridNode = this.gm.createNode('GridContent', viewNode, 0, 0, viewW, Math.max(contentH, viewH));
         gridNode.getComponent(UITransform)!.setAnchorPoint(0.5, 1);
         gridNode.setPosition(0, viewH / 2, 0);
         scrollView.content = gridNode;
+
+        this.gridNode = gridNode;
 
         items.forEach((item, i) => {
             const r = Math.floor(i / 2);
@@ -202,6 +300,40 @@ export class ShopPage {
             const y = -r * pitch - cardH / 2;
             this.drawShopCard(gridNode, item, x, y);
         });
+    }
+
+    /** 底部翻页条：上一页 | 第 N 页 | 下一页，固定在内容层底部，首页/末页对应按钮置灰不可点 */
+    private drawPager() {
+        const pageH = this.gm.screenHeight;
+        const pagerY = -pageH / 2 + 30;
+
+        this.pageIndicator = this.gm.createLabel(this.contentNode!, `第 ${this.page} 页`, 0, pagerY, 14, BROWN, true);
+
+        this.prevBtnNode = this.drawPagerBtn(pagerY, -80, '❮ 上一页', this.page > 1, () => {
+            this.loadPage(this.page - 1);
+        });
+        this.nextBtnNode = this.drawPagerBtn(pagerY, 80, '下一页 ❯', this.hasNextPage, () => {
+            this.loadPage(this.page + 1);
+        });
+    }
+
+    /** 单个翻页按钮：enabled=false 时置灰且不挂点击事件 */
+    private drawPagerBtn(y: number, x: number, text: string, enabled: boolean, onTap: () => void): Node {
+        const btnW = 100, btnH = 36;
+        const btn = this.gm.createNode(`PagerBtn_${text}`, this.contentNode!, x, y, btnW, btnH);
+        const g = btn.addComponent(Graphics);
+        g.fillColor = enabled ? BEIGE : new Color(230, 228, 220, 255);
+        g.roundRect(-btnW / 2, -btnH / 2, btnW, btnH, 10);
+        g.fill();
+        g.strokeColor = enabled ? BEIGE_LINE : DISABLED_GRAY;
+        g.lineWidth = 2;
+        g.roundRect(-btnW / 2, -btnH / 2, btnW, btnH, 10);
+        g.stroke();
+        this.gm.createLabel(btn, text, 0, 0, 14, enabled ? BROWN : DISABLED_GRAY, true);
+        if (enabled) {
+            btn.on(Node.EventType.TOUCH_END, onTap, this);
+        }
+        return btn;
     }
 
     /** 单张商品卡：米色圆角框，自上而下 名称→图片→价格→购买按钮 */
@@ -276,14 +408,14 @@ export class ShopPage {
     private renderBuyModal(item: ShopItem) {
         const layer = this.gm.modalLayerNode;
         if (!layer || !layer.isValid) return;
-        layer.removeAllChildren();
+        layer.destroyAllChildren();
 
         const mask = this.gm.createGraphicsNode('Mask', layer, this.gm.screenWidth, this.gm.screenHeight, 0, 0);
         mask.getComponent(Graphics)!.fillColor = new Color(0, 0, 0, 160);
         mask.getComponent(Graphics)!.rect(-this.gm.screenWidth / 2, -this.gm.screenHeight / 2, this.gm.screenWidth, this.gm.screenHeight);
         mask.getComponent(Graphics)!.fill();
         mask.on(Node.EventType.TOUCH_END, () => {
-            layer.removeAllChildren();
+            layer.destroyAllChildren();
         }, this);
 
         const panel = this.gm.createNode('BuyPanel', layer, 0, 0, 320, 360);
@@ -383,7 +515,7 @@ export class ShopPage {
                 CollectStore.own(item.collectId, qty);
             }
             this.gm.renderTools();
-            layer.removeAllChildren();
+            layer.destroyAllChildren();
             this.gm.showCoinShortageTip(`购买成功：${item.name}x${qty}`);
         }, this);
     }

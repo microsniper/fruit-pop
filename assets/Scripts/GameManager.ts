@@ -1,5 +1,5 @@
 import { _decorator, Component, Node, Vec2, Vec3, Size, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, view, Layers, Sprite, SpriteFrame, resources, ImageAsset, LabelOutline, UIOpacity, RigidBody2D, BoxCollider2D, CircleCollider2D, ERigidBody2DType, PhysicsSystem2D, assetManager, Texture2D } from 'cc';
-import { consumeShareCount, reportEvent, fetchGameConfig, GameConfig, getDailyHelpStatus, getGameConfig, hasUserProfile, updateProfile, useDailyHelp, fetchResources, fetchShopList, fetchCollectList, ResourceCodeTypeEnum, getDailyStatus, DailyHelpResponse, RewardItem, ItemTypeEnum, CollectItem } from './api';
+import { consumeShareCount, reportEvent, fetchGameConfig, GameConfig, getDailyHelpStatus, getGameConfig, hasUserProfile, updateProfile, useDailyHelp, fetchResources, fetchCollectByIds, fetchCollectByCodes, fetchStarterGift, ResourceCodeTypeEnum, getDailyStatus, DailyHelpResponse, RewardItem, ItemTypeEnum, CollectItem } from './api';
 import { CollectStore } from './CollectStore';
 import { SoundManager } from './SoundManager';
 import { AdManager } from './AdManager';
@@ -183,6 +183,8 @@ interface BoxView {
     playIcon: Node;
     slots: BoxSlotView[];
     lastBodyColor: string;
+    /** 上一帧的 isSlidingOut，用于检测「刚变为满」的跳变沿，只在跳变时触发一次飞出动画 */
+    lastSlidingOut: boolean;
 }
 
 interface TempSlotView {
@@ -360,7 +362,7 @@ const FRUIT_FACE_COLORS: Record<FruitColor, Color> = {
 const PAGE_CONTENT_SCALE = 0.9;
 const TOP_CONTENT_OFFSET = 24;
 /** 猫咪进度图标（游戏区右上角）边长 */
-const CAT_ICON_SIZE = 56;
+const CAT_ICON_SIZE = 90;
 /** 未启用层（垫在最底下作预告的下一层）的统一灰，与底图叠乘后只剩形状 */
 const PLATE_BURIED_COLOR = new Color(120, 126, 132, 230);
 /** 覆盖率采样网格边长：单块板子最多 9x9 个采样点 */
@@ -473,10 +475,13 @@ export class GameManager extends Component {
     private catColorMaskNode: Node | null = null;
     private catPercentLabel: Label | null = null;
     private toolContainerNode: Node | null = null;
-    /** loadRemoteImage 按 URL 缓存 SpriteFrame：同一张远程图（商城/仓库来回切 tab、奖励弹窗重复出现）不重复下载 */
-    private remoteImageCache = new Map<string, SpriteFrame>();
-    /** 收集品目录缓存：奖励弹窗按 collectCode 反查名称/id 用，fetchCollectList 本身有会话缓存，这里再缓存一份避免重复 await */
-    private collectCatalogCache: CollectItem[] | null = null;
+    /** loadRemoteImage 按 URL 缓存 SpriteFrame：同一张远程图（商城/仓库来回切 tab、奖励弹窗重复出现）不重复下载。
+     *  LRU 上限：超限淘汰最久未用的并释放 Texture2D/ImageAsset，避免水果图标/商城/签到等远程图
+     *  跨场景只增不减常驻内存，低端机告内存不足 */
+    private static readonly REMOTE_IMAGE_CACHE_MAX = 40;
+    private remoteImageCache = new Map<string, { frame: SpriteFrame; asset: ImageAsset | null }>();
+    /** 收集品按 code 增量缓存：奖励弹窗按 collectCode 反查名称/id 用，按需查询填充，不整表拉取 */
+    private collectCodeCache: Map<string, CollectItem> = new Map();
     public modalLayerNode: Node | null = null;
     /** 首页与排行榜页：逻辑已拆到独立文件，通过 gm 引用协作 */
     public readonly homePage = new HomePage(this);
@@ -765,7 +770,7 @@ export class GameManager extends Component {
             return;
         }
 
-        this.boardContentNode.removeAllChildren();
+        this.boardContentNode.destroyAllChildren();
         this.plateNodes.clear();
         const visiblePlates = this.plates
             .filter((plate) => !plate.removed && (plate.wave ?? 0) <= this.loadedWave + 1)
@@ -968,12 +973,12 @@ export class GameManager extends Component {
      */
     public renderImagePreview(imageUrl: string) {
         if (!this.modalLayerNode || !imageUrl) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 200), 0);
         mask.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            this.modalLayerNode!.destroyAllChildren();
         }, this);
 
         // 大图：正方形安全尺寸（屏宽的 78%），加载后按实际比例校正，避免拉伸变形
@@ -984,11 +989,11 @@ export class GameManager extends Component {
         sprite.sizeMode = Sprite.SizeMode.CUSTOM;
         this.loadRemoteImage(imageUrl, sprite, () => {
             // 加载失败：关掉这个空壳弹窗，不留一张打不开的黑框
-            if (this.modalLayerNode) this.modalLayerNode.removeAllChildren();
+            if (this.modalLayerNode) this.modalLayerNode.destroyAllChildren();
         });
         imgNode.on(Node.EventType.TOUCH_END, (e: any) => {
             e.propagationStopped = true;
-            this.modalLayerNode!.removeAllChildren();
+            this.modalLayerNode!.destroyAllChildren();
         }, this);
 
         imgNode.setScale(new Vec3(0.7, 0.7, 1));
@@ -996,17 +1001,17 @@ export class GameManager extends Component {
     }
 
     /**
-     * 伙伴详情弹窗：大图 + 名字 + 「应用于游戏」按钮。仓库页收集格子整块点击打开，
-     * 点按钮把这个伙伴设为当前展示（回调交给调用方处理，这里不关心 CollectStore）。
+     * 收集品详情弹窗：大图 + 名字 + 「应用于游戏」按钮。仓库页收集格子整块点击打开，
+     * 点按钮把这个收集品设为当前展示（回调交给调用方处理，这里不关心 CollectStore）。
      */
     public renderCollectDetail(name: string, imageUrl: string, onApply: () => void) {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 200), 0);
         mask.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            this.modalLayerNode!.destroyAllChildren();
         }, this);
 
         const panelW = Math.min(300, this.screenWidth * 0.82);
@@ -1045,8 +1050,9 @@ export class GameManager extends Component {
         this.createLabel(btnNode, '应用于游戏', 0, 0, 18, new Color(255, 255, 255, 255), true);
         btnNode.on(Node.EventType.TOUCH_END, (e: any) => {
             e.propagationStopped = true;
+            SoundManager.getInstance()?.playSystemClick();
             onApply();
-            if (this.modalLayerNode) this.modalLayerNode.removeAllChildren();
+            if (this.modalLayerNode) this.modalLayerNode.destroyAllChildren();
         }, this);
 
         panelNode.setScale(new Vec3(0.7, 0.7, 1));
@@ -1059,7 +1065,7 @@ export class GameManager extends Component {
      */
     public renderCommonTip(title: string, content: string, onConfirm?: () => void) {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         // 遮罩
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
@@ -1105,7 +1111,8 @@ export class GameManager extends Component {
         // “知道了”按钮热区（trim 后按钮中心约在可见区高 91.5% 处，热区放宽便于点击）
         const btnOk = this.createNode('BtnOk', panelNode, 0, -0.415 * panelTransform.height, panelW * 0.5, 56);
         btnOk.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.modalLayerNode!.destroyAllChildren();
             if (onConfirm) onConfirm();
         }, this);
 
@@ -1127,13 +1134,13 @@ export class GameManager extends Component {
         onCancel?: () => void,
     ) {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         // 遮罩：点空白处等同于取消，不做静默关闭
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
         mask.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            this.modalLayerNode!.destroyAllChildren();
             if (onCancel) onCancel();
         }, this);
 
@@ -1196,7 +1203,8 @@ export class GameManager extends Component {
         }
         btnCancel.on(Node.EventType.TOUCH_END, (e: any) => {
             e.propagationStopped = true;
-            this.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.modalLayerNode!.destroyAllChildren();
             if (onCancel) onCancel();
         }, this);
 
@@ -1209,7 +1217,8 @@ export class GameManager extends Component {
         }
         btnConfirm.on(Node.EventType.TOUCH_END, (e: any) => {
             e.propagationStopped = true;
-            this.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.modalLayerNode!.destroyAllChildren();
             onConfirm();
         }, this);
 
@@ -1222,7 +1231,7 @@ export class GameManager extends Component {
     private renderFailModal() {
         if (!this.modalLayerNode) return;
         this.removeTempFullGuide();
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         // 每日挑战：分离式新弹窗 + 一局一次复活
         if (this.driver.supportsRevive()) {
@@ -1276,8 +1285,9 @@ export class GameManager extends Component {
             // 重新挑战（橙黄按钮热区）：挑战失败，重开当前关卡（金币不再清零）
             const btnRetry = this.createNode('BtnRetry', panelNode, 0, py(0.694), pw * 0.60, ph * 0.10);
             btnRetry.on(Node.EventType.TOUCH_END, () => {
+                SoundManager.getInstance()?.playSystemClick();
                 this.gameOver = false;
-                this.modalLayerNode!.removeAllChildren();
+                this.modalLayerNode!.destroyAllChildren();
                 // 进度条加载页 + 分帧初始化
                 this.transitionToNewLevel();
             }, this);
@@ -1285,11 +1295,12 @@ export class GameManager extends Component {
             // 继续游戏（蓝按钮热区）：唤起广告，看完后清空暂存区
             const btnContinue = this.createNode('BtnContinue', panelNode, 0, py(0.853), pw * 0.60, ph * 0.10);
             btnContinue.on(Node.EventType.TOUCH_END, () => {
+                SoundManager.getInstance()?.playSystemClick();
                 this.showAdThen(() => {
                     this.gameOver = false;
                     this.tempHoles = [];
                     this.renderTopUI();
-                    this.modalLayerNode!.removeAllChildren();
+                    this.modalLayerNode!.destroyAllChildren();
                 }, 'revive');
             }, this);
         }).catch(() => {});
@@ -1340,12 +1351,12 @@ export class GameManager extends Component {
         // 复活已用→上「重新挑战」（浅蓝）+ 下「返回主页」（浅蓝）
         const canRevive = this.driver.canRevive();
         const goHome = () => {
-            this.modalLayerNode?.removeAllChildren();
+            this.modalLayerNode?.destroyAllChildren();
             this.homePage.render();
         };
         // 重新挑战：本局重新开始（回第 1 关、复活机会重置、重新计时），走标准切关流程重铺板
         const restartRun = async () => {
-            this.modalLayerNode?.removeAllChildren();
+            this.modalLayerNode?.destroyAllChildren();
             this.currentLevel = await this.driver.getStartLevel();
             this.transitionToNewLevel();
         };
@@ -1361,7 +1372,7 @@ export class GameManager extends Component {
                     this.driver.useRevive();
                     this.gameOver = false;
                     this.tempHoles = [];
-                    this.modalLayerNode!.removeAllChildren();
+                    this.modalLayerNode!.destroyAllChildren();
                     this.renderTopUI();
                 }, 'revive');
             }, this);
@@ -1461,7 +1472,7 @@ export class GameManager extends Component {
         }
 
         // 与 renderBoard 同口径：清旧 → 可见板筛选排序 → 先整体算置灰（createPlateNode 直接读 plate.buried）
-        this.boardContentNode.removeAllChildren();
+        this.boardContentNode.destroyAllChildren();
         this.plateNodes.clear();
         const visiblePlates = this.plates
             .filter((plate) => !plate.removed && (plate.wave ?? 0) <= this.loadedWave + 1)
@@ -1760,12 +1771,18 @@ export class GameManager extends Component {
      * 图标下方配百分比文字。数值由 updateCatProgress 驱动，这里只建节点结构。
      */
     private buildCatProgressIcon() {
-        if (!this.boardAreaNode) return;
+        if (!this.rootNode || !this.boardAreaNode) return;
         const iconSize = CAT_ICON_SIZE;
-        const x = this.screenWidth / 2 - iconSize / 2 - 16;
-        const y = this.boardHeight / 2 - iconSize / 2 - 2;
+        // 挂在 rootNode（topArea/boardArea 的共同上级），跨在两块区域的分界线上（果篮下方），
+        // 不受任一区域自身的 Mask 裁切；sibling index 紧跟 boardAreaNode 之后，
+        // 渲染顺序压在两块背景之上，才能实现「浮于上中之间」而不被背景盖住
+        // 暂存孔位（tempContainerNode 内 5 孔居中布局）最右侧边缘约在 x=70（slotRadius*2*(5-1)/2+slotRadius*1.1）；
+        // 挪到暂存孔位右侧附近，留一点间隙
+        const x = 145;
+        const y = this.screenHeight / 2 - this.topHeight;
 
-        const container = this.createNode('CatProgressIcon', this.boardAreaNode, x, y, iconSize, iconSize);
+        const container = this.createNode('CatProgressIcon', this.rootNode, x, y, iconSize, iconSize);
+        container.setSiblingIndex(this.boardAreaNode.getSiblingIndex() + 1);
         this.catIconNode = container;
 
         // 灰色底图：常驻显示，代表「未点亮」部分
@@ -1815,10 +1832,19 @@ export class GameManager extends Component {
         };
 
         // 收集品仓库接管：新用户补领默认玩偶后取当前展示项的远程图；本地无拥有记录/目录未配置/加载失败
-        // 均退回本地写死的猫图（老用户、后端未配置 game_collect 灰彩图字段时不受影响）
-        fetchCollectList().then((catalog) => {
-            CollectStore.grantIfEmpty(catalog);
-            const current = CollectStore.getCurrentCollect(catalog);
+        // 均退回本地写死的猫图（老用户、后端未配置 game_collect 灰彩图字段时不受影响）。
+        // 按需查询（starter-gift / by-ids 各最多 1 条），不再整表拉 game_collect。
+        CollectStore.ensureLoaded().then(() => {
+            const targetId = CollectStore.getCurrentTargetId();
+            if (targetId != null) {
+                return fetchCollectByIds([targetId]).then((items) => items[0] || null);
+            }
+            // 本地还没有任何拥有记录：查一下 starter 配置，补领后就是新的当前展示项
+            return fetchStarterGift().then((starter) => {
+                CollectStore.grantIfEmpty(starter);
+                return starter;
+            });
+        }).then((current) => {
             if (!current || !current.grayUrl || !current.colorUrl) {
                 loadLocalFallback();
                 return;
@@ -1898,10 +1924,10 @@ export class GameManager extends Component {
         });
         this.fallingPlateNodes.clear();
         if (this.boardContentNode) {
-            this.boardContentNode.removeAllChildren();
+            this.boardContentNode.destroyAllChildren();
         }
         if (this.boardEffectNode) {
-            this.boardEffectNode.removeAllChildren();
+            this.boardEffectNode.destroyAllChildren();
         }
         this.boxViews.forEach((view) => {
             if (view.node && view.node.isValid) {
@@ -1972,7 +1998,7 @@ export class GameManager extends Component {
             this.titleLabel.string = '果园大丰收';
         }
         if (this.levelBadgeLabel) {
-            this.levelBadgeLabel.string = `第 ${this.currentLevel} 关`;
+            this.levelBadgeLabel.string = this.driver.mode === 'daily' ? '每日挑战' : `第 ${this.currentLevel} 关`;
         }
         this.renderBoxes();
         this.renderTempSlots();
@@ -1997,8 +2023,25 @@ export class GameManager extends Component {
             const x = startX + index * (boxWidth + gap);
             const view = this.boxViews[index];
             const boxNode = view.node;
-            boxNode.setPosition(new Vec3(x, 0, 0));
             boxNode.active = true;
+
+            // 果篮满了变 isSlidingOut=true 那一刻（跳变沿）：从当前位置飞出屏幕右侧，飞行途中不用固定坐标覆盖它
+            // 清空完成变回 isSlidingOut=false 那一刻：先挪到屏幕左侧外，再飞回目标位置——新果篮从左边飞入
+            const flyOffset = this.screenWidth * 0.9;
+            if (box.isSlidingOut) {
+                if (!view.lastSlidingOut) {
+                    boxNode.setPosition(new Vec3(x, 0, 0));
+                    tween(boxNode).to(0.3, { position: new Vec3(x + flyOffset, 0, 0) }, { easing: 'quadIn' }).start();
+                    SoundManager.getInstance()?.playBoxClear();
+                    view.lastSlidingOut = true;
+                }
+            } else if (view.lastSlidingOut) {
+                boxNode.setPosition(new Vec3(x - flyOffset, 0, 0));
+                tween(boxNode).to(0.32, { position: new Vec3(x, 0, 0) }, { easing: 'backOut' }).start();
+                view.lastSlidingOut = false;
+            } else {
+                boxNode.setPosition(new Vec3(x, 0, 0));
+            }
             const isLocked = box.color === 'locked';
             const isEmpty = box.color === 'empty';
             const isActive = !isLocked && !isEmpty;
@@ -2246,7 +2289,7 @@ export class GameManager extends Component {
 
     private renderBoard() {
         if (!this.boardContentNode) return;
-        this.boardContentNode.removeAllChildren();
+        this.boardContentNode.destroyAllChildren();
         this.plateNodes.clear();
 
         // 首批（wave <= loadedWave）全部彩色可点；再多建一层灰板垫在最底下做预告
@@ -2328,12 +2371,12 @@ export class GameManager extends Component {
      */
     private renderSpecialFruitModal() {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
         mask.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode?.removeAllChildren();
+            this.modalLayerNode?.destroyAllChildren();
         }, this);
 
         // 底图 640x608，按宽 320 缩放 → 320x304
@@ -2355,7 +2398,8 @@ export class GameManager extends Component {
         // 关闭按钮：新图红 X 中心实测 (141, 132)
         const closeBtn = this.createNode('CloseBtn', panelNode, 141, 132, 60, 60);
         closeBtn.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.modalLayerNode!.destroyAllChildren();
         }, this);
 
         // 有限次的模式（每日挑战）：盖掉烘焙文案「点击水果即可使用哦」，换成本局规则提示（两行，整体上移防出界）
@@ -2375,7 +2419,7 @@ export class GameManager extends Component {
                 { asset: 'btn_action', name: 'BtnGetProp' }
             );
             getPropBtn.on(Node.EventType.TOUCH_END, () => {
-                this.modalLayerNode?.removeAllChildren();
+                this.modalLayerNode?.destroyAllChildren();
                 this.showAdThen(() => {
                     this.renderSpecialFruitChoiceModal();
                 }, 'get_special_fruit');
@@ -2445,7 +2489,7 @@ export class GameManager extends Component {
      */
     private renderSpecialFruitChoiceModal() {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
@@ -2486,7 +2530,7 @@ export class GameManager extends Component {
 
                 slotNode.on(Node.EventType.TOUCH_END, () => {
                     PropStore.addFruits(choice.fruit, 1);
-                    this.modalLayerNode?.removeAllChildren();
+                    this.modalLayerNode?.destroyAllChildren();
                     this.renderTools();
                     this.showCoinShortageTip(`恭喜获取${choice.name}x1`);
                 }, this);
@@ -2501,10 +2545,12 @@ export class GameManager extends Component {
             onFail();
             return;
         }
-        // 同一张远程图命中缓存直接用，不重复发请求（商城/仓库来回切 tab、奖励弹窗重复出现的常见场景）
+        // 同一张远程图命中缓存直接用，不重复发请求（商城/仓库来回切 tab、奖励弹窗重复出现的常见场景）；命中即移到 LRU 队尾
         const cached = this.remoteImageCache.get(trimmed);
         if (cached) {
-            sprite.spriteFrame = cached;
+            this.remoteImageCache.delete(trimmed);
+            this.remoteImageCache.set(trimmed, cached);
+            sprite.spriteFrame = cached.frame;
             return;
         }
         const dotIdx = trimmed.lastIndexOf('.');
@@ -2515,7 +2561,8 @@ export class GameManager extends Component {
                 texture.image = imageAsset;
                 const frame = new SpriteFrame();
                 frame.texture = texture;
-                this.remoteImageCache.set(trimmed, frame);
+                this.remoteImageCache.set(trimmed, { frame, asset: imageAsset });
+                this.evictRemoteImageCache();
                 sprite.spriteFrame = frame;
             } else if (sprite.isValid) {
                 onFail();
@@ -2523,33 +2570,19 @@ export class GameManager extends Component {
         });
     }
 
-    /** 后台预热：只下载填缓存，不显示到任何节点。已缓存的 URL 直接跳过 */
-    private preloadRemoteImage(url: string) {
-        const trimmed = (url || '').trim();
-        if (!trimmed.startsWith('http') || this.remoteImageCache.has(trimmed)) return;
-        const dotIdx = trimmed.lastIndexOf('.');
-        const ext = dotIdx > 0 ? trimmed.substring(dotIdx) : '.png';
-        assetManager.loadRemote<ImageAsset>(trimmed, { ext }, (err, imageAsset) => {
-            if (!err && imageAsset) {
-                const texture = new Texture2D();
-                texture.image = imageAsset;
-                const frame = new SpriteFrame();
-                frame.texture = texture;
-                this.remoteImageCache.set(trimmed, frame);
-            }
-        });
-    }
-
-    /** 首页进来后台预热：商城+道具图标提前下好，用户点进商城/仓库时基本秒显示 */
-    public preloadShopAndResourceImages() {
-        fetchShopList().then((items) => {
-            items.forEach((item) => this.preloadRemoteImage(item.imageUrl));
-        });
-        fetchResources().then((resources) => {
-            for (const code in resources) {
-                this.preloadRemoteImage(resources[code].url);
-            }
-        });
+    /** LRU 淘汰：缓存超上限时从最久未用开始释放（销毁 Texture2D + SpriteFrame、归还 ImageAsset），
+     *  被淘汰的 URL 下次用到会自动重新下载，只是首帧慢一点，不影响功能 */
+    private evictRemoteImageCache() {
+        while (this.remoteImageCache.size > GameManager.REMOTE_IMAGE_CACHE_MAX) {
+            const oldestUrl = this.remoteImageCache.keys().next().value;
+            if (oldestUrl == null) break;
+            const entry = this.remoteImageCache.get(oldestUrl);
+            this.remoteImageCache.delete(oldestUrl);
+            if (!entry) continue;
+            if (entry.frame.texture && entry.frame.texture.isValid) entry.frame.texture.destroy();
+            if (entry.frame.isValid) entry.frame.destroy();
+            if (entry.asset && entry.asset.isValid) assetManager.releaseAsset(entry.asset);
+        }
     }
 
     /** 特殊果按钮的世界坐标（飞行动画起点） */
@@ -2633,7 +2666,7 @@ export class GameManager extends Component {
             }
             if (!PropStore.consumeFruit('rainbow')) return;
             this.driver.useSpecialFruit();
-            this.modalLayerNode?.removeAllChildren();
+            this.modalLayerNode?.destroyAllChildren();
             this.renderTools();
 
             activeBoxes.sort((a, b) => {
@@ -2694,7 +2727,7 @@ export class GameManager extends Component {
         }
         if (!PropStore.consumeFruit('bomb')) return;
         this.driver.useSpecialFruit();
-        this.modalLayerNode?.removeAllChildren();
+        this.modalLayerNode?.destroyAllChildren();
         this.renderTools();
 
         // 炸弹视觉：大一号黑色球体（多层高光做立体感）+ 引信火花
@@ -2793,6 +2826,8 @@ export class GameManager extends Component {
         const btnW = opts?.width ?? 140, btnH = 61;
         const btnY = -(panelH / 2 + 10 + btnH / 2) - (opts?.yOffset ?? 0);
         const btnNode = this.createNode(opts?.name ?? 'BtnAction', panelNode, opts?.x ?? 0, btnY, btnW, btnH);
+        // 系统音效：工厂统一建钮，这里挂只管播声的监听（业务回调仍由调用方各自挂，互不影响）
+        btnNode.on(Node.EventType.TOUCH_END, () => SoundManager.getInstance()?.playSystemClick(), this);
         const sprite = btnNode.addComponent(Sprite);
         sprite.sizeMode = Sprite.SizeMode.CUSTOM;
         BundleManager.getInstance().loadAsset<SpriteFrame>(`ui/${opts?.asset ?? 'btn_action'}/spriteFrame`, SpriteFrame).then((sf) => {
@@ -2827,7 +2862,7 @@ export class GameManager extends Component {
 
     private renderAddBasketModal() {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
@@ -2854,7 +2889,8 @@ export class GameManager extends Component {
         // 1. 关闭按钮：新图红 X 中心实测 (136, 128)
         const closeBtn = this.createNode('CloseBtn', panelNode, 136, 128, 60, 60);
         closeBtn.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.modalLayerNode!.destroyAllChildren();
         }, this);
 
         // 2. 分离式布局：面板下方唯一按钮，文案优先级 免费使用 > 求助好友 > 看广告
@@ -2875,7 +2911,7 @@ export class GameManager extends Component {
             // 免费道具优先（spec.pay==='free' 时必然命中）
             if (PropStore.consumeTool('addBasket')) {
                 this.driver.useTool('addBasket');
-                this.modalLayerNode!.removeAllChildren();
+                this.modalLayerNode!.destroyAllChildren();
                 this.handleUnlockBox(lockedBox);
                 this.renderBasketUnlockModal();
                 this.renderTools();
@@ -2884,7 +2920,7 @@ export class GameManager extends Component {
             if (spec.pay === 'help') {
                 // 求助好友（当日独立额度）
                 if (!this.tryDailyHelp()) return;
-                this.modalLayerNode!.removeAllChildren();
+                this.modalLayerNode!.destroyAllChildren();
                 this.pendingDailyAction = () => {
                     this.driver.useTool('addBasket');
                     this.handleUnlockBox(lockedBox);
@@ -2905,7 +2941,7 @@ export class GameManager extends Component {
     /** 砸板子弹窗：使用 panel_smash_plate.png（与加果篮面板同尺寸同布局，底图已含全部按钮与文案） */
     private renderSmashPlateModal() {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
@@ -2932,7 +2968,8 @@ export class GameManager extends Component {
         // 1. 关闭按钮：新图红 X 中心实测 (142, 122)
         const closeBtn = this.createNode('CloseBtn', panelNode, 142, 122, 60, 60);
         closeBtn.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.modalLayerNode!.destroyAllChildren();
         }, this);
 
         // 2. 分离式布局：面板下方唯一按钮，文案优先级 免费使用 > 求助好友 > 看广告
@@ -2950,7 +2987,7 @@ export class GameManager extends Component {
             }
             // 免费道具优先（spec.pay==='free' 时必然命中）
             if (PropStore.consumeTool('smash')) {
-                this.modalLayerNode!.removeAllChildren();
+                this.modalLayerNode!.destroyAllChildren();
                 this.smashTopBottomPlate();
                 this.renderTools();
                 return;
@@ -2958,7 +2995,7 @@ export class GameManager extends Component {
             if (spec.pay === 'help') {
                 // 求助好友（当日独立额度）
                 if (!this.tryDailyHelp()) return;
-                this.modalLayerNode!.removeAllChildren();
+                this.modalLayerNode!.destroyAllChildren();
                 this.pendingDailyAction = () => {
                     // 计数在 smashTopBottomPlate 内自增，此处不重复
                     this.smashTopBottomPlate();
@@ -2967,7 +3004,7 @@ export class GameManager extends Component {
             } else {
                 // 兜底：看广告
                 this.showAdThen(() => {
-                    this.modalLayerNode!.removeAllChildren();
+                    this.modalLayerNode!.destroyAllChildren();
                     // 目标板呼吸 3 秒后坠落
                     this.smashTopBottomPlate();
                 }, 'smash_plate');
@@ -3016,7 +3053,7 @@ export class GameManager extends Component {
     /** 清空果盘确认弹窗：使用 panel_clear_basket.png（与加果篮面板同尺寸、同布局） */
     private renderClearBasketModal() {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
@@ -3043,7 +3080,8 @@ export class GameManager extends Component {
         // 1. 关闭按钮：新图红 X 中心实测 (134, 136)
         const closeBtn = this.createNode('CloseBtn', panelNode, 134, 136, 60, 60);
         closeBtn.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.modalLayerNode!.destroyAllChildren();
         }, this);
 
         const doClearTray = () => {
@@ -3073,7 +3111,7 @@ export class GameManager extends Component {
             // 免费道具优先（spec.pay==='free' 时必然命中）
             if (PropStore.consumeTool('clear')) {
                 this.driver.useTool('clear');
-                this.modalLayerNode!.removeAllChildren();
+                this.modalLayerNode!.destroyAllChildren();
                 doClearTray();
                 this.renderTools();
                 return;
@@ -3081,7 +3119,7 @@ export class GameManager extends Component {
             if (spec.pay === 'help') {
                 // 求助好友（当日独立额度）
                 if (!this.tryDailyHelp()) return;
-                this.modalLayerNode!.removeAllChildren();
+                this.modalLayerNode!.destroyAllChildren();
                 this.pendingDailyAction = () => {
                     this.driver.useTool('clear');
                     doClearTray();
@@ -3091,7 +3129,7 @@ export class GameManager extends Component {
                 // 兜底：看广告
                 this.showAdThen(() => {
                     this.driver.useTool('clear');
-                    this.modalLayerNode!.removeAllChildren();
+                    this.modalLayerNode!.destroyAllChildren();
                     doClearTray();
                 }, 'clear_tray');
             }
@@ -3101,7 +3139,7 @@ export class GameManager extends Component {
     /** 清空果盘成功弹窗：使用 panel_clear_tray.png，动效与加果篮成功弹窗一致 */
     private renderClearTraySuccessModal() {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
@@ -3121,7 +3159,7 @@ export class GameManager extends Component {
 
         // 图片上未绘制按钮，点击任意位置关闭
         const closeModal = () => {
-            if (this.modalLayerNode) this.modalLayerNode.removeAllChildren();
+            if (this.modalLayerNode) this.modalLayerNode.destroyAllChildren();
         };
         mask.on(Node.EventType.TOUCH_END, closeModal, this);
         panelNode.on(Node.EventType.TOUCH_END, closeModal, this);
@@ -3206,7 +3244,7 @@ export class GameManager extends Component {
 
     private renderBasketUnlockModal() {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
@@ -3309,18 +3347,18 @@ export class GameManager extends Component {
         // "太棒了"按钮点击区域
         const btnAwesome = this.createNode('BtnAwesome', panelNode, 0, -155, 200, 60);
         btnAwesome.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            this.modalLayerNode!.destroyAllChildren();
         }, this);
     }
 
     private renderSettingsModal(show: boolean) {
         if (!this.modalLayerNode) return;
         if (!show) {
-            this.modalLayerNode.removeAllChildren();
+            this.modalLayerNode.destroyAllChildren();
             return;
         }
 
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
 
@@ -3338,7 +3376,7 @@ export class GameManager extends Component {
         // 无限模式：与每日挑战同款 panel_home_settings 面板（下方竖排两按钮，整体上移 70 居中）
         const panelNode = this.renderSettingsPanelBase(70);
         if (!panelNode) return;
-        const panelH = 300 * 699 / 640;
+        const panelH = 300 * 674 / 640;
 
         // 重新挑战：面板下方独立按钮 btn_action（二次确认后放弃本局重开）
         const btnRestart = this.createSeparatedActionButton(
@@ -3379,15 +3417,15 @@ export class GameManager extends Component {
     }
 
     /**
-     * 设置面板公共主体：panel_home_settings.png（640x699，与首页设置弹窗同图），
-     * 图内相对坐标复用首页实测值（关闭 0.909/0.074、声音 0.317、震动 0.645）。
+     * 设置面板公共主体：panel_home_settings.png（640x674，与首页设置弹窗同图；三行版：音乐/音效/震动），
+     * 图内相对坐标复用首页实测值（关闭 0.930/0.073、音乐 0.325、音效 0.552、震动 0.779）。
      * 遮罩已由 renderSettingsModal 铺好；这里只画面板主体，面板下方按钮由各模式自挂。
      */
     private renderSettingsPanelBase(panelY: number): Node | null {
         if (!this.modalLayerNode) return null;
 
         const panelW = 300;
-        const panelH = panelW * 699 / 640;
+        const panelH = panelW * 674 / 640;
         const panelNode = this.createNode('SettingsPanel', this.modalLayerNode, 0, panelY, panelW, panelH);
         const panelSprite = panelNode.addComponent(Sprite);
         panelSprite.sizeMode = Sprite.SizeMode.CUSTOM;
@@ -3406,15 +3444,17 @@ export class GameManager extends Component {
         const px = (fx: number) => (fx - 0.5) * panelW;
         const py = (fy: number) => (0.5 - fy) * panelH;
 
-        // 右上角 X 关闭热区
-        const closeBtn = this.createNode('CloseBtn', panelNode, px(0.909), py(0.074), 48, 48);
+        // 右上角 X 关闭热区（新图实测 0.930/0.073）
+        const closeBtn = this.createNode('CloseBtn', panelNode, px(0.930), py(0.073), 48, 48);
         closeBtn.on(Node.EventType.TOUCH_END, () => {
+            SoundManager.getInstance()?.playSystemClick();
             this.renderSettingsModal(false);
         }, this);
 
-        // 声音开关：与图上喇叭图标同一水平线（createToggle 内部会 +60 偏移）
-        const toggleX = 28;
-        this.createToggle(panelNode, toggleX, py(0.317), this.soundEnabled, (isOn) => {
+        // 开关 X：空槽中心 fx≈0.754 → 面板本地 76，createToggle 内部 +60，故传 16
+        const toggleX = 16;
+        // 音乐开关：第一行（音符图标同一水平线），只管 BGM
+        this.createToggle(panelNode, toggleX, py(0.325), this.soundEnabled, (isOn) => {
             this.soundEnabled = isOn;
             localStorage.setItem('soundEnabled', String(isOn));
             SoundManager.getInstance()?.setMute(!isOn);
@@ -3425,8 +3465,15 @@ export class GameManager extends Component {
             }
         });
 
-        // 震动开关：与图上震动图标同一水平线
-        this.createToggle(panelNode, toggleX, py(0.645), this.vibrationEnabled, (isOn) => {
+        // 音效开关：第二行（喇叭图标同一水平线），只管点击音效
+        this.createToggle(panelNode, toggleX, py(0.552), localStorage.getItem('sfxEnabled') !== 'false', (isOn) => {
+            localStorage.setItem('sfxEnabled', String(isOn));
+            SoundManager.getInstance()?.setSfxMute(!isOn);
+            if (isOn) SoundManager.getInstance()?.playSystemClick();
+        });
+
+        // 震动开关：第三行（震动图标同一水平线）
+        this.createToggle(panelNode, toggleX, py(0.779), this.vibrationEnabled, (isOn) => {
             this.vibrationEnabled = isOn;
             localStorage.setItem('vibrationEnabled', String(isOn));
             if (isOn) this.triggerVibration('light');
@@ -3439,7 +3486,7 @@ export class GameManager extends Component {
     private renderDailySettingsPanel() {
         const panelNode = this.renderSettingsPanelBase(40);
         if (!panelNode) return;
-        const panelH = 300 * 699 / 640;
+        const panelH = 300 * 674 / 640;
 
         // 面板下方唯一按钮：btn_action「返回主页」（二次确认与旧版一致）
         const btnHome = this.createSeparatedActionButton(
@@ -3503,7 +3550,7 @@ export class GameManager extends Component {
 
     private renderModal(config: { title: string; sub: string; button?: string; onConfirm?: () => void; height?: number; secondButton?: string; secondOnConfirm?: () => void; hideClose?: boolean; onCancel?: () => void } | null) {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
         if (!config) return;
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
@@ -3520,6 +3567,7 @@ export class GameManager extends Component {
             const closeBtn = this.createNode('CloseBtn', panel, panelW / 2 - closeBtnSize / 2 - 5, panelH / 2 - closeBtnSize / 2 - 5, closeBtnSize, closeBtnSize);
             this.createLabel(closeBtn, '×', 0, 2, 32, new Color(180, 180, 180, 255), true);
             closeBtn.on(Node.EventType.TOUCH_END, () => {
+                SoundManager.getInstance()?.playSystemClick();
                 this.renderModal(null);
                 if (config.onCancel) config.onCancel();
             }, this);
@@ -4246,6 +4294,7 @@ export class GameManager extends Component {
         }
 
         this.triggerVibration('heavy');
+        SoundManager.getInstance()?.playGameClick();
 
         // 彩虹果特殊处理：可放入任意有空间的果篮
         const isRainbow = fruit.color === FruitColor.RAINBOW;
@@ -5233,7 +5282,7 @@ export class GameManager extends Component {
     /** 加果盘弹窗：分离式布局（panel_add_tray 底图 + 独立按钮），按钮走付费优先级链 */
     private renderAddTrayModal() {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
@@ -5260,7 +5309,8 @@ export class GameManager extends Component {
         // 1. 关闭按钮：新图红 X 中心实测 (131, 107)
         const closeBtn = this.createNode('CloseBtn', panelNode, 131, 107, 60, 60);
         closeBtn.on(Node.EventType.TOUCH_END, () => {
-            this.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.modalLayerNode!.destroyAllChildren();
         }, this);
 
         // 2. 分离式布局：面板下方唯一按钮，文案优先级 免费使用 > 求助好友 > 看广告
@@ -5286,7 +5336,7 @@ export class GameManager extends Component {
             if (spec.pay === 'help') {
                 // 求助好友（当日独立额度）
                 if (!this.tryDailyHelp()) return;
-                this.modalLayerNode!.removeAllChildren();
+                this.modalLayerNode!.destroyAllChildren();
                 this.pendingDailyAction = () => {
                     this.driver.useTool('addTray');
                     this.unlockOneTray();
@@ -5306,7 +5356,7 @@ export class GameManager extends Component {
     private unlockOneTray() {
         if (this.traysUnlockedThisLevel >= 1) return;
         this.traysUnlockedThisLevel++;
-        this.modalLayerNode?.removeAllChildren();
+        this.modalLayerNode?.destroyAllChildren();
         this.renderTopUI();
     }
 
@@ -5377,7 +5427,7 @@ export class GameManager extends Component {
     private dispatchClear() {
         switch (this.driver.getClearAction(this.currentLevel)) {
             case 'autoAdvance':
-                this.modalLayerNode?.removeAllChildren();
+                this.modalLayerNode?.destroyAllChildren();
                 this.currentLevel = this.driver.advanceLevel(this.currentLevel);
                 this.transitionToNewLevel();
                 break;
@@ -5408,7 +5458,7 @@ export class GameManager extends Component {
      */
     private renderDailySuccessModal() {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
@@ -5515,24 +5565,25 @@ export class GameManager extends Component {
         if (!driver.claimStageReward) {
             label.string = '返回主页';
             btnNode.on(Node.EventType.TOUCH_END, () => {
-                this.modalLayerNode?.removeAllChildren();
+                this.modalLayerNode?.destroyAllChildren();
                 this.homePage.render();
             }, this);
             return;
         }
 
         const goHome = () => {
-            this.modalLayerNode?.removeAllChildren();
+            this.modalLayerNode?.destroyAllChildren();
             this.homePage.render();
         };
         const failTip = () => this.showCoinShortageTip('奖励领取失败，请稍后再试');
 
         let claiming = false;
         // 递归领 stage：领完当前串拉下一 stage；后端返空=链条结束回主页（stage1 空视为异常，横幅允许重试）
-        // 收集抽奖前先取已拥有的 collectCode 列表传给后端排除（全部拥有则后端回退全量抽）
+        // 收集抽奖前先取已拥有的 collectCode 列表传给后端排除（全部拥有则后端回退全量抽）；
+        // getOwnedCodes 按本地已拥有 id 批量查，不整表拉取
         const claimStage = (stage: number) => {
-            this.ensureCollectCatalog().then((catalog) => {
-                return driver.claimStageReward!(stage, CollectStore.getOwnedCodes(catalog));
+            CollectStore.getOwnedCodes().then((ownedCodes) => {
+                return driver.claimStageReward!(stage, ownedCodes);
             }).then((list) => {
                 claiming = false;
                 if (!list || list.length === 0) {
@@ -5558,11 +5609,11 @@ export class GameManager extends Component {
     }
 
     /** 链式奖励弹窗：逐个展示 rewards[idx]，点「领取奖励」入账后弹下一个，全领完走 onDone。
-     * 先确保收集品目录到位，rewardDisplayName/grantRewardSilently 才能正确按 collectCode 查到名字/id */
+     * 先按需查这一条的 collectCode 目录，rewardDisplayName/grantRewardSilently 才能正确按 collectCode 查到名字/id */
     private showRewardChain(rewards: RewardItem[], idx: number, onDone: () => void) {
-        this.ensureCollectCatalog().then(() => {
+        const reward = rewards[idx];
+        this.ensureCollectCodeCached(reward.collectCode).then(() => {
             if (!this.modalLayerNode) return;
-            const reward = rewards[idx];
             this.renderRewardRevealModal(reward, () => {
                 this.grantRewardSilently(reward);
                 if (idx + 1 < rewards.length) {
@@ -5580,7 +5631,7 @@ export class GameManager extends Component {
      */
     private renderRewardRevealModal(reward: RewardItem, onClaim: () => void) {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 170), 0);
@@ -5624,21 +5675,25 @@ export class GameManager extends Component {
         tween(panelNode).to(0.25, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
     }
 
-    /** 收集品目录缓存：命中过就直接返回，否则拉一次并缓存（fetchCollectList 本身也有会话缓存） */
-    private ensureCollectCatalog(): Promise<CollectItem[]> {
-        if (this.collectCatalogCache) return Promise.resolve(this.collectCatalogCache);
-        return fetchCollectList().then((catalog) => {
-            this.collectCatalogCache = catalog;
-            return catalog;
-        }).catch(() => []);
+    /**
+     * 按需查一个 collectCode 并填进增量缓存：命中过直接跳过，未命中才发请求。
+     * code 为空（无限模式普通关，reward 本身为 null）直接跳过。
+     * 目录查询和背包内存缓存一起确保就位：调用方紧接着会用 CollectStore 的同步方法（own 等），
+     * 缓存没就位就调用会读到还没拉取完成的初始空状态。
+     */
+    private ensureCollectCodeCached(code: string | undefined): Promise<void> {
+        const codes = code && !this.collectCodeCache.has(code) ? [code] : [];
+        return Promise.all([fetchCollectByCodes(codes), CollectStore.ensureLoaded()]).then(([items]) => {
+            items.forEach((item) => this.collectCodeCache.set(item.collectCode, item));
+        }).catch(() => {});
     }
 
-    /** 奖励展示名：按枚举硬映射（组合果两个都显示）；收集品按 collectCode 从目录查真实名字，查不到兜底显示编码 */
+    /** 奖励展示名：按枚举硬映射（组合果两个都显示）；收集品按 collectCode 从缓存查真实名字，查不到兜底显示编码 */
     private rewardDisplayName(reward: RewardItem): string {
         const amount = reward.amount || 0;
         if (reward.itemType === ItemTypeEnum.COLLECT) {
-            const item = this.collectCatalogCache?.find((c) => c.collectCode === reward.collectCode);
-            return item ? item.name : `伙伴「${reward.collectCode}」`;
+            const item = reward.collectCode ? this.collectCodeCache.get(reward.collectCode) : undefined;
+            return item ? item.name : `水果「${reward.collectCode}」`;
         }
         switch (reward.resourceCode) {
             case ResourceCodeTypeEnum.COIN: return `金币x${amount}`;
@@ -5653,10 +5708,10 @@ export class GameManager extends Component {
     }
 
     /** 奖励纯入账（展示由金光弹窗负责）。商城购买复用（COLLECT 分支目前只走每日挑战/无限模式弹窗链，
-     * 调用前已由 showRewardChain/showEndlessClearChain 的 ensureCollectCatalog 确保目录到位） */
+     * 调用前已由 showRewardChain/showEndlessClearChain 的 ensureCollectCodeCached 确保该 code 到位） */
     grantRewardSilently(reward: RewardItem) {
         if (reward.itemType === ItemTypeEnum.COLLECT) {
-            const item = this.collectCatalogCache?.find((c) => c.collectCode === reward.collectCode);
+            const item = reward.collectCode ? this.collectCodeCache.get(reward.collectCode) : undefined;
             if (item) CollectStore.own(item.id, reward.amount || 1);
             return;
         }
@@ -5705,13 +5760,14 @@ export class GameManager extends Component {
         if (!this.modalLayerNode) return;
 
         // 金币已在果篮清除时实时累加，这里无需重复（过关锁定在 dispatchClear 里统一做）
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const driver = this.driver;
-        // 收集抽奖前先取已拥有的 collectCode 列表传给后端排除（全部拥有则后端回退全量抽）
+        // 收集抽奖前先取已拥有的 collectCode 列表传给后端排除（全部拥有则后端回退全量抽）；
+        // getOwnedCodes 按本地已拥有 id 批量查，不整表拉取
         const pending = driver.getClearReward
-            ? this.ensureCollectCatalog().then((catalog) =>
-                driver.getClearReward!(this.currentLevel, CollectStore.getOwnedCodes(catalog)))
+            ? CollectStore.getOwnedCodes().then((ownedCodes) =>
+                driver.getClearReward!(this.currentLevel, ownedCodes))
             : Promise.resolve(null);
         pending.then((rewards) => {
             if (!this.modalLayerNode) return;
@@ -5724,11 +5780,11 @@ export class GameManager extends Component {
     }
 
     /** 无限结算链：逐个展示奖励（null 时只显横幅），领完进下一关。
-     * 先确保收集品目录到位，rewardDisplayName/grantRewardSilently 才能正确按 collectCode 查到名字/id */
+     * 先按需查这一条的 collectCode 目录，rewardDisplayName/grantRewardSilently 才能正确按 collectCode 查到名字/id */
     private showEndlessClearChain(list: RewardItem[] | null, idx: number) {
-        this.ensureCollectCatalog().then(() => {
+        const reward = list ? list[idx] : null;
+        this.ensureCollectCodeCached(reward?.collectCode).then(() => {
             if (!this.modalLayerNode) return;
-            const reward = list ? list[idx] : null;
             this.renderEndlessClearModal(reward, () => {
                 if (reward) {
                     this.grantRewardSilently(reward);
@@ -5741,7 +5797,7 @@ export class GameManager extends Component {
                     return;
                 }
                 // 领完（或失败）：进下一关
-                this.modalLayerNode?.removeAllChildren();
+                this.modalLayerNode?.destroyAllChildren();
                 this.currentLevel = this.driver.advanceLevel(this.currentLevel);
                 this.transitionToNewLevel();
             });
@@ -5751,7 +5807,7 @@ export class GameManager extends Component {
     /** 无限结算页布局：顶部横幅 + 中间奖励图/文案 + 底部「领取奖励」橙钮 */
     private renderEndlessClearModal(reward: RewardItem | null, onClaim: () => void) {
         if (!this.modalLayerNode) return;
-        this.modalLayerNode.removeAllChildren();
+        this.modalLayerNode.destroyAllChildren();
 
         const mask = this.createGraphicsNode('Mask', this.modalLayerNode, this.screenWidth, this.screenHeight, 0, 0);
         this.drawRoundedRect(mask.getComponent(Graphics)!, this.screenWidth, this.screenHeight, new Color(0, 0, 0, 150), 0);
@@ -6371,7 +6427,7 @@ export class GameManager extends Component {
         const expectedName = color ? `Fruit_${color}` : '';
         if (!color) {
             if (existing) {
-                host.removeAllChildren();
+                host.destroyAllChildren();
             }
             return;
         }
@@ -6380,7 +6436,7 @@ export class GameManager extends Component {
             return;
         }
 
-        host.removeAllChildren();
+        host.destroyAllChildren();
         this.createFruitVisual(host, 0, 0, diameter, color, false);
     }
 
@@ -6512,7 +6568,8 @@ export class GameManager extends Component {
                 lockLabel,
                 playIcon,
                 slots,
-                lastBodyColor: ''
+                lastBodyColor: '',
+                lastSlidingOut: false
             });
         }
     }
@@ -6540,6 +6597,7 @@ export class GameManager extends Component {
                 }
             }).catch(() => {});
             gearBtnNode.on(Node.EventType.TOUCH_END, () => {
+                SoundManager.getInstance()?.playSystemClick();
                 this.renderSettingsModal(true);
             }, this);
         }
@@ -7191,7 +7249,7 @@ export class GameManager extends Component {
         this.storagePage.close();
         this.shopPage.close();
         if (this.rootNode) {
-            this.rootNode.removeAllChildren();
+            this.rootNode.destroyAllChildren();
         }
         this.gameOver = false;
         this.plateNodes.clear();
@@ -7210,7 +7268,7 @@ export class GameManager extends Component {
         this.storagePage.close();
         this.shopPage.close();
         if (this.rootNode) {
-            this.rootNode.removeAllChildren();
+            this.rootNode.destroyAllChildren();
         }
         this.plateNodes.clear();
         this.fallingPlateNodes.clear();

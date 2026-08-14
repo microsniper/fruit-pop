@@ -25,8 +25,17 @@ export class SoundManager extends Component {
     private innerAudio: any = null;
     private bgmVolume = 1;
 
-    /** 用户是否开着声音 */
+    /** 系统音效（点击按钮）：独立上下文，懒创建、反复复用，不循环 */
+    private systemClickAudio: any = null;
+    /** 游戏音效（点击水果）：同上 */
+    private gameClickAudio: any = null;
+    /** 果篮装满撤走音效：同上 */
+    private boxClearAudio: any = null;
+
+    /** 用户是否开着声音（音乐/BGM 开关，落 localStorage soundEnabled） */
     private soundOn = true;
+    /** 用户是否开着音效（点击音效独立开关，落 localStorage sfxEnabled） */
+    private sfxOn = true;
     /** 游戏是否希望 BGM 正在播（与平台实际状态无关，仅表达意图） */
     private shouldPlay = false;
     /** 中断恢复监听函数引用（onDestroy 时要注销，防止僵尸回调） */
@@ -44,6 +53,7 @@ export class SoundManager extends Component {
         SoundManager.instance = this;
 
         this.soundOn = localStorage.getItem('soundEnabled') !== 'false';
+        this.sfxOn = localStorage.getItem('sfxEnabled') !== 'false';
 
         try {
             if (platform && platform.createInnerAudioContext) {
@@ -112,6 +122,19 @@ export class SoundManager extends Component {
             }
             this.innerAudio = null;
         }
+        // 音效上下文同样随场景销毁，避免僵尸音频（与 BGM 同清理时机）
+        [this.systemClickAudio, this.gameClickAudio, this.boxClearAudio].forEach((audio) => {
+            if (!audio) return;
+            try {
+                audio.stop();
+                audio.destroy();
+            } catch (e) {
+                console.warn('SFX destroy failed:', e);
+            }
+        });
+        this.systemClickAudio = null;
+        this.gameClickAudio = null;
+        this.boxClearAudio = null;
     }
 
     /**
@@ -149,6 +172,59 @@ export class SoundManager extends Component {
         }
     }
 
+    /**
+     * 短音效懒创建：独立 InnerAudioContext、不循环。音效文件放包根目录（build-templates 拷入），
+     * 与 bgm.mp3 同套路。创建失败（如平台不支持）静默返回 null，调用方自然无声。
+     */
+    private ensureSfxAudio(src: string): any {
+        try {
+            if (!platform || !platform.createInnerAudioContext) return null;
+            const audio = platform.createInnerAudioContext();
+            audio.loop = false;
+            audio.volume = 1;
+            audio.src = src;
+            audio.onError((err: any) => {
+                console.warn('SFX innerAudio error:', src, err);
+            });
+            return audio;
+        } catch (e) {
+            console.warn('SFX init failed:', src, e);
+            return null;
+        }
+    }
+
+    /** 播放短音效：音效开关关闭时不播；正在播时从头重播（stop+play），连点不叠声 */
+    private playSfx(getCtx: () => any, setCtx: (a: any) => void, src: string) {
+        if (!this.sfxOn) return;
+        let audio = getCtx();
+        if (!audio) {
+            audio = this.ensureSfxAudio(src);
+            if (!audio) return;
+            setCtx(audio);
+        }
+        try {
+            audio.stop();
+            audio.play();
+        } catch (e) {
+            console.warn('SFX play failed:', src, e);
+        }
+    }
+
+    /** 系统音效：点击按钮等 UI 操作 */
+    playSystemClick() {
+        this.playSfx(() => this.systemClickAudio, (a) => { this.systemClickAudio = a; }, 'system_click.mp3');
+    }
+
+    /** 游戏音效：点击水果摘果 */
+    playGameClick() {
+        this.playSfx(() => this.gameClickAudio, (a) => { this.gameClickAudio = a; }, 'game_click.mp3');
+    }
+
+    /** 游戏音效：果篮装满飞出撤走 */
+    playBoxClear() {
+        this.playSfx(() => this.boxClearAudio, (a) => { this.boxClearAudio = a; }, 'box_clear.mp3');
+    }
+
     setMute(isMuted: boolean) {
         this.soundOn = !isMuted;
         if (!this.innerAudio) return;
@@ -166,5 +242,10 @@ export class SoundManager extends Component {
     toggleMute(): boolean {
         this.setMute(this.soundOn);
         return this.soundOn;
+    }
+
+    /** 音效独立开关：只影响点击音效，不动 BGM（设置面板「音效」行调用） */
+    setSfxMute(isMuted: boolean) {
+        this.sfxOn = !isMuted;
     }
 }

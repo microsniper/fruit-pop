@@ -214,15 +214,14 @@ export class DailyDriver implements ModeDriver {
     /**
      * 通关上报：每次通关都报。
      * 后端一人一天一行，更快才刷新起止时间，所以重复挑战必须报上去才能刷新最快成绩。
-     * localStorage 的 dailyClearReported 仅作「今天通关过」的展示标记，不再用于拦截上报。
      */
     private reportClear() {
         const startAt = this.readStartTs() || Date.now();
         // endAt = 过关瞬间：与本次用时同一口径上报，后端按 endAt - startAt 算耗时，
         // 避免用服务器收到请求的时刻做终点导致「今日最快」比「本次用时」多出网络延迟
         const endAt = Date.now();
-        this.lastRunSeconds = Math.max(0, Math.round((endAt - startAt) / 1000));
-        localStorage.setItem(this.reportedKey(), '1');
+        // 与后端 Duration.getSeconds() 的截断口径保持一致，避免四舍五入造成 1 秒偏差
+        this.lastRunSeconds = Math.max(0, Math.floor((endAt - startAt) / 1000));
         this.clearReport = saveDailyClear(startAt, endAt);
     }
 
@@ -254,10 +253,6 @@ export class DailyDriver implements ModeDriver {
         return 'dailyStartTs';
     }
 
-    private reportedKey(): string {
-        return `dailyClearReported:${DailyDriver.todayStr()}`;
-    }
-
     /**
      * 领取过关奖励：stage 1=金币200 2=道具抽1 3=收集抽1，规则硬编码在后端 RewardService；
      * 接口无副作用，结果的实际发放由调用方（GameManager）处理。
@@ -270,11 +265,6 @@ export class DailyDriver implements ModeDriver {
     static readTodayLevel(): number {
         const raw = parseInt(localStorage.getItem(`dailyLevel:${DailyDriver.todayStr()}`) || '1', 10);
         return raw >= 1 && raw <= DailyDriver.TOTAL_LEVELS ? raw : 1;
-    }
-
-    /** 今日是否已通关（本地防重标记，辅助展示用；严格状态以后端 /daily/status 为准） */
-    static readTodayCleared(): boolean {
-        return localStorage.getItem(`dailyClearReported:${DailyDriver.todayStr()}`) === '1';
     }
 
     private static todayStr(): string {

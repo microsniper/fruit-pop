@@ -1,5 +1,6 @@
 import { Node, Color, Graphics, LabelOutline } from 'cc';
 import type { GameManager } from './GameManager';
+import { SoundManager } from './SoundManager';
 
 const BROWN = new Color(110, 75, 45, 255);
 const BEIGE_LINE = new Color(150, 110, 60, 255);
@@ -98,7 +99,10 @@ export function drawSegmentedTabs(
             true
         );
         seg.on(Node.EventType.TOUCH_END, () => {
-            if (!active) onSwitch(tab.key);
+            if (!active) {
+                SoundManager.getInstance()?.playSystemClick();
+                onSwitch(tab.key);
+            }
         }, this);
     });
 }

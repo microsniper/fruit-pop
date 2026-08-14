@@ -1,5 +1,6 @@
 import { Node, Vec3, UITransform, Color, tween, Graphics, EditBox, Label } from 'cc';
 import { submitFeedback, FeedbackTypeEnum } from './api';
+import { SoundManager } from './SoundManager';
 import type { GameManager } from './GameManager';
 
 /** 反馈类型 Tab 文案，跟后端 FeedbackTypeEnum 一一对应（左=意见反馈 右=游戏反馈） */
@@ -38,7 +39,7 @@ export class FeedbackPage {
     /** 打开弹窗；onSubmitted 在提交成功关闭弹窗后调用，用于外部弹提示 */
     open(onSubmitted?: () => void) {
         if (!this.gm.modalLayerNode || !this.gm.modalLayerNode.isValid) return;
-        this.gm.modalLayerNode.removeAllChildren();
+        this.gm.modalLayerNode.destroyAllChildren();
 
         const screenW = this.gm.screenWidth;
         const screenH = this.gm.screenHeight;
@@ -46,7 +47,7 @@ export class FeedbackPage {
         const mask = this.gm.createGraphicsNode('Mask', this.gm.modalLayerNode, screenW, screenH, 0, 0);
         this.gm.drawRoundedRect(mask.getComponent(Graphics)!, screenW, screenH, new Color(0, 0, 0, 150), 0);
         mask.on(Node.EventType.TOUCH_END, () => {
-            this.gm.modalLayerNode!.removeAllChildren();
+            this.gm.modalLayerNode!.destroyAllChildren();
         }, this);
 
         const panelW = 300;
@@ -65,7 +66,8 @@ export class FeedbackPage {
         this.gm.createLabel(closeBtn, '×', 0, 2, 26, new Color(150, 130, 110, 255), true);
         closeBtn.on(Node.EventType.TOUCH_END, (e: any) => {
             e.propagationStopped = true;
-            this.gm.modalLayerNode!.removeAllChildren();
+            SoundManager.getInstance()?.playSystemClick();
+            this.gm.modalLayerNode!.destroyAllChildren();
         }, this);
 
         // 类型 Tab：两个并排，点击切换选中态（选中=深绿底白字，未选=浅灰底深字）
@@ -81,6 +83,8 @@ export class FeedbackPage {
             this.tabNodes.push({ bg: tabBg, label, type: tab.type });
             tabNode.on(Node.EventType.TOUCH_END, (e: any) => {
                 e.propagationStopped = true;
+                if (this.selectedType === tab.type) return;
+                SoundManager.getInstance()?.playSystemClick();
                 this.selectedType = tab.type;
                 this.refreshTabStyle();
             }, this);
@@ -164,7 +168,7 @@ export class FeedbackPage {
         const result = await submitFeedback(this.selectedType, content);
         this.submitting = false;
         if (result.success) {
-            this.gm.modalLayerNode!.removeAllChildren();
+            this.gm.modalLayerNode!.destroyAllChildren();
             if (onSubmitted) onSubmitted();
         } else {
             this.showInlineTip(result.message || '提交失败，请重试');
