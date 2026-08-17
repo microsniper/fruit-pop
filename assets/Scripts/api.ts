@@ -849,6 +849,18 @@ export const reportEvent = (scene: string) => {
   });
 }
 
+/**
+ * 签到成功上报（异步，不等待结果）：仅用于后端统计每日签到人数，不影响签到状态/奖励（全在前端本地）
+ */
+export const reportSignIn = () => {
+  request({
+    url: '/api/game/signin/report',
+    method: 'POST'
+  }).catch(() => {
+    // 上报失败不影响签到本身
+  });
+}
+
 export const consumeShareCount = async (): Promise<{ success: boolean, isLimit: boolean }> => {
   try {
     const res = await request({

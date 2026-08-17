@@ -1,4 +1,4 @@
-import { Node, Vec3, UITransform, Color, tween, Graphics, Mask, Sprite, SpriteFrame, Label, resources, ScrollView, director, UIOpacity } from 'cc';
+import { Node, Vec3, Vec2, UITransform, Color, tween, Graphics, Mask, Sprite, SpriteFrame, Label, resources, ScrollView, director, UIOpacity } from 'cc';
 import { getGameConfig, isNewUserThisLogin, getLocalRegionId, fetchRegionList, saveUserRegion, RegionItem, getDailyRankConfig, DailyRankResponse, fetchRandomFruits, CollectItem, getDailyStatus } from './api';
 import { SoundManager } from './SoundManager';
 import { BundleManager } from './BundleManager';
@@ -35,6 +35,30 @@ export class HomePage {
     private dailyRankCache: DailyRankResponse | null = null;
     /** 水果目录（game_collect 里 groupCode=fruit 的子集），供排行牌人群贴图随机挑选用 */
     private fruitCatalog: CollectItem[] | null = null;
+
+    // ===== 地区排行榜「定位到我的省份」按钮相关状态 =====
+    /** 省份榜滚动组件引用（buildRegionRankList 里创建，定位按钮需要用它 scrollToOffset） */
+    private regionRankScrollView: ScrollView | null = null;
+    /** 省份榜滚动内容节点引用（箭头挂在它下面，随内容一起滚动） */
+    private regionRankContentNode: Node | null = null;
+    /** 列表顶部留白（与 buildRegionRankList 里的 topPad 保持一致，滚动定位算 y 要用） */
+    private regionRankTopPad = 0;
+    /** 每行高度（与 buildRegionRankList 里的 itemH 保持一致，滚动定位算 y 要用） */
+    private regionRankItemH = 0;
+    /** 「行顶部」到「圆盘视觉中心」的固定偏移（由 plateH/plateOverlap/discH 算出），定位时要把圆盘中心对准屏幕中心，不能只对齐行顶部 */
+    private regionRankDiscCenterOffset = 0;
+    /** 省份榜可视区高度（buildRegionRankList 里等于 pageH），定位滚动时用来算「让目标居中」的偏移 */
+    private regionRankViewportH = 0;
+    /** 「我的头像」在圆盘人群里的实际渲染坐标（仅 isMe 那一行才有；渲染是 Math.random() 站位，只能渲染时存下来） */
+    private myRegionIconPos: { regionId: number; x: number; y: number } | null = null;
+    /** 定位按钮节点：点击在「定位到我的省份」与「回到顶部」两态间切换 */
+    private locateBtnNode: Node | null = null;
+    /** 定位按钮下方的文案标签（两态切换时同步换文字："我在哪" / "回顶部"） */
+    private locateBtnLabel: Label | null = null;
+    /** 指向「我的头像」的箭头标记节点 */
+    private locateArrowNode: Node | null = null;
+    /** 当前是否处于「已定位」状态（决定按钮显示哪张图、点击后做什么） */
+    private isLocatedAtRegion = false;
 
     constructor(private gm: GameManager) {}
 
@@ -78,6 +102,9 @@ export class HomePage {
         // 容器节点必须在这里同步创建（占好兄弟节点顺序），内容数据异步拉到后再往里填——
         // 否则等异步回调触发时标题/按钮早已作为后续兄弟节点加入，反而会盖在它们上面。
         this.renderRegionRankBoard(pageW, pageH);
+
+        this.isLocatedAtRegion = false;
+        this.locateArrowNode = null;
 
         // 顶部标题「摘呀摘」（title_home.png，分包；启动时分包已随水果预载，此时必定可用）
         const titleW = pageW * 0.62;
@@ -126,6 +153,12 @@ export class HomePage {
         const signInBtnNode = this.createHomeButton('btn_signin', -pageW / 2 + 42, sideBtnY, sideBtnW, () => this.onSignInClick());
         // 个人仓库（签到按钮下方，间距与「设置-签到」间距同款 0.12*pageH）：整页切换，看道具与收集品
         this.createHomeButton('btn_storage', -pageW / 2 + 42, sideBtnY - pageH * 0.12, sideBtnW, () => this.gm.storagePage.open());
+        // 「定位到我的省份」（仓库按钮下方，与左列其余按钮同款间距）：点击滚动到我的省份行并标出我的头像
+        const locateBtnY = sideBtnY - pageH * 0.24;
+        this.locateBtnNode = this.createHomeButton('btn_locate_region', -pageW / 2 + 42, locateBtnY, sideBtnW, () => this.onLocateButtonClick());
+        // 按钮下方文案：初始「我在哪」，定位后切换成「回顶部」（与按钮图两态同步）。
+        // btn_locate_region/btn_back_top 都是 1:1 正方形图，实际渲染高度=sideBtnW（不是createHomeButton占位用的width*0.55）
+        this.locateBtnLabel = this.gm.createLabel(this.pageNode, '我在哪', -pageW / 2 + 42, locateBtnY - sideBtnW / 2 - 12, 12, new Color(90, 70, 45, 255), true);
         // 今天未签到：签到按钮右上角红点提醒
         if (signInBtnNode && !SignInPage.isSignedToday()) {
             const dot = signInBtnNode.addComponent(Graphics);
@@ -298,10 +331,20 @@ export class HomePage {
         const itemH = plateH + discH - plateOverlap + rowGap;
         // 列表起点：金币余额条下方留出间隙，不从屏幕最顶部开始（金币在 pageH*0.22，图标半高14）；第一名再整体下移 80px
         const topPad = pageH * 0.28 + 14 + 24 + 80;
+        // 定位按钮滚动定位要用同一份 topPad/itemH，存成类字段
+        this.regionRankTopPad = topPad;
+        this.regionRankItemH = itemH;
+        this.myRegionIconPos = null;
+        this.regionRankViewportH = pageH;
+        // 行顶部(rowTopY) -> 圆盘中心(discCenterY) 的偏移：discCenterY - rowTopY
+        // = (plateY - plateH/2 + plateOverlap) - discH/2 - rowTopY，plateY = rowTopY - plateH/2，
+        // 代入化简 = -plateH + plateOverlap - discH/2（负值：圆盘中心在行顶部下方）
+        this.regionRankDiscCenterOffset = -plateH + plateOverlap - discH / 2;
 
         const scrollView = parent.addComponent(ScrollView);
         scrollView.horizontal = false;
         scrollView.vertical = true;
+        this.regionRankScrollView = scrollView;
 
         const viewNode = this.gm.createNode('RegionRankView', parent, 0, 0, pageW, pageH);
         const mask = viewNode.addComponent(Mask);
@@ -312,6 +355,7 @@ export class HomePage {
         contentNode.getComponent(UITransform)!.setAnchorPoint(0.5, 1);
         contentNode.setPosition(0, pageH / 2, 0);
         scrollView.content = contentNode;
+        this.regionRankContentNode = contentNode;
 
         // 分帧建行：每行含圆盘+牌子+3文字+20个水果头像（约24个节点/行），省份数多时一次同步建完
         // 会在首页刚进入时卡住主线程一整帧，与排行榜页列表同款分帧手法，摊到多帧完成
@@ -361,13 +405,134 @@ export class HomePage {
                 // 圆盘上的水果人群：按椭圆范围站位（贴合圆盘轮廓，不用矩形避免站出圆盘外），
                 // 不管 clearCount 多少，固定按圆盘容量站满；plateBottomY 传入用于夹住人群顶部，不让猫头顶穿排名牌
                 const plateBottomY = plateY - plateH / 2;
-                this.renderFruitCrowd(contentNode, 0, discCenterY, discW, discH, plateBottomY, isMe);
+                const myIconPos = this.renderFruitCrowd(contentNode, 0, discCenterY, discW, discH, plateBottomY, isMe);
+                // 只有 isMe 这一行才会真的贴出「我的头像」，记下它渲染后的实际坐标，供定位箭头使用
+                // （站位是 Math.random() 生成的，渲染完局部变量就丢，必须在这里存一份）
+                if (isMe && myIconPos && item.regionId != null) {
+                    this.myRegionIconPos = { regionId: item.regionId, x: myIconPos.x, y: myIconPos.y };
+                }
             }
             if (rowIndex >= list.length) {
                 this.gm.unschedule(buildRowStep);
             }
         };
         this.gm.schedule(buildRowStep, 0);
+    }
+
+    /**
+     * 「定位」按钮点击：
+     * - 未选省份：弹选省弹窗，选完直接定位过去（不像每日挑战入口那样跳进对局）。
+     * - 已选省份：在省份榜里找到对应行并滚动过去，按钮切换成「回到顶部」。
+     * - 当前已是「回到顶部」态：滚回顶部，按钮切回「定位」。
+     */
+    private onLocateButtonClick() {
+        if (this.isLocatedAtRegion) {
+            this.scrollRegionRankToTop();
+            return;
+        }
+        const regionId = getLocalRegionId();
+        if (regionId == null) {
+            this.renderRegionSelectModal((chosenId) => this.scrollToRegionRow(chosenId));
+            return;
+        }
+        this.scrollToRegionRow(regionId);
+    }
+
+    /** 按 regionId 在省份榜里找到对应行，滚动过去并标出我的头像（找不到该省份的榜单数据则仅提示，不滚动） */
+    private scrollToRegionRow(regionId: number) {
+        const list = this.dailyRankCache?.list || [];
+        const rowIndex = list.findIndex((item) => item.regionId === regionId);
+        if (rowIndex < 0 || !this.regionRankScrollView || !this.regionRankScrollView.isValid) {
+            this.gm.showCoinShortageTip('暂无该省份榜单数据');
+            return;
+        }
+        // 目标行「圆盘中心」到 contentNode 顶部的距离 = topPad + rowIndex*itemH - discCenterOffset
+        // （discCenterOffset 是负值：圆盘中心在行顶部下方，减去它等于加上其绝对值）
+        const discCenterDist = this.regionRankTopPad + rowIndex * this.regionRankItemH - this.regionRankDiscCenterOffset;
+        // 让圆盘中心落在可视区正中间，而不是贴可视区顶部：offset 再减去半个可视区高度
+        const targetY = discCenterDist - this.regionRankViewportH / 2;
+        this.regionRankScrollView.scrollToOffset(new Vec2(0, targetY), 0.3);
+
+        this.clearLocateArrow();
+        const isMe = !!list[rowIndex].isMe;
+        if (isMe && this.myRegionIconPos && this.myRegionIconPos.regionId === regionId) {
+            this.showLocateArrow(this.myRegionIconPos.x, this.myRegionIconPos.y);
+        }
+        // 没有可指的头像（isMe 不为 true）：只滚动，不报错、不显示箭头
+
+        this.isLocatedAtRegion = true;
+        this.swapLocateButtonImage('btn_back_top');
+    }
+
+    /** 滚回列表顶部，按钮切回「定位」态，箭头收起 */
+    private scrollRegionRankToTop() {
+        if (this.regionRankScrollView && this.regionRankScrollView.isValid) {
+            this.regionRankScrollView.scrollToOffset(new Vec2(0, 0), 0.3);
+        }
+        this.clearLocateArrow();
+        this.isLocatedAtRegion = false;
+        this.swapLocateButtonImage('btn_locate_region');
+    }
+
+    /**
+     * 换按钮图（定位按钮复用 createHomeButton 同款整图 Sprite 逻辑，两态各一张图），
+     * 同步更新按钮下方文案，两者绑在同一处改，不会漏改导致图文不一致。
+     */
+    private swapLocateButtonImage(imgName: string) {
+        if (this.locateBtnLabel && this.locateBtnLabel.isValid) {
+            this.locateBtnLabel.string = imgName === 'btn_back_top' ? '回顶部' : '我在哪';
+        }
+        const btnNode = this.locateBtnNode;
+        if (!btnNode || !btnNode.isValid) return;
+        const sprite = btnNode.getComponent(Sprite);
+        if (!sprite) return;
+        BundleManager.getInstance().loadAsset<SpriteFrame>(`ui/${imgName}/spriteFrame`, SpriteFrame).then((sf) => {
+            if (sf && sprite.isValid) {
+                sprite.spriteFrame = sf;
+                const rect = sf.rect;
+                const width = btnNode.getComponent(UITransform)!.contentSize.width;
+                if (rect && rect.width > 0) {
+                    btnNode.getComponent(UITransform)!.setContentSize(width, width * (rect.height / rect.width));
+                }
+            }
+        }).catch(() => {});
+    }
+
+    /**
+     * 在圆盘「我的头像」坐标上画一个指向它的箭头（纯 Graphics 画的下三角+描边，不依赖额外美术资源），
+     * 挂在滚动内容节点下（跟着内容一起滚动）。箭头画在头像正上方，尖端朝下指向头像。
+     */
+    private showLocateArrow(x: number, y: number) {
+        if (!this.regionRankContentNode || !this.regionRankContentNode.isValid) return;
+        const arrowW = 24;
+        const arrowH = 20;
+        const arrowY = y + arrowH * 1.6; // 头像正上方留出间隙
+        const arrowNode = this.gm.createGraphicsNode('MyRegionArrow', this.regionRankContentNode, arrowW, arrowH, x, arrowY);
+        const g = arrowNode.getComponent(Graphics)!;
+        g.fillColor = new Color(255, 80, 60, 255);
+        g.strokeColor = new Color(255, 255, 255, 255);
+        g.lineWidth = 2;
+        g.moveTo(-arrowW / 2, arrowH / 2);
+        g.lineTo(arrowW / 2, arrowH / 2);
+        g.lineTo(0, -arrowH / 2);
+        g.close();
+        g.fill();
+        g.stroke();
+        // 上下轻微弹跳，吸引注意力
+        tween(arrowNode)
+            .to(0.35, { position: new Vec3(x, arrowY + 6, 0) }, { easing: 'sineInOut' })
+            .to(0.35, { position: new Vec3(x, arrowY, 0) }, { easing: 'sineInOut' })
+            .union()
+            .repeatForever()
+            .start();
+        this.locateArrowNode = arrowNode;
+    }
+
+    private clearLocateArrow() {
+        if (this.locateArrowNode && this.locateArrowNode.isValid) {
+            this.locateArrowNode.destroy();
+        }
+        this.locateArrowNode = null;
     }
 
     /** 排名牌配色：前三名金/银/铜，其余按名次循环取一套鲜艳色板，不再是清一色白底 */
@@ -394,8 +559,8 @@ export class HomePage {
      * plateBottomY：排名牌下沿的绝对 Y 坐标，用来夹住每个点的最高位置（点的 y + 图标半高 不能超过它），
      * 防止图标本身有半个身子的高度，最上面几个贴图头顶顶穿排名牌。
      */
-    private renderFruitCrowd(parent: Node, centerX: number, centerY: number, discW: number, discH: number, plateBottomY: number, isMe: boolean) {
-        if (!this.fruitCatalog || this.fruitCatalog.length === 0) return;
+    private renderFruitCrowd(parent: Node, centerX: number, centerY: number, discW: number, discH: number, plateBottomY: number, isMe: boolean): { x: number; y: number } | null {
+        if (!this.fruitCatalog || this.fruitCatalog.length === 0) return null;
         const count = HOME_FRUIT_CROWD_MAX;
         const baseSize = 90; // 放大 3 倍（原 30）
         const halfIcon = baseSize / 2;
@@ -426,12 +591,17 @@ export class HomePage {
 
         const meIndex = isMe ? points.length - 1 : -1;
         const maxRadiusY = Math.max(upRadiusY, downRadiusY);
+        let myIconPos: { x: number; y: number } | null = null;
         points.forEach((p, idx) => {
             const depth = maxRadiusY > 0 ? (standCenterY - p.y) / maxRadiusY : 0; // >0 越往前（下半区），<0 越往后（上半区）
             const scale = 1.05 - depth * 0.2 + (Math.random() * 0.1 - 0.05);
             const url = this.pickFruitIconUrl(idx === meIndex);
             if (url) this.createFruitIconNode(parent, p.x, p.y, baseSize * scale, url);
+            if (idx === meIndex) {
+                myIconPos = { x: p.x, y: p.y };
+            }
         });
+        return myIconPos;
     }
 
     private createFruitIconNode(parent: Node, x: number, y: number, size: number, colorUrl: string): Node {
@@ -480,6 +650,14 @@ export class HomePage {
         }
         this.pageNode = null;
         this.signInGuideNode = null;
+        // 地区排行榜相关引用随首页销毁一起清空（节点本身已随 pageNode.destroy() 销毁，这里只清引用）
+        this.regionRankScrollView = null;
+        this.regionRankContentNode = null;
+        this.myRegionIconPos = null;
+        this.locateBtnNode = null;
+        this.locateBtnLabel = null;
+        this.locateArrowNode = null;
+        this.isLocatedAtRegion = false;
         // 首页金币余额引用随页面销毁置空（进游戏时 ensureTempSlotViews 检测到空引用会重建游戏内版本）
         this.gm.coinCountLabel = null;
         this.gm.coinIconNode = null;
@@ -774,7 +952,7 @@ export class HomePage {
         // 先查后端：今日已通关则弹提示拦截
         const status = await getDailyStatus();
         if (status?.cleared) {
-            this.showTip('今日已通关，明日再来！');
+            this.gm.showCoinShortageTip('今日已通关，明日再来！');
             return;
         }
         if (getLocalRegionId() == null) {
@@ -792,7 +970,7 @@ export class HomePage {
      * 拉起时先请后端拿 34 省列表（后端缓存优先）；点省份先高亮，点确定才落定。
      * 点遮罩/关闭 = 放弃，不存，下次还问（每日挑战本体还没做，不强制）。
      */
-    private async renderRegionSelectModal() {
+    private async renderRegionSelectModal(onDone?: (chosenId: number) => void) {
         if (!this.gm.modalLayerNode || !this.gm.modalLayerNode.isValid) return;
         const items = await fetchRegionList();
         if (!this.gm.modalLayerNode || !this.gm.modalLayerNode.isValid) return; // 等网络期间可能已离页
@@ -909,9 +1087,14 @@ export class HomePage {
             if (this.gm.modalLayerNode && this.gm.modalLayerNode.isValid) {
                 this.gm.modalLayerNode.destroyAllChildren();
             }
-            // 选省完成：直接进入每日挑战（与已选省点按钮同路径，无需再点一次）
-            LoadingPage.target = 'daily';
-            director.loadScene('Loading');
+            if (onDone) {
+                // 定位按钮场景：选完不进对局，回调决定后续动作（滚动定位到刚选的省份）
+                onDone(chosenId);
+            } else {
+                // 每日挑战入口默认行为：选省完成直接进入每日挑战（与已选省点按钮同路径，无需再点一次）
+                LoadingPage.target = 'daily';
+                director.loadScene('Loading');
+            }
         }, this);
 
         // 从小到大弹出

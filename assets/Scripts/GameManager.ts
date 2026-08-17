@@ -2462,6 +2462,17 @@ export class GameManager extends Component {
                     countOutline.width = 2;
                 }
 
+                // 使用说明：图标上方居中小字（原放图标下方被 xN 数量挡住），红色+透明度呼吸提醒（呼吸写法同 ShopPage 掉落提示）
+                const usageTip = slot.fruit === 'rainbow' ? '可任意匹配果篮' : '可炸掉板子';
+                const usageLabel = this.createLabel(slotNode, usageTip, 0, 64, 11, new Color(199, 39, 30, 255), true);
+                const usageOpacity = usageLabel.node.addComponent(UIOpacity);
+                tween(usageOpacity)
+                    .to(0.9, { opacity: 100 }, { easing: 'sineInOut' })
+                    .to(0.9, { opacity: 255 }, { easing: 'sineInOut' })
+                    .union()
+                    .repeatForever()
+                    .start();
+
                 if (sfExhausted) {
                     // 本局已用过特殊果：两格都置灰，点击提示
                     imgSprite.grayscale = true;
@@ -4740,8 +4751,14 @@ export class GameManager extends Component {
             if (!body || body.type !== ERigidBody2DType.Dynamic) return;
 
             const pos = node.position;
-            plate.x = pos.x;
-            plate.y = pos.y;
+            // 回写板中心坐标（pivot 减 gravityOrigin 偏移）并同步物理旋转角。
+            // 之前直接把 pivot 坐标写给 plate.x/y（带配重偏移的异形板会整体错位），
+            // rotation 又不回写（板子物理里已歪、判定还按初始角度算），
+            // stuck 板的遮挡判定框和视觉位置错开，出现"果子露着却点不动"的随机误判
+            const offset = this.getPlatePivotOffset(plate);
+            plate.x = pos.x - offset.x;
+            plate.y = pos.y - offset.y;
+            plate.rotation = node.angle;
 
             // 长条板又长又扁，一旦只有一角搭在邻居板上，重力力矩会把它甩得转得很快，
             // 悬空那一头的线速度（角速度×半宽）可能在一步内扫过邻居板的整个厚度，把邻居"甩穿"。
@@ -6873,7 +6890,7 @@ export class GameManager extends Component {
             
             const origW = spriteFrame.width;
             const origH = spriteFrame.height;
-            const maxSize = diameter * 1.35; // 之前是 1.1，调大到 1.35
+            const maxSize = diameter * 1.5; // 水果贴图最大边：孔距最密 32px，1.5×20=30px 时相邻果子仍留 2px 间隙
             const scale = Math.min(maxSize / origW, maxSize / origH);
             imgNode.scale = new Vec3(scale, scale, 1);
         } else {

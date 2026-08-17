@@ -1,5 +1,5 @@
 import { Node, Vec3, Color, tween, Graphics, Sprite } from 'cc';
-import { fetchSignInConfig, SignInRewardItem, ResourceCodeTypeEnum, ItemTypeEnum } from './api';
+import { fetchSignInConfig, reportSignIn, SignInRewardItem, ResourceCodeTypeEnum, ItemTypeEnum } from './api';
 import { PropStore } from './PropStore';
 import { CollectStore } from './CollectStore';
 import { SoundManager } from './SoundManager';
@@ -272,6 +272,8 @@ export class SignInPage {
         if (state.lastDate === this.gm.getTodayStr()) return; // 今天已领（防重）
         const newDays = state.days >= TOTAL_DAYS ? 1 : state.days + 1;
         SignInPage.writeState({ days: newDays, lastDate: this.gm.getTodayStr() });
+        // 静默上报（仅用于后端统计每日签到人数，不影响签到本身，失败也不处理）
+        reportSignIn();
 
         // 按奖励类型发放（全部存前端）
         this.grantReward(item);
