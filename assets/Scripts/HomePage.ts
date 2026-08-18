@@ -1,5 +1,5 @@
 import { Node, Vec3, Vec2, UITransform, Color, tween, Graphics, Mask, Sprite, SpriteFrame, Label, resources, ScrollView, director, UIOpacity } from 'cc';
-import { getGameConfig, isNewUserThisLogin, getLocalRegionId, fetchRegionList, saveUserRegion, RegionItem, getDailyRankConfig, DailyRankResponse, fetchRandomFruits, CollectItem, getDailyStatus } from './api';
+import { getGameConfig, isNewUserThisLogin, getLocalRegionId, fetchRegionList, saveUserRegion, RegionItem, getDailyRankConfig, DailyRankResponse, fetchRandomFruits, fetchCollectByIds, CollectItem, getDailyStatus } from './api';
 import { SoundManager } from './SoundManager';
 import { BundleManager } from './BundleManager';
 import { LoadingPage } from './LoadingPage';
@@ -35,6 +35,12 @@ export class HomePage {
     private dailyRankCache: DailyRankResponse | null = null;
     /** 水果目录（game_collect 里 groupCode=fruit 的子集），供排行牌人群贴图随机挑选用 */
     private fruitCatalog: CollectItem[] | null = null;
+    /**
+     * 玩家当前真实选中的收集品图片（不限于 fruitCatalog 的随机抽样范围，可能是任意分组）。
+     * 每次重新渲染首页都会按最新 CollectStore.getCurrentTargetId() 现查一次，不做跨渲染缓存——
+     * 玩家在仓库页切换后 CollectStore 本地状态已同步更新，回首页需要立刻反映最新选择。
+     */
+    private myCollectIconUrl: string | null = null;
 
     // ===== 地区排行榜「定位到我的省份」按钮相关状态 =====
     /** 省份榜滚动组件引用（buildRegionRankList 里创建，定位按钮需要用它 scrollToOffset） */
@@ -289,8 +295,24 @@ export class HomePage {
         Promise.all([getDailyRankConfig(), this.ensureFruitCatalog(), CollectStore.ensureLoaded()]).then(([rank]) => {
             if (!boardNode.isValid) return;
             this.dailyRankCache = rank;
-            this.buildRegionRankList(boardNode, pageW, pageH);
+            this.loadMyCollectIconUrl().then(() => {
+                if (boardNode.isValid) this.buildRegionRankList(boardNode, pageW, pageH);
+            });
         }).catch(() => { /* 榜拉取失败：首页其余内容照常展示，静默跳过这块 */ });
+    }
+
+    /**
+     * 查玩家当前真实选中收集品的图片：不依赖 fruitCatalog 的随机抽样范围（可能是任意分组），
+     * 按 CollectStore 记录的 id 直接查详情。未选中/查询失败时置空，渲染时回退随机水果兜底。
+     */
+    private async loadMyCollectIconUrl(): Promise<void> {
+        const targetId = CollectStore.getCurrentTargetId();
+        if (targetId == null) {
+            this.myCollectIconUrl = null;
+            return;
+        }
+        const items = await fetchCollectByIds([targetId]);
+        this.myCollectIconUrl = items[0]?.colorUrl || null;
     }
 
     /** 水果目录（后端随机抽取 30 个 fruit，每次进首页结果不同），会话内缓存一次 */
@@ -300,14 +322,14 @@ export class HomePage {
         return this.fruitCatalog;
     }
 
-    /** 一个排名人群贴图用的水果图标：随机挑一个装饰用；preferMine 时优先取玩家真实展示的水果 */
+    /**
+     * 一个排名人群贴图用的水果图标：随机挑一个装饰用；preferMine 时优先取玩家真实展示的收集品
+     * （myCollectIconUrl，不受 fruitCatalog 随机抽样范围限制），查不到才回退随机水果兜底。
+     */
     private pickFruitIconUrl(preferMine: boolean): string | null {
         const catalog = this.fruitCatalog;
+        if (preferMine && this.myCollectIconUrl) return this.myCollectIconUrl;
         if (!catalog || catalog.length === 0) return null;
-        if (preferMine) {
-            const mine = CollectStore.getCurrentCollect(catalog);
-            if (mine) return mine.colorUrl;
-        }
         return catalog[Math.floor(Math.random() * catalog.length)].colorUrl;
     }
 
@@ -506,7 +528,7 @@ export class HomePage {
         if (!this.regionRankContentNode || !this.regionRankContentNode.isValid) return;
         const arrowW = 24;
         const arrowH = 20;
-        const arrowY = y + arrowH * 1.6; // 头像正上方留出间隙
+        const arrowY = y + 40; // 头像正上方留出间隙（角色较高时箭头易挡头，固定间距从32px加大到40px）
         const arrowNode = this.gm.createGraphicsNode('MyRegionArrow', this.regionRankContentNode, arrowW, arrowH, x, arrowY);
         const g = arrowNode.getComponent(Graphics)!;
         g.fillColor = new Color(255, 80, 60, 255);

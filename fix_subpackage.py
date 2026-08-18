@@ -14,6 +14,7 @@ Cocos 3.8.8 构建时会自动将 isBundle:true 的目录写入 game.json 的 su
   2. game.json 中注册 bundle_late 为 subpackage（root 指向 subpackages/bundle_late/）
   3. 将 assets/bundle_late/ 移动到 subpackages/bundle_late/
   4. 创建 subpackages/bundle_late/game.js 入口文件
+  5. 在 game.js 开头注入版本更新检查（微信 UpdateManager，仅正式版生效）
 
 使用方法：
   python3 fix_subpackage.py
@@ -31,6 +32,56 @@ BUNDLE_NAME = "bundle_late"
 SRC_BUNDLE_DIR = os.path.join(BUILD_DIR, "assets", BUNDLE_NAME)
 DEST_BUNDLE_DIR = os.path.join(BUILD_DIR, "subpackages", BUNDLE_NAME)
 GAME_JS = os.path.join(DEST_BUNDLE_DIR, "game.js")
+
+
+GAME_JS_PATH = os.path.join(BUILD_DIR, "game.js")
+
+# 注入到 game.js 开头的版本更新检查代码
+# 机制说明：微信冷启动时异步下载新包，本次仍运行旧版；onUpdateReady 在新包
+# 下载完成时触发，弹窗强制用户立即重启到新版（applyUpdate）。
+# 注意：wx.getUpdateManager 仅正式版生效，开发版/体验版不触发回调。
+UPDATE_CHECK_JS = """\
+// ===== 版本更新检查：由 fix_subpackage.py 注入，勿手动修改 =====
+(function () {
+    if (typeof wx === 'undefined' || !wx.getUpdateManager) { return; }
+    var updateManager = wx.getUpdateManager();
+    updateManager.onUpdateReady(function () {
+        wx.showModal({
+            title: '更新提示',
+            content: '新版本已准备好，请重启游戏体验最新内容',
+            showCancel: false,
+            confirmText: '立即重启',
+            success: function (res) {
+                if (res.confirm) {
+                    updateManager.applyUpdate();
+                }
+            }
+        });
+    });
+    updateManager.onUpdateFailed(function () {
+        console.warn('[update] 新版本下载失败，将在下次冷启动时重试');
+    });
+})();
+"""
+
+
+def inject_update_manager():
+    """在 wechatgame 的 game.js 开头注入版本更新检查（幂等，重复执行自动跳过）"""
+    if not os.path.exists(GAME_JS_PATH):
+        print(f"[ERROR] 找不到 game.js: {GAME_JS_PATH}")
+        sys.exit(1)
+
+    with open(GAME_JS_PATH, "r", encoding="utf-8") as f:
+        content = f.read()
+
+    if "getUpdateManager" in content:
+        print(f"[OK] game.js 已包含版本更新检查，跳过注入")
+        return
+
+    with open(GAME_JS_PATH, "w", encoding="utf-8") as f:
+        f.write(UPDATE_CHECK_JS + "\n" + content)
+
+    print(f"[FIXED] 已在 game.js 开头注入版本更新检查（onUpdateReady 弹窗后仅可立即重启）")
 
 
 def fix_settings_json():
@@ -113,4 +164,5 @@ if __name__ == "__main__":
     fix_game_json()
     move_bundle_dir()
     create_game_js()
+    inject_update_manager()
     print("\n[DONE] 分包修复完成，可以预览/上传了")

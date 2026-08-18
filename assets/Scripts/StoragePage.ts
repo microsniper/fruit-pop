@@ -301,9 +301,20 @@ export class StoragePage {
                 rightColor: BROWN,
                 onTap: () => {
                     this.gm.renderCollectDetail(item.name, item.colorUrl, () => {
-                        // 设为当前展示：同步 CollectStore（猫咪图标等页面还读它），再整页重来刷新星标
-                        CollectStore.setCurrent(item.collectId);
-                        this.renderContent();
+                        // 设为当前展示：本地已知结果（旧当前项取消星标、新点的项加上），直接改本地数据重画，
+                        // 不再重新拉整页——避免"写请求"和"刷新读请求"谁先谁后的竞态，视觉也立刻响应
+                        const prevCurrent = this.collectItems.find((it) => it.isCurrent);
+                        if (prevCurrent) prevCurrent.isCurrent = false;
+                        item.isCurrent = true;
+                        this.redrawCollectGrid();
+                        CollectStore.setCurrent(item.collectId).then((ok) => {
+                            if (ok) return;
+                            // 后端写入失败：回滚星标，提示用户重试
+                            if (prevCurrent) prevCurrent.isCurrent = true;
+                            item.isCurrent = false;
+                            this.redrawCollectGrid();
+                            this.gm.showCoinShortageTip('设置失败，请重试');
+                        });
                     });
                 },
             });
@@ -319,6 +330,13 @@ export class StoragePage {
         if (naturalH < this.collectViewH && this.collectItems.length < this.collectTotal) {
             this.loadCollectPage(false);
         }
+    }
+
+    /** 本地已更新 collectItems（如切换当前展示项）后，原地重画全部已加载格子，不发网络请求 */
+    private redrawCollectGrid() {
+        if (!this.collectGridNode || !this.collectGridNode.isValid) return;
+        this.collectGridNode.destroyAllChildren();
+        this.appendCollectSlots(this.collectItems);
     }
 
     /** 滑到距底部 LOAD_MORE_THRESHOLD 以内就预加载下一页 */

@@ -605,7 +605,11 @@ export class GameManager extends Component {
     private lastHelpTime = 0;
     private readonly HELP_COOLDOWN_MS = 3 * 60 * 1000;
 
-    /** 获取求助按钮状态：是否可用，以及CD倒计时 */
+    /**
+     * 获取求助按钮状态：是否可用，以及CD倒计时。
+     * 【死代码，未接线】全项目搜索确认无调用方，只服务于已废弃的 doShareForReward 链路。
+     * 真正在用的求助次数判断在 tryDailyHelp（数据库 game_config.help_max 驱动），不是本方法。
+     */
     public getHelpButtonState(): { disabled: boolean; text: string } {
         if (this.isShareLimitReached()) {
             return { disabled: true, text: '今日已达上限' };
@@ -622,6 +626,7 @@ export class GameManager extends Component {
         return `${d.getFullYear()}${d.getMonth() + 1}${d.getDate()}`;
     }
 
+    /** 【死代码，未接线】只服务于已废弃的 doShareForReward 链路，见该方法上的说明。 */
     private isShareLimitReached(): boolean {
         try {
             if (typeof wx !== 'undefined') {
@@ -633,6 +638,7 @@ export class GameManager extends Component {
         }
     }
 
+    /** 【死代码，未接线】只服务于已废弃的 doShareForReward 链路，见该方法上的说明。 */
     private setShareLimitReached() {
         try {
             if (typeof wx !== 'undefined') {
@@ -2403,6 +2409,7 @@ export class GameManager extends Component {
         }, this);
 
         // 有限次的模式（每日挑战）：盖掉烘焙文案「点击水果即可使用哦」，换成本局规则提示（两行，整体上移防出界）
+        // 这条规则说明是每日挑战特有的（本局只能用一个），无限模式没有这条限制，不跟着显示
         const sfLimit = this.driver.getSpecialFruitLimit();
         if (Number.isFinite(sfLimit)) {
             const wipe = this.createGraphicsNode('HintWipe', panelNode, 280, 58, 0, -122);
@@ -2412,19 +2419,20 @@ export class GameManager extends Component {
             wg.fill();
             this.createLabel(panelNode, '本局只能使用其中一个特殊果', 0, -110, 16, new Color(199, 39, 30, 255), true);
             this.createLabel(panelNode, '可通过签到和无限模式获得', 0, -133, 13, new Color(199, 39, 30, 255), true);
-
-            // 获取道具按钮（仅每日挑战显示）：橙钮+右上角视频图标，点击先关弹窗，看完广告发彩虹果x1+炸弹果x1
-            const getPropBtn = this.createSeparatedActionButton(
-                panelNode, panelH, { text: '获取道具', pay: 'ad' }, false,
-                { asset: 'btn_action', name: 'BtnGetProp' }
-            );
-            getPropBtn.on(Node.EventType.TOUCH_END, () => {
-                this.modalLayerNode?.destroyAllChildren();
-                this.showAdThen(() => {
-                    this.renderSpecialFruitChoiceModal();
-                }, 'get_special_fruit');
-            }, this);
         }
+
+        // 获取道具按钮：橙钮+右上角视频图标，点击先关弹窗，看完广告发彩虹果x1+炸弹果x1。
+        // 两种模式都显示，不看库存也不看本局限次——无限模式下这是玩家补充特殊果库存的唯一入口。
+        const getPropBtn = this.createSeparatedActionButton(
+            panelNode, panelH, { text: '获取道具', pay: 'ad' }, false,
+            { asset: 'btn_action', name: 'BtnGetProp' }
+        );
+        getPropBtn.on(Node.EventType.TOUCH_END, () => {
+            this.modalLayerNode?.destroyAllChildren();
+            this.showAdThen(() => {
+                this.renderSpecialFruitChoiceModal();
+            }, 'get_special_fruit');
+        }, this);
 
         // 两个格子：左彩虹果 / 右炸弹果（中心与格子尺寸为底图像素实测）
         const slots = [
@@ -3614,6 +3622,8 @@ export class GameManager extends Component {
         subLabel.overflow = Label.Overflow.SHRINK; // 允许文字自动缩放或者折行
         subLabel.enableWrapText = true;
 
+        // 【死代码，未接线】secondButton/secondOnConfirm 双按钮能力：全项目搜索确认当前没有任何
+        // renderModal 调用传了这两个参数，只服务于已废弃的 doShareForReward 求助分享链路。
         const hasSecond = config.secondButton && config.secondOnConfirm;
         const btnW = hasSecond && config.button ? 126 : 160;
         const btnH = 48;
@@ -7220,7 +7230,16 @@ export class GameManager extends Component {
         });
     }
 
-    /** 分享并发放奖励 */
+    /**
+     * 分享并发放奖励。
+     * 【死代码，未接线】全项目搜索确认当前无任何调用方，是废弃流程。
+     * 已被数据库配置驱动的 help_max 求助机制（tryDailyHelp，见 getGameConfig().helpMax）取代，
+     * 现在实际生效的次数上限是数据库 game_config 表 help_max 配置（当前为4），不是本方法里的任何数值。
+     * 牵连的同样是死代码、未删除（保留以防其他地方有隐性依赖）：
+     * getHelpButtonState()、isShareLimitReached()、setShareLimitReached()、pendingShareCallback、
+     * shareStartTime、renderModal() 的 secondButton/secondOnConfirm 双按钮分支、
+     * 后端 /api/game/share/consume 接口（UserService.consumeShareCount，硬编码5次，与数据库配置的4次不是同一套）。
+     */
     private doShareForReward(scene: 'unlock' | 'revive' | 'clear', callback: () => void) {
         const btnState = this.getHelpButtonState();
         if (btnState.disabled) {

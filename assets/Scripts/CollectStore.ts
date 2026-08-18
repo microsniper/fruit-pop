@@ -96,12 +96,15 @@ export const CollectStore = {
         ownBackpackItem(collectId, amount);
     },
 
-    /** 指定当前展示的收集品（需先拥有，否则忽略）。同步更新内存缓存，异步同步给后端 */
-    setCurrent(collectId: number) {
-        if (!state.owned[collectId]) return;
+    /**
+     * 指定当前展示的收集品（需先拥有，否则忽略）。同步更新内存缓存，异步同步给后端。
+     * 返回后端写入结果的 Promise，调用方如需在写失败时回滚本地视图（如仓库页星标），可自行 await。
+     */
+    setCurrent(collectId: number): Promise<boolean> {
+        if (!state.owned[collectId]) return Promise.resolve(false);
         state.currentId = collectId;
         if (!loaded) pendingCurrentId = collectId;
-        setBackpackCurrent(collectId);
+        return setBackpackCurrent(collectId);
     },
 
     /**
@@ -123,12 +126,5 @@ export const CollectStore = {
         return (state.currentId != null && state.owned[state.currentId])
             ? state.currentId
             : ownedIds[0];
-    },
-
-    /** 结合目录数据取出当前展示项的完整信息；本地为空或目录未命中返回 null（调用方走本地图兜底） */
-    getCurrentCollect(catalog: CollectItem[]): CollectItem | null {
-        const targetId = this.getCurrentTargetId();
-        if (targetId == null) return null;
-        return catalog.find((item) => item.id === targetId) || null;
     }
 };

@@ -862,6 +862,10 @@ export const reportSignIn = () => {
   });
 }
 
+/**
+ * 【死代码，未接线】全项目搜索确认调用方（GameManager.ts 内 doShareForReward 相关代码）都是废弃流程，
+ * 未被任何入口触发。真正生效的求助次数限制走 tryDailyHelp（数据库 game_config.help_max 配置）。
+ */
 export const consumeShareCount = async (): Promise<{ success: boolean, isLimit: boolean }> => {
   try {
     const res = await request({
