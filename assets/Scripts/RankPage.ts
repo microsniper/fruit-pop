@@ -392,9 +392,9 @@ export class RankPage {
             this.gm.schedule(buildRowStep, 0);
         }
 
-        // 底部我的排名
+        // 底部我的排名：全国榜排名暂不准确，固定显示"未上榜"，不展示真实名次
         if (myRank) {
-            this.renderMyCard(parent, listW, pageH, `${myRank.rank || '?'}`, this.getRankDisplayName(myRank), `${myRank.levelNum || 0}关`, myRank.avatarUrl);
+            this.renderMyCard(parent, listW, pageH, '未上榜', this.getRankDisplayName(myRank), `${myRank.levelNum || 0}关`, myRank.avatarUrl);
         }
     }
 
@@ -498,16 +498,19 @@ export class RankPage {
 
         const leftX = -listW / 2 + 16;
 
-        // 排名
-        const rl = this.gm.createLabel(parent, rank, leftX + 8, cardY, 20, new Color(255, 255, 255, 255), true);
+        // 排名："未上榜"等非数字文案比 1~3 位数字宽很多，缩小字号并把头像顺移，避免挤在一起
+        const rankIsNumber = /^\d+$/.test(rank);
+        const rankFontSize = rankIsNumber ? 20 : 14;
+        const avatarBaseX = rankIsNumber ? leftX + 56 : leftX + 78;
+        const rl = this.gm.createLabel(parent, rank, leftX + 8, cardY, rankFontSize, new Color(255, 255, 255, 255), true);
         rl.horizontalAlign = 0;
         rl.node.getComponent(UITransform)!.setAnchorPoint(0, 0.5);
 
         // 头像（无限榜有头像，挑战榜没有）
         let nameX = leftX + 50;
         if (avatarUrl) {
-            this.createAvatarSpriteNode(parent, leftX + 56, cardY, 36, avatarUrl);
-            nameX = leftX + 82;
+            this.createAvatarSpriteNode(parent, avatarBaseX, cardY, 36, avatarUrl);
+            nameX = avatarBaseX + 26;
         }
 
         // 名称

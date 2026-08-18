@@ -2564,21 +2564,37 @@ export class GameManager extends Component {
             sprite.spriteFrame = cached.frame;
             return;
         }
-        const dotIdx = trimmed.lastIndexOf('.');
-        const ext = dotIdx > 0 ? trimmed.substring(dotIdx) : '.png';
-        assetManager.loadRemote<ImageAsset>(trimmed, { ext }, (err, imageAsset) => {
-            if (!err && imageAsset && sprite.isValid) {
-                const texture = new Texture2D();
-                texture.image = imageAsset;
-                const frame = new SpriteFrame();
-                frame.texture = texture;
-                this.remoteImageCache.set(trimmed, { frame, asset: imageAsset });
-                this.evictRemoteImageCache();
-                sprite.spriteFrame = frame;
-            } else if (sprite.isValid) {
-                onFail();
+        // 只在最后一段路径（去掉 query/hash、且在最后一个 / 之后）里找 . 才算真扩展名，
+        // 避免把域名里的点（如 qlogo.cn）或查询参数误当成后缀
+        const noQuery = trimmed.split('?')[0].split('#')[0];
+        const lastSlashIdx = noQuery.lastIndexOf('/');
+        const lastSegment = noQuery.substring(lastSlashIdx + 1);
+        const dotIdx = lastSegment.lastIndexOf('.');
+        const urlExt = dotIdx > 0 ? lastSegment.substring(dotIdx) : '';
+        // 微信头像等 CDN 地址常常不带扩展名（如 thirdwx.qlogo.cn/mmopen/vi_32/xxx/132），
+        // 猜错了 assetManager 会解码失败；带明确后缀时直接用，否则依次试 jpg/png/webp，全部失败才 onFail
+        const extsToTry = urlExt ? [urlExt] : ['.jpg', '.png', '.webp'];
+        const tryLoad = (i: number) => {
+            if (i >= extsToTry.length) {
+                if (sprite.isValid) onFail();
+                return;
             }
-        });
+            assetManager.loadRemote<ImageAsset>(trimmed, { ext: extsToTry[i] }, (err, imageAsset) => {
+                if (!sprite.isValid) return;
+                if (!err && imageAsset) {
+                    const texture = new Texture2D();
+                    texture.image = imageAsset;
+                    const frame = new SpriteFrame();
+                    frame.texture = texture;
+                    this.remoteImageCache.set(trimmed, { frame, asset: imageAsset });
+                    this.evictRemoteImageCache();
+                    sprite.spriteFrame = frame;
+                } else {
+                    tryLoad(i + 1);
+                }
+            });
+        };
+        tryLoad(0);
     }
 
     /** LRU 淘汰：缓存超上限时从最久未用开始释放（销毁 Texture2D + SpriteFrame、归还 ImageAsset），

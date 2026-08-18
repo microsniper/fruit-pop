@@ -79,10 +79,10 @@ const request = async <T = any>(options: any, isRetry: boolean = false): Promise
       const timestampStr = Date.now().toString();
       headers['X-Timestamp'] = timestampStr;
       
-      let bodyStr = "";
-      if (options.data) {
-        bodyStr = JSON.stringify(options.data);
-      }
+      // 无 data 的 POST 统一按 "{}" 参与签名和发送：部分微信环境（机型/基础库差异）会把
+      // 无 data 的 POST 自发成 "{}"，若签名按空串算则验签必败，必须保证签名串与实际 body 严格一致
+      const data = options.data === undefined || options.data === null ? {} : options.data;
+      const bodyStr = JSON.stringify(data);
       const strToSign = bodyStr + timestampStr + SECRET_KEY;
       headers['X-Sign'] = md5(strToSign);
 
@@ -92,7 +92,7 @@ const request = async <T = any>(options: any, isRetry: boolean = false): Promise
           fetch(BASE_URL + options.url, {
               method: options.method || 'GET',
               headers: headers,
-              body: options.data ? JSON.stringify(options.data) : undefined,
+              body: (options.method || 'GET') === 'GET' ? undefined : bodyStr,
               signal: controller.signal
           })
           .then(async res => {
@@ -127,6 +127,7 @@ const request = async <T = any>(options: any, isRetry: boolean = false): Promise
       const reqFunc = originalWxRequest || platform.request.bind(platform);
       reqFunc({
         ...options,
+        data: data,
         url: BASE_URL + options.url,
         header: headers,
         timeout: 15000,
