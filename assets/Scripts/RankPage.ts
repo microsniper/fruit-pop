@@ -1,5 +1,5 @@
 import { Node, UITransform, Color, Graphics, Mask, Sprite, SpriteFrame, ScrollView } from 'cc';
-import { fetchRankConfig, RankItem, hasUserProfile, updateProfile, getDailyRankConfig, DailyRankResponse } from './api';
+import { fetchRankConfig, RankItem, hasUserProfile, getDailyRankConfig, DailyRankResponse } from './api';
 import { BundleManager } from './BundleManager';
 import { drawTitlePlate } from './PageTabs';
 import { SoundManager } from './SoundManager';
@@ -26,33 +26,14 @@ export class RankPage {
 
     constructor(private gm: GameManager) {}
 
-    /** 排行榜入口：处理授权状态分流后进榜 */
+    /** 排行榜入口：未授权时提示走首页排行榜按钮上的原生授权按钮（隐私弹窗→授权弹窗），不在此处裸取用户信息 */
     open(fromHome: boolean) {
         this.fromHome = fromHome;
-        if (typeof wx === 'undefined') {
+        if (typeof wx === 'undefined' || hasUserProfile()) {
             this.loadAndShowRank();
             return;
         }
-        if (hasUserProfile()) {
-            this.loadAndShowRank();
-            return;
-        }
-        wx.getSetting({
-            success: (settingRes: any) => {
-                const authSetting = settingRes.authSetting || {};
-                if (authSetting['scope.userInfo'] === true) {
-                    wx.getUserInfo({
-                        success: (userRes: any) => {
-                            this.saveAndEnterRank(userRes.userInfo);
-                        },
-                        fail: () => this.showAuthRequiredToast()
-                    });
-                } else {
-                    this.showAuthRequiredToast();
-                }
-            },
-            fail: () => this.showAuthRequiredToast()
-        });
+        this.showAuthRequiredToast();
     }
 
     private showAuthRequiredToast() {
@@ -71,19 +52,6 @@ export class RankPage {
 
     setAuthOverlayVisible(visible: boolean) {
         this.gm.setAuthOverlayVisible('rank', visible);
-    }
-
-    private async saveAndEnterRank(userInfo: any) {
-        const nickname = ((userInfo.nickName || '') as string).trim() || '微信玩家';
-        const avatarUrl = ((userInfo.avatarUrl || '') as string).trim();
-        const result = await updateProfile(nickname, avatarUrl);
-        if (!result.success) {
-            console.warn('保存微信头像昵称失败:', result.message);
-            if (typeof wx !== 'undefined' && typeof wx.showToast === 'function') {
-                wx.showToast({ title: result.message || '保存失败，请重试', icon: 'none' });
-            }
-        }
-        this.loadAndShowRank();
     }
 
     private async loadDefaultAvatars(): Promise<void> {
