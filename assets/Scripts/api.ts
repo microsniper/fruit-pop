@@ -514,6 +514,13 @@ export interface GameConfig {
   dailyLayerRules?: DailyLayerRules
   /** 无限模式层流规则（按关卡区间）：max=关卡上界，缺字段回落默认值 */
   endlessLayerRules?: EndlessLayerRuleRange[]
+  /**
+   * 无限模式挑战化批次计划（按关卡区间）：套用每日挑战 wave_plan 结构，
+   * 额外带 weights（刷色权重）与 unburyRatio/refillRatio（命中区间后覆盖 endlessLayerRules 同名字段）。
+   */
+  endlessChallengeWavePlan?: EndlessChallengeWavePlanRange[]
+  /** 无限模式挑战化铺板参数（按关卡区间）：套用每日挑战 wave_plates 结构 */
+  endlessChallengeWavePlates?: EndlessChallengeWavePlatesRange[]
   /** 求助好友每日上限（按模式）：help_max 配置键，缺省回落 4 */
   helpMax?: HelpMax
 }
@@ -532,6 +539,28 @@ export interface EndlessLayerRuleRange {
   initialLoad?: number
   refillRatio?: number
   unburyRatio?: number
+}
+
+export interface EndlessChallengeWavePlanRange {
+  /** 关卡上界（含），按当前关号找第一个 level <= max 的区间 */
+  max: number
+  batches?: DailyWavePlanBatch[]
+  weights?: GameConfigWeights
+  /**
+   * 以下 4 个字段命中该区间后逐个覆盖 endlessLayerRules 同名字段（按字段覆盖，某字段缺省
+   * 则该字段沿用 endlessLayerRules 的值）。maxPlates 不在本配置里，单层铺板量由
+   * endlessChallengeWavePlates 每批自己的 maxPlates 决定，缺批时才回落 endlessLayerRules.maxPlates。
+   */
+  maxLayers?: number
+  initialLoad?: number
+  unburyRatio?: number
+  refillRatio?: number
+}
+
+export interface EndlessChallengeWavePlatesRange {
+  /** 关卡上界（含），按当前关号找第一个 level <= max 的区间 */
+  max: number
+  batches?: DailyWavePlatesBatch[]
 }
 
 export interface DailyWavePlanBatch {
@@ -679,6 +708,60 @@ export const fetchSignInConfig = async (): Promise<SignInRewardItem[]> => {
   } catch (e) {
     console.error('[API] fetch signin config failed:', e)
     return []
+  }
+}
+
+// ========== 游戏区气泡提示 ==========
+
+/** 一条气泡文案（后台 game_config.bubble_tips 配置，文案写死不做变量替换） */
+export interface BubbleTipItem {
+  /** 气泡文案，原样展示 */
+  content: string
+  /** 权重，越大越容易被抽到；后端已保证为正数 */
+  weight: number
+  /** 适用模式：endless / daily / all（缺省视为 all） */
+  mode?: string
+  /**
+   * 情景码：填了就只在对应局面触发、不参与随机轮播；缺省则进随机池。
+   * basket_locked / add_tray / clear_tray 三种，见 migration_add_bubble_tips.sql 注释。
+   */
+  scene?: string
+}
+
+/** 气泡配置：文案池 + 节奏参数（后端已滤掉停用项并补齐默认值） */
+export interface BubbleTipConfig {
+  tips: BubbleTipItem[]
+  /** 进关后多久冒第一个气泡（秒） */
+  firstDelaySeconds: number
+  /** 气泡间隔随机区间下限（秒） */
+  minIntervalSeconds: number
+  /** 气泡间隔随机区间上限（秒） */
+  maxIntervalSeconds: number
+  /** 单个气泡停留时长（秒） */
+  displaySeconds: number
+}
+
+/** 气泡配置缓存：一次会话只拉一次，之后本地随机挑，不再请求 */
+let bubbleTipCache: BubbleTipConfig | null = null;
+
+/**
+ * 拉取气泡文案池。返回 null 表示未配置或拉取失败，调用方静默跳过气泡功能。
+ * 失败不写缓存，下次进关会再试一次。
+ */
+export const fetchBubbleTips = async (): Promise<BubbleTipConfig | null> => {
+  if (bubbleTipCache) return bubbleTipCache;
+  try {
+    const res = await request<BubbleTipConfig>({
+      url: '/api/game/bubble-tips',
+      method: 'POST'
+    })
+    const data = res.data;
+    if (!data || !data.tips || data.tips.length === 0) return null;
+    bubbleTipCache = data;
+    return data;
+  } catch (e) {
+    console.error('[API] fetch bubble tips failed:', e)
+    return null;
   }
 }
 

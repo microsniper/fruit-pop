@@ -58,6 +58,8 @@ export class StoragePage {
     constructor(private gm: GameManager) {}
 
     open() {
+        // 离开首页：销毁首页节点与微信原生授权按钮，避免悬浮按钮在仓库页误弹授权
+        this.gm.homePage.close();
         this.render();
     }
 

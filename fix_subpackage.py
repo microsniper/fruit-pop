@@ -15,6 +15,8 @@ Cocos 3.8.8 构建时会自动将 isBundle:true 的目录写入 game.json 的 su
   3. 将 assets/bundle_late/ 移动到 subpackages/bundle_late/
   4. 创建 subpackages/bundle_late/game.js 入口文件
   5. 在 game.js 开头注入版本更新检查（微信 UpdateManager，仅正式版生效）
+     下载完成只挂 globalThis.__wxPendingUpdate 标记，不打断对局；
+     重启提示由 HomePage.render() 在玩家回到首页时弹出。
 
 使用方法：
   python3 fix_subpackage.py
@@ -38,50 +40,76 @@ GAME_JS_PATH = os.path.join(BUILD_DIR, "game.js")
 
 # 注入到 game.js 开头的版本更新检查代码
 # 机制说明：微信冷启动时异步下载新包，本次仍运行旧版；onUpdateReady 在新包
-# 下载完成时触发，弹窗强制用户立即重启到新版（applyUpdate）。
+# 下载完成时触发——此时玩家可能正在游戏中，直接弹窗重启会打断对局甚至丢进度，
+# 所以这里只把 updateManager 挂到 globalThis 做标记，不做任何提示；
+# 真正的「重启提示 + applyUpdate」延后到 HomePage.render()（玩家回到首页的安全时机）。
 # 注意：wx.getUpdateManager 仅正式版生效，开发版/体验版不触发回调。
+MARKER_START = "// ===== 版本更新检查"
+MARKER_END = "// ===== 版本更新检查结束 ====="
 UPDATE_CHECK_JS = """\
 // ===== 版本更新检查：由 fix_subpackage.py 注入，勿手动修改 =====
 (function () {
     if (typeof wx === 'undefined' || !wx.getUpdateManager) { return; }
     var updateManager = wx.getUpdateManager();
+    // 新包下载完成：只挂标记，绝不在这里弹窗（玩家可能正在对局中）。
+    // 消费方：HomePage.render() —— 所有「返回首页」路径的唯一漏斗。
     updateManager.onUpdateReady(function () {
-        wx.showModal({
-            title: '更新提示',
-            content: '新版本已准备好，请重启游戏体验最新内容',
-            showCancel: false,
-            confirmText: '立即重启',
-            success: function (res) {
-                if (res.confirm) {
-                    updateManager.applyUpdate();
-                }
-            }
-        });
+        globalThis.__wxPendingUpdate = updateManager;
     });
     updateManager.onUpdateFailed(function () {
         console.warn('[update] 新版本下载失败，将在下次冷启动时重试');
     });
 })();
+// ===== 版本更新检查结束 =====
 """
 
 
+def _strip_existing_block(content):
+    """摘掉 game.js 里已有的注入块，返回 (剩余内容, 是否摘到)。
+
+    新格式有起止标记，直接按标记切；旧格式（只有起始标记、无结束标记）是单个
+    IIFE，切到其后第一个 "})();" 为止——这样老 build 重跑脚本也能替换成新逻辑，
+    不会因为「文件里已有 getUpdateManager」就跳过、把旧的强更弹窗留在包里。
+    """
+    start = content.find(MARKER_START)
+    if start == -1:
+        return content, False
+
+    end_pos = content.find(MARKER_END, start)
+    if end_pos != -1:
+        cut_end = end_pos + len(MARKER_END)
+    else:
+        iife_end = content.find("})();", start)
+        if iife_end == -1:
+            return content, False
+        cut_end = iife_end + len("})();")
+
+    while cut_end < len(content) and content[cut_end] in "\r\n":
+        cut_end += 1
+    return content[:start] + content[cut_end:], True
+
+
 def inject_update_manager():
-    """在 wechatgame 的 game.js 开头注入版本更新检查（幂等，重复执行自动跳过）"""
+    """在 wechatgame 的 game.js 开头注入版本更新检查（幂等；已有旧版本会被替换）"""
     if not os.path.exists(GAME_JS_PATH):
         print(f"[ERROR] 找不到 game.js: {GAME_JS_PATH}")
         sys.exit(1)
 
     with open(GAME_JS_PATH, "r", encoding="utf-8") as f:
-        content = f.read()
+        original = f.read()
 
-    if "getUpdateManager" in content:
-        print(f"[OK] game.js 已包含版本更新检查，跳过注入")
+    stripped, had_block = _strip_existing_block(original)
+    updated = UPDATE_CHECK_JS + "\n" + stripped
+
+    if updated == original:
+        print(f"[OK] game.js 版本更新检查已是最新，跳过注入")
         return
 
     with open(GAME_JS_PATH, "w", encoding="utf-8") as f:
-        f.write(UPDATE_CHECK_JS + "\n" + content)
+        f.write(updated)
 
-    print(f"[FIXED] 已在 game.js 开头注入版本更新检查（onUpdateReady 弹窗后仅可立即重启）")
+    action = "已替换为最新版" if had_block else "已注入"
+    print(f"[FIXED] game.js 版本更新检查{action}（只挂标记，回首页时才提示重启）")
 
 
 def fix_settings_json():

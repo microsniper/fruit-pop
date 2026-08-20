@@ -68,8 +68,41 @@ export class HomePage {
 
     constructor(private gm: GameManager) {}
 
+    /**
+     * 新版本重启提示：game.js 注入的 UpdateManager 在新包下载完成时只挂
+     * globalThis.__wxPendingUpdate 标记（不打断对局），这里是唯一消费点。
+     *
+     * 放在首页是因为 render() 是所有「返回首页」路径的唯一漏斗（对局失败返回、
+     * 无限模式结算领奖完、每日挑战结算、商店/仓库/排行榜返回、冷启动首次进首页），
+     * 此刻不在对局中，重启不会丢进度。
+     *
+     * 标记先清后弹：applyUpdate 万一没能重启（或被平台忽略），本次会话也不会
+     * 每次回首页都再弹一次，下次冷启动微信会自然用上新包。
+     * 注意 wx.getUpdateManager 仅正式版生效，开发版/体验版走不到这里。
+     */
+    private promptPendingUpdate() {
+        const g = globalThis as any;
+        const updateManager = g.__wxPendingUpdate;
+        if (!updateManager) return;
+        g.__wxPendingUpdate = null;
+
+        if (typeof wx === 'undefined' || !wx.showModal) return;
+        wx.showModal({
+            title: '更新提示',
+            content: '新版本已准备好，请重启游戏体验最新内容',
+            showCancel: false,
+            confirmText: '立即重启',
+            success: (res: any) => {
+                if (res && res.confirm) {
+                    updateManager.applyUpdate();
+                }
+            },
+        });
+    }
+
     /** 首页：模式选择页（无限模式 / 每日挑战），与排行榜页同样的整页切换方式 */
     render() {
+        this.promptPendingUpdate();
         this.close();
         this.gm.rankPage.close();
         this.gm.storagePage.close();
@@ -684,12 +717,13 @@ export class HomePage {
         this.gm.coinCountLabel = null;
         this.gm.coinIconNode = null;
         // 授权叠层只服务首页按钮，离开首页即销毁（重新 render 时会再创建）
-        this.gm.destroyAuthOverlay('rank');
-        this.gm.destroyAuthOverlay('signin');
+        this.gm.destroyAllAuthOverlay();
     }
 
     /** 进入无限模式：重开一局全新局面（关卡号不变），首次进入时补触发新手引导 */
     private enterEndlessMode() {
+        // 离开首页：销毁首页节点与微信原生授权按钮，避免悬浮按钮在对局里误弹授权
+        this.close();
         // 经 Loading 场景进入无限模式：加载页展示真实进度，完成后由 GameManager 直接进对局
         LoadingPage.target = 'endless';
         director.loadScene('Loading');
@@ -982,6 +1016,8 @@ export class HomePage {
             this.renderRegionSelectModal();
             return;
         }
+        // 离开首页：销毁首页节点与微信原生授权按钮，避免悬浮按钮在对局里误弹授权
+        this.close();
         // 经 Loading 场景进入每日挑战：GameManager 按 target='daily' 实例化 DailyDriver 并直进对局
         LoadingPage.target = 'daily';
         director.loadScene('Loading');

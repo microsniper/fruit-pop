@@ -1,4 +1,4 @@
-import { _decorator, Component, Node, Vec2, Vec3, Size, UITransform, Label, Color, tween, Graphics, director, Canvas, Widget, Mask, screen, view, Layers, Sprite, SpriteFrame, resources, ImageAsset, LabelOutline, UIOpacity, RigidBody2D, BoxCollider2D, CircleCollider2D, ERigidBody2DType, PhysicsSystem2D, assetManager, Texture2D } from 'cc';
+import { _decorator, Component, Node, Vec2, Vec3, Size, UITransform, Label, Color, tween, Tween, Graphics, director, Canvas, Widget, Mask, screen, view, Layers, Sprite, SpriteFrame, resources, ImageAsset, LabelOutline, UIOpacity, RigidBody2D, BoxCollider2D, CircleCollider2D, ERigidBody2DType, PhysicsSystem2D, assetManager, Texture2D } from 'cc';
 import { consumeShareCount, reportEvent, fetchGameConfig, GameConfig, getDailyHelpStatus, getGameConfig, hasUserProfile, updateProfile, useDailyHelp, fetchResources, fetchCollectByIds, fetchCollectByCodes, fetchStarterGift, ResourceCodeTypeEnum, getDailyStatus, DailyHelpResponse, RewardItem, ItemTypeEnum, CollectItem } from './api';
 import { CollectStore } from './CollectStore';
 import { SoundManager } from './SoundManager';
@@ -12,7 +12,9 @@ import { HomePage } from './HomePage';
 import { RankPage } from './RankPage';
 import { StoragePage } from './StoragePage';
 import { ShopPage } from './ShopPage';
+import { BubbleTip } from './BubbleTip';
 import { PropStore } from './PropStore';
+import { MyStoragePopup } from './MyStoragePopup';
 
 // @ts-ignore
 const { ccclass } = _decorator;
@@ -408,7 +410,6 @@ const LAYER_RECT_PLATE_FIRST = 2;
 const LAYER_SHAPE_PLATE_FIRST = 4;
 
 let tutorialShown = false;
-let challengeTipShown = false;
 
 @ccclass('GameManager')
 export class GameManager extends Component {
@@ -433,10 +434,10 @@ export class GameManager extends Component {
     public totalCoins = 0;
     /** 金币不足提示横幅节点：用于幂等控制，显示期间忽略重复触发 */
     private coinShortageTipNode: Node | null = null;
-    /** 暂存区满 4 时指向解锁果篮的引导小手节点 */
+    /** 暂存区引导小手节点（差一个满/满时指向当前场景该操作的目标） */
     private tempFullGuideNode: Node | null = null;
-    /** 引导“已武装”：每关开始武装一次，弹出后解除，本关内不再重复弹（initGame 重置） */
-    private tempGuideArmed = true;
+    /** 上次已弹引导的状态（场景+数量）：同一状态反复 renderTopUI 不重复弹，暂存区回落或场景变化后再弹 */
+    private tempGuideLastKey = '';
     /** 砸板子呼吸动效进行中、等待掉落的板子 id：防止呼吸窗口内重复选板（initGame 重置） */
     private smashingPlateId: string | null = null;
     // 道具每关已用次数与上限由 this.driver 维护（见 ModeDriver）：
@@ -474,6 +475,10 @@ export class GameManager extends Component {
     private catIconNode: Node | null = null;
     private catColorMaskNode: Node | null = null;
     private catPercentLabel: Label | null = null;
+    /** 玩偶图标呼吸结束回调（到期停呼吸并复位）；提前停/重复触发由 stopCatIconPulse 统一清理 */
+    private catIconPulseCb: (() => void) | null = null;
+    /** 无限模式：本关果篮刷新计数，前10次固定3孔，之后走数据库权重配置 */
+    private endlessBoxRefreshCount = 0;
     private toolContainerNode: Node | null = null;
     /** loadRemoteImage 按 URL 缓存 SpriteFrame：同一张远程图（商城/仓库来回切 tab、奖励弹窗重复出现）不重复下载。
      *  LRU 上限：超限淘汰最久未用的并释放 Texture2D/ImageAsset，避免水果图标/商城/签到等远程图
@@ -488,6 +493,8 @@ export class GameManager extends Component {
     public readonly rankPage = new RankPage(this);
     public readonly storagePage = new StoragePage(this);
     public readonly shopPage = new ShopPage(this);
+    /** 游戏区猫咪气泡提示：文案后台配置，进关启动、离开游戏页停 */
+    public readonly bubbleTip = new BubbleTip(this);
 
     // ===== 微信授权头像通用叠层（排行榜/签到等入口共用） =====
     /** 按 key 管理的微信原生授权按钮实例，支持多个入口共存 */
@@ -554,6 +561,15 @@ export class GameManager extends Component {
     public destroyAuthOverlay(key: string): void {
         const btn = this.authBtnMap[key];
         if (btn) {
+            try { btn.destroy(); } catch { }
+            delete this.authBtnMap[key];
+        }
+    }
+
+    /** 销毁所有授权按钮：离开首页时调用，微信原生按钮不随场景/页面销毁，必须显式清理 */
+    public destroyAllAuthOverlay(): void {
+        for (const key of Object.keys(this.authBtnMap)) {
+            const btn = this.authBtnMap[key];
             try { btn.destroy(); } catch { }
             delete this.authBtnMap[key];
         }
@@ -754,7 +770,6 @@ export class GameManager extends Component {
         this.setLevelLoadProgress(0.2);
 
         const finalize = () => {
-            this.scheduleLevelEntryTips();
             this.setLevelLoadProgress(1);
             this.hideLevelLoading();
             if (enterTarget === 'endless' || enterTarget === 'daily') {
@@ -762,6 +777,8 @@ export class GameManager extends Component {
                 if (enterTarget === 'endless') {
                     this.showWelcomeFlowIfNeeded();
                 }
+                // 冷启动直接进模式：这条路不走 rebuildGameView，气泡要在这儿单独启一次
+                this.bubbleTip.start(this.driver.mode);
             } else {
                 // 先进首页选择模式：render() 会清掉刚建好的板子节点，物理刚体不需要，直接标记就位
                 this._physicsReady = true;
@@ -969,11 +986,7 @@ export class GameManager extends Component {
         }
     }
 
-    private showChallengeTip() {
-        this.renderCommonTip('⚡ 挑战关卡', '果篮刷新变懒了！\n不再优先帮你匹配颜色，\n规划好再摘，别让暂存盘塞满～');
-    }
-
-    /**
+        /**
      * 图片放大预览：纯图不带文字/按钮，遮罩或图片本身点击即关闭。
      * 商城/仓库的收集品图标点开看大图用，imageUrl 空则不弹（调用方兜底判断）。
      */
@@ -1471,7 +1484,6 @@ export class GameManager extends Component {
         if (!this.boardContentNode) {
             // 容器异常缺失时按原流程同步完成并收起，不卡加载页
             this.renderAll();
-            this.scheduleLevelEntryTips();
             this.setLevelLoadProgress(1);
             this.hideLevelLoading();
             return;
@@ -1518,7 +1530,6 @@ export class GameManager extends Component {
                 this.renderTopUI();
                 this.renderTools();
                 this.renderModal(null);
-                this.scheduleLevelEntryTips();
             } catch (e) {
                 console.error('[LevelLoad] finalize failed:', e);
             }
@@ -1863,6 +1874,14 @@ export class GameManager extends Component {
 
         this.catPercentLabel = this.createLabel(container, '进度0%', 0, -iconSize / 2 - 14, 14, new Color(80, 60, 35, 255), true);
         this.updateCatProgress();
+
+        // 点击玩偶图标：打开「我的仓库」弹窗（查看收集品并换装）。对局结束后不再响应（与锁定果篮点击同款守卫）
+        container.on(Node.EventType.TOUCH_END, (e: any) => {
+            e.propagationStopped = true;
+            if (this.gameOver) return;
+            SoundManager.getInstance()?.playSystemClick();
+            new MyStoragePopup(this).open();
+        }, this);
     }
 
     /** 按本关摘果进度刷新猫咪彩色遮罩高度与百分比文字；总数未知（0）时视为 0%，不报错 */
@@ -1875,6 +1894,56 @@ export class GameManager extends Component {
             maskTransform.setContentSize(maskTransform.width, CAT_ICON_SIZE * ratio);
         }
         this.catPercentLabel.string = `进度${Math.floor(ratio * 100)}%`;
+    }
+
+    /** 换装后重载玩偶图标：销毁旧节点重建（灰/彩图按最新当前展示项加载），进度由 updateCatProgress 自动恢复 */
+    public refreshCatIconImage() {
+        if (this.catIconNode && this.catIconNode.isValid) {
+            this.catIconNode.destroy();
+        }
+        this.catIconNode = null;
+        this.catColorMaskNode = null;
+        this.catPercentLabel = null;
+        this.buildCatProgressIcon();
+    }
+
+    /**
+     * 气泡冒「点我可以切换形象哦」时玩偶图标开始呼吸（幅度 10%、周期 0.6s），
+     * duration 秒后自动停（气泡淡出即停）；气泡被顶掉/离开对局时由 BubbleTip 调 stopCatIconPulse 提前停。
+     */
+    public startCatIconPulse(duration: number) {
+        const node = this.catIconNode;
+        if (!node || !node.isValid) return;
+        this.stopCatIconPulse();
+        tween(node)
+            .to(0.3, { scale: new Vec3(1.1, 1.1, 1) }, { easing: 'sineInOut' })
+            .to(0.3, { scale: new Vec3(1, 1, 1) }, { easing: 'sineInOut' })
+            .union()
+            .repeatForever()
+            .start();
+        const cb = () => {
+            this.catIconPulseCb = null;
+            // 期间图标可能已被换装重建（refreshCatIconImage），新节点是静止的，不动它
+            if (this.catIconNode && this.catIconNode.isValid && this.catIconNode === node) {
+                Tween.stopAllByTarget(node);
+                node.setScale(1, 1, 1);
+            }
+        };
+        this.catIconPulseCb = cb;
+        this.scheduleOnce(cb, duration);
+    }
+
+    /** 停止玩偶图标呼吸并复位；没在呼吸时调用无害 */
+    public stopCatIconPulse() {
+        if (this.catIconPulseCb) {
+            this.unschedule(this.catIconPulseCb);
+            this.catIconPulseCb = null;
+        }
+        const node = this.catIconNode;
+        if (node && node.isValid) {
+            Tween.stopAllByTarget(node);
+            node.setScale(1, 1, 1);
+        }
     }
 
     private buildStaticTopUI() {
@@ -1898,7 +1967,6 @@ export class GameManager extends Component {
     private initGame() {
         this.initGamePrepare();
         this.renderAll();
-        this.scheduleLevelEntryTips();
     }
 
     /** initGame 准备段：状态重置 + 销毁旧节点 + 生成关卡数据（启动与切关分帧共用） */
@@ -1909,12 +1977,13 @@ export class GameManager extends Component {
         this.plates = [];
         this.tempHoles = [];
         this.traysUnlockedThisLevel = 0; // 新一局果盘重新上锁（右侧 1 孔）
-        this.tempGuideArmed = true;
+        this.tempGuideLastKey = '';
         this.smashingPlateId = null;
         this.driver.resetPerLevel();
         this.removeTempFullGuide();
         this.flyingFruitColors = [];
         this.removedFruits = 0;
+        this.endlessBoxRefreshCount = 0;
         this.tools = { add: 0, clear: 1 };
         this.resetCombo();
         this.plateNodes.forEach((node) => {
@@ -1958,29 +2027,47 @@ export class GameManager extends Component {
         this.ensurePrimaryBoxes();
     }
 
-    /** 进关后的延迟提示：挑战关间隔关（原 initGame 尾部逻辑） */
-    private scheduleLevelEntryTips() {
-        // 挑战关卡，弹出挑战提示
-        const interval = this.gameConfig?.challengeInterval || 5;
-        if (this.currentLevel % interval === 0 && !challengeTipShown) {
-            challengeTipShown = true;
-            this.scheduleOnce(() => {
-                if (!this.isGameViewAlive()) {
-                    challengeTipShown = false;
-                    return;
-                }
-                this.showChallengeTip();
-            }, 0.8);
-        }
-    }
-
     /**
      * 当前还在不在游戏页。返回首页/排行榜会走 teardownGameView 把这几个容器置空，
      * 所以 boardAreaNode 还在就说明玩家没离开局。
      * 延迟弹的提示都要先过这一道：不然 scheduleOnce 的回调会把弹窗画到首页上。
      */
-    private isGameViewAlive() {
+    public isGameViewAlive() {
         return !!this.boardAreaNode;
+    }
+
+    /**
+     * 气泡提示能不能冒（BubbleTip 每次触发前问一次）。
+     * 判断收在这里，是为了不把 gameOver / modalLayerNode 这些内部状态暴露出去。
+     * 压制条件：已离开游戏页、本局已结束、或弹窗层里有东西（结算/失败/广告/奖励弹窗都挂在这层）。
+     */
+    public canShowBubbleTip(): boolean {
+        if (!this.isGameViewAlive()) return false;
+        if (this.gameOver) return false;
+        if (this.modalLayerNode && this.modalLayerNode.children.length > 0) return false;
+        return true;
+    }
+
+    /**
+     * 气泡的锚点：气泡右上角贴在这个点上，朝左下方展开，尾巴指向猫咪进度图标。
+     *
+     * 往左是因为猫咪在游戏区右侧（x=145，屏宽 375），往右会出界；
+     * y 直接取猫咪图标的 y（= screenHeight/2 - topHeight，正好是游戏中间区的上边界），
+     * 气泡顶边跟中间区上边界齐平，不再往下探进棋盘区域。
+     *
+     * 挂在 rootNode 而不是猫咪节点下：猫咪容器里有 Mask 做进度裁切，气泡挂进去会被一起裁掉。
+     * siblingIndex 取弹窗层当前位置，气泡插在弹窗层之前 → 压在三块区域背景之上、又在弹窗之下。
+     */
+    public getBubbleAnchor(): { parent: Node; x: number; y: number; siblingIndex: number } | null {
+        if (!this.rootNode || !this.catIconNode || !this.catIconNode.isValid) return null;
+        const catPos = this.catIconNode.getPosition();
+        return {
+            parent: this.rootNode,
+            // 从猫咪中心往左让开一点
+            x: catPos.x - 20,
+            y: catPos.y,
+            siblingIndex: this.modalLayerNode ? this.modalLayerNode.getSiblingIndex() : this.rootNode.children.length,
+        };
     }
 
     private destroyNodeRecursively(node: Node) {
@@ -2194,36 +2281,73 @@ export class GameManager extends Component {
     }
 
     /**
-     * 暂存区数量变化后判定要不要弹引导小手：
-     * 达 (当前容量-1)+ 且已武装且场上有锁定果篮才弹；每关只弹一次（弹完解除武装，initGame 重新武装）。
+     * 暂存区数量变化后判定要不要引导（不限次数，靠「场景+数量」状态沿去重）：
+     *   差一个满（容量-1）：还有锁定果篮 → 指果篮提示解锁；果篮全解锁且果盘还能加 → 指「加果盘」
+     *   满（=容量）  ：指「清空果盘」——下一颗就溢出失败了，先清盘保命
+     * 果篮果盘都满配的差一个满不提示，等真满了再提示清盘；
+     * 暂存区回落清掉状态沿，再次进入这些状态会重新提示。
+     * 只弹小手指向目标，不再冒对应文案气泡（三条 scene 文案已从 bubble_tips 配置移除）。
      */
     private updateTempFullGuide() {
-        if (this.tempHoles.length < this.getTempCapacity() - 1) {
+        const capacity = this.getTempCapacity();
+        const count = this.tempHoles.length;
+    
+        let scene: 'basket_locked' | 'add_tray' | 'clear_tray' | null = null;
+        if (count >= capacity) {
+            scene = 'clear_tray';
+        } else if (count >= capacity - 1) {
+            if (this.boxes.some((box) => box.color === 'locked')) {
+                scene = 'basket_locked';
+            } else if (capacity < this.maxTempHoles) {
+                scene = 'add_tray';
+            }
+        }
+    
+        if (!scene) {
+            this.tempGuideLastKey = ''; // 离开可提示状态：下次再进入时重新提示
             return;
         }
-        if (this.tempGuideArmed && this.boxes.some((box) => box.color === 'locked')) {
-            this.tempGuideArmed = false;
-            this.showTempFullGuide();
-        }
+    
+        const key = `${scene}_${count}`;
+        if (key === this.tempGuideLastKey) return; // 同一状态反复 render 不重复弹
+        this.tempGuideLastKey = key;
+    
+        console.log(`[TempGuide] 弹出引导 ${scene}：temp=${count}/${capacity}，锁定果篮=${this.boxes.filter((b) => b.color === 'locked').length}`);
+        this.showTempFullGuide(scene);
     }
 
-    /** 弹引导小手：指向第一个锁定果篮，提示点击解锁；停留 10 秒自动消失 */
-    private showTempFullGuide() {
-        if (!this.boxesContainerNode || !this.boxesContainerNode.isValid) return;
-        const lockedIndex = this.boxes.findIndex((box) => box.color === 'locked');
-        if (lockedIndex < 0) return;
-        const lockedView = this.boxViews[lockedIndex];
-        if (!lockedView || !lockedView.node || !lockedView.node.isValid) return;
+    /**
+     * 弹引导小手，指向当前情景该点的目标；停留 10 秒自动消失。
+     *   basket_locked → 第一个锁定果篮（果篮排容器内）
+     *   add_tray      → 底部「加果盘」按钮（道具容器内）
+     *   clear_tray    → 底部「清空果盘」按钮（道具容器内）
+     * 目标节点缺失（还没渲染出来等）就直接不弹，不影响气泡。
+     */
+    private showTempFullGuide(scene: 'basket_locked' | 'add_tray' | 'clear_tray') {
+        let parent: Node | null = null;
+        let target: Node | null = null;
+
+        if (scene === 'basket_locked') {
+            const lockedIndex = this.boxes.findIndex((box) => box.color === 'locked');
+            if (lockedIndex < 0) return;
+            parent = this.boxesContainerNode;
+            target = this.boxViews[lockedIndex]?.node ?? null;
+        } else {
+            const key = scene === 'add_tray' ? 'addTray' : 'clear';
+            parent = this.toolContainerNode;
+            target = this.toolViews.find((v) => v.key === key)?.node ?? null;
+        }
+
+        if (!parent || !parent.isValid || !target || !target.isValid) return;
 
         this.removeTempFullGuide();
 
-        // 手图 144x256，指尖朝左上；手放果篮右下，指尖落在果篮上（照 HomePage 引导手的做法）
+        // 手图 144x256，指尖朝左上；手放目标右下，指尖落在目标上（照 HomePage 引导手的做法）
         const handH = 62;
         const handW = Math.round(handH * 144 / 256);
-        const boxX = lockedView.node.position.x;
-        const hx = boxX + handW * 0.4;
-        const hy = -handH * 0.42;
-        const handNode = this.createNode('TempFullGuideHand', this.boxesContainerNode, hx, hy, handW, handH);
+        const hx = target.position.x + handW * 0.4;
+        const hy = target.position.y - handH * 0.42;
+        const handNode = this.createNode('TempFullGuideHand', parent, hx, hy, handW, handH);
         handNode.setSiblingIndex(9999);
         this.tempFullGuideNode = handNode;
         const handSprite = handNode.addComponent(Sprite);
@@ -2234,7 +2358,7 @@ export class GameManager extends Component {
             }
         }).catch(() => {});
 
-        // 朝果篮方向（左上）反复轻戳；手指不挂触摸，不挡果篮点击
+        // 朝目标方向（左上）反复轻戳；手指不挂触摸，不挡目标本身的点击
         tween(handNode)
             .to(0.45, { position: new Vec3(hx - 5, hy + 7, 0) }, { easing: 'sineInOut' })
             .to(0.45, { position: new Vec3(hx, hy, 0) }, { easing: 'sineInOut' })
@@ -3692,6 +3816,55 @@ export class GameManager extends Component {
         return `${Math.floor((this.removedFruits / this.totalFruits) * 100)}%`;
     }
 
+    /** 当天每日挑战已挑战次数（跨天自动重置为 0）；每日挑战 generateLevel 时 bump+1 */
+    private getDailyChallengeAttemptCount(): number {
+        try {
+            const today = this.getTodayStr();
+            const raw = typeof wx !== 'undefined'
+                ? wx.getStorageSync('daily_challenge_attempt')
+                : localStorage.getItem('daily_challenge_attempt');
+            if (raw) {
+                const data = JSON.parse(raw);
+                if (data?.date === today) return data.count || 0;
+            }
+        } catch (e) {}
+        return 0;
+    }
+
+    private setDailyChallengeAttemptCount(count: number) {
+        try {
+            const data = JSON.stringify({ date: this.getTodayStr(), count });
+            if (typeof wx !== 'undefined') {
+                wx.setStorageSync('daily_challenge_attempt', data);
+            } else {
+                localStorage.setItem('daily_challenge_attempt', data);
+            }
+        } catch (e) {}
+    }
+
+    /** 当天挑战次数 +1 落盘，返回 +1 后的次数（用于按次数选 wave plan key） */
+    private bumpDailyChallengeAttemptCount(): number {
+        const count = this.getDailyChallengeAttemptCount() + 1;
+        this.setDailyChallengeAttemptCount(count);
+        return count;
+    }
+
+    /**
+     * 按挑战次数选 wave plan/wave_plates 的 key：找 <= attempt 的最大 key（向下取整），
+     * 超过配置最大 key 用最大 key 延续，attempt 小于最小 key 用最小 key 兜底。
+     * plan 缺失或无数字 key 返回 undefined。
+     */
+    private pickDailyWaveKey(plan: { [k: string]: any } | undefined, attempt: number): string | undefined {
+        if (!plan) return undefined;
+        const keys = Object.keys(plan).map(Number).filter((k) => !isNaN(k)).sort((a, b) => a - b);
+        if (keys.length === 0) return undefined;
+        let picked = keys[0];
+        for (const k of keys) {
+            if (k <= attempt) picked = k;
+        }
+        return String(picked);
+    }
+
     private generateLevel() {
         this.plates = [];
 
@@ -3702,6 +3875,22 @@ export class GameManager extends Component {
         this.shuffledColors = [...COLORS].sort(() => Math.random() - 0.5);
         // 层流规则按关取：无限模式按关卡区间（第 1 关 driver 内写死新手局），每日挑战读自己的配置
         this.layerRules = this.driver.getLayerRules(levelNum);
+        // 无限模式挑战化配置（endless_challenge_wave_plan，按关卡区间）：命中区间就套每日挑战那套
+        // 分批规划手感；未命中任何区间时 endlessPlanRange 为 undefined，后面各处天然退回旧的整关曲线。
+        const endlessPlanRange = !isDaily
+            ? this.gameConfig?.endlessChallengeWavePlan?.find((r) => levelNum <= r.max)
+            : undefined;
+        // 命中区间的 4 个字段逐个覆盖 endless_layer_rules 同名字段（按字段覆盖，某字段缺省
+        // 就沿用 endless_layer_rules 的值）；maxPlates 仍只读 endless_layer_rules，不接入本配置
+        // （单层铺板量由 endless_challenge_wave_plates 每批自己的 maxPlates 决定，优先级更高，
+        // layerRules.maxPlates 只在某层没有对应批次配置时才当兜底值用）。
+        // 包括第 1 关（driver 硬编码的新手局层流规则同样会被这里覆盖）。
+        if (endlessPlanRange) {
+            if (endlessPlanRange.maxLayers != null) this.layerRules.maxLayers = endlessPlanRange.maxLayers;
+            if (endlessPlanRange.initialLoad != null) this.layerRules.initialLoad = endlessPlanRange.initialLoad;
+            if (endlessPlanRange.unburyRatio != null) this.layerRules.unburyRatio = endlessPlanRange.unburyRatio;
+            if (endlessPlanRange.refillRatio != null) this.layerRules.refillRatio = endlessPlanRange.refillRatio;
+        }
         const numColors = Math.min(COLORS.length, 4 + Math.floor((levelNum - 1) / 2));
         const activeColors = this.shuffledColors.slice(0, numColors);
         this.boxes[0].color = 'empty';
@@ -3718,9 +3907,13 @@ export class GameManager extends Component {
         // 彩虹果不再随关卡生成（无限模式/每日挑战均不刷），仅保留签到背包发放入口
         const rainbowTotal = 0;
 
-        // 每日挑战批次计划（daily_challenge_wave_plan）：batches 展开为逐层颜色数与层→批归属，
-        // 批内各层共用该批颜色池（如批1四色/批2六色/批3八色），难度逐批递增；未配置走无限模式曲线
-        const wavePlanBatches = isDaily ? this.gameConfig?.dailyWavePlan?.[String(levelNum)]?.batches : undefined;
+        // 批次计划：batches 展开为逐层颜色数与层→批归属，批内各层共用该批颜色池，难度逐批递增。
+        // 每日挑战按当天挑战次数选 key（次数越多难度越低，超配置用最后一次延续）；无限模式按关卡区间；
+        // 都未配置则走原整关曲线
+        const dailyAttempt = isDaily ? this.bumpDailyChallengeAttemptCount() : 0;
+        const wavePlanBatches = isDaily
+            ? this.gameConfig?.dailyWavePlan?.[this.pickDailyWaveKey(this.gameConfig?.dailyWavePlan, dailyAttempt) ?? '']?.batches
+            : endlessPlanRange?.batches;
         let layerColors: number[] | null = null;
         let layerBatchIndex: number[] | null = null;
         if (wavePlanBatches && wavePlanBatches.length > 0) {
@@ -3754,8 +3947,12 @@ export class GameManager extends Component {
         const waveColorLists: FruitColor[][] = [];
         this.totalFruits = 0;
 
-        // 每日挑战每层板子数配置（daily_challenge_wave_plates，按批）：缺省批不限制铺满
-        const wavePlatesCfgBatches = isDaily ? this.gameConfig?.dailyWavePlates?.[String(levelNum)]?.batches : undefined;
+        // 每层板子数配置（按批）：每日挑战按当天挑战次数选 key，无限模式按关卡区间；缺省批不限制铺满
+        const wavePlatesCfgBatches = isDaily
+            ? this.gameConfig?.dailyWavePlates?.[this.pickDailyWaveKey(this.gameConfig?.dailyWavePlates, dailyAttempt) ?? '']?.batches
+            : this.gameConfig?.endlessChallengeWavePlates?.find((r) => levelNum <= r.max)?.batches;
+        // 开局果篮取色范围（无限模式按 layerRules.initialLoad 层数，每日挑战仅第 0 层）
+        const initialWaveCount = isDaily ? 1 : Math.min(waveCount, this.layerRules.initialLoad);
 
         for (let wave = 0; wave < waveCount; wave++) {
             // 先把这一层的板子铺满棋盘，再按孔位总数定这层发多少果子：
@@ -3783,6 +3980,28 @@ export class GameManager extends Component {
                 const color = wavePalette[i % wavePalette.length];
                 waveFruits.push(color, color, color);
             }
+            // 无限模式且未走批次配置（!layerColors，退回整关曲线）时的安全网：
+            // 开局已启用层（wave < initialWaveCount）合计颜色不能只有 1 种，否则果篮 1 找不到第二色只能空着。
+            // 走了批次配置（layerColors 有值）就不需要这道网——批次第一批本身就该配多色，
+            // 交给策划在 endless_challenge_wave_plan 里保证，这里不再重复介入。
+            // 凑到最后一层发现合计仍只有 1 色，且确实有多余的一组三胞胎可换（不是唯一的那一组，
+            // 否则换完还是 1 色），就把这层的第一组三胞胎强制换成色池里的另一种颜色。
+            if (!isDaily && !layerColors && wave === initialWaveCount - 1 && (wave > 0 || triplets >= 2)) {
+                const unionColors = new Set<FruitColor>();
+                for (let w = 0; w < wave; w++) {
+                    waveColorLists[w].forEach((c) => { if (c !== FruitColor.RAINBOW) unionColors.add(c); });
+                }
+                waveFruits.forEach((c) => { if (c !== FruitColor.RAINBOW) unionColors.add(c); });
+                if (unionColors.size < 2 && activeColors.length >= 2 && waveFruits.length >= 3) {
+                    const existing = [...unionColors][0];
+                    const altColor = activeColors.find((c) => c !== existing);
+                    if (altColor) {
+                        waveFruits[0] = altColor;
+                        waveFruits[1] = altColor;
+                        waveFruits[2] = altColor;
+                    }
+                }
+            }
             if (wave < rainbowTotal) {
                 waveFruits.push(FruitColor.RAINBOW);
             }
@@ -3794,19 +4013,26 @@ export class GameManager extends Component {
             this.totalFruits += placed;
         }
 
-        // 果篮初始色只能取最上层的颜色：更深的层还埋着点不到，
-        // 一开局就摆个点不到的颜色，等于白送一个果篮位
-        const firstWaveColors = [...new Set(waveColorLists[0] || [])].filter((color) => color !== FruitColor.RAINBOW);
-        // 兜底色池与第 0 层颜色池同口径（每日挑战批 1 颜色数）
-        const baseColors = layerColors ? this.shuffledColors.slice(0, Math.min(COLORS.length, layerColors[0])) : activeColors;
-        this.boxes[0].color = firstWaveColors[0] || FruitColor.YELLOW;
-        if (firstWaveColors.length > 1) {
-            this.boxes[1].color = firstWaveColors[1];
-        } else {
-            const otherColors = baseColors.filter((color) => color !== firstWaveColors[0]);
+        // 果篮初始色只能取「开局已启用层」的颜色：更深的层还埋着点不到，
+        // 一开局就摆个点不到的颜色，等于白送一个果篮位。
+        // 无限模式按 layerRules.initialLoad 配置的层数取（开局同时亮几层，果篮就该照那几层配色，
+        // 生成阶段已强制保证这几层合计至少 2 种颜色，见上面 wave 循环里的强制换色逻辑）；
+        // 每日挑战单独走原逻辑（仅看第 0 层 + 批1色池兜底），不受这次调整影响。
+        const initialColors = [...new Set(waveColorLists.slice(0, initialWaveCount).reduce((acc, list) => acc.concat(list), [] as FruitColor[]))]
+            .filter((color) => color !== FruitColor.RAINBOW);
+        this.boxes[0].color = initialColors[0] || FruitColor.YELLOW;
+        if (initialColors.length > 1) {
+            this.boxes[1].color = initialColors[1];
+        } else if (isDaily) {
+            // 每日挑战兜底：色池与批1颜色数同口径（原逻辑不变）
+            const baseColors = layerColors ? this.shuffledColors.slice(0, Math.min(COLORS.length, layerColors[0])) : activeColors;
+            const otherColors = baseColors.filter((color) => color !== initialColors[0]);
             this.boxes[1].color = otherColors.length > 0
                 ? otherColors[Math.floor(Math.random() * otherColors.length)]
-                : (firstWaveColors[0] || FruitColor.BLUE);
+                : (initialColors[0] || FruitColor.BLUE);
+        } else {
+            // 无限模式：开局已启用层里找不到第二种颜色就空篮，不凭空猜更深层的颜色
+            this.boxes[1].color = 'empty';
         }
 
         this.plates = this.plates.filter((plate) => plate.fruits.length > 0);
@@ -4249,7 +4475,7 @@ export class GameManager extends Component {
 
     private getNextCapacityForColor(color: BoxColor, targetBox: BoxData, minCapacity: number = 3): number {
         if (color === 'empty' || color === 'locked') return 3;
-    
+
         // 每日挑战第一关（单关制唯一关）：果篮按刷新次数递增孔数（3→4→5→6→6...），替代权重随机。
         // 每个果篮独立计数：首次刷新（含刚解锁）3 孔，之后逐次 +1，封顶 5 孔
         if (this.driver.mode === 'daily' && this.currentLevel === 1) {
@@ -4257,12 +4483,20 @@ export class GameManager extends Component {
             targetBox.refreshCount = count + 1;
             return Math.min(6, 3 + count);
         }
-    
-        // 孔数完全交给后端权重决定，不按场上剩余数钳制。
-        // 篮子没装满也卡不了关：某色果全进篮后 canClearBox 会提前清篮，
-        // 且过关只看"板子全掉 + 暂存区清空"（checkWin），没满的篮子不挡路
+
+        // 无限模式：每关前10次刷新固定3孔果篮（开局初始篮也计数），之后走数据库 box_capacity 权重
+        if (this.driver.mode === 'endless') {
+            this.endlessBoxRefreshCount++;
+            if (this.endlessBoxRefreshCount <= 10) return 3;
+        }
+
         const normalizedMinCapacity = Math.max(3, Math.min(6, minCapacity));
-        return Math.max(normalizedMinCapacity, this.getBoxCapacity());
+        const weighted = Math.max(normalizedMinCapacity, this.getBoxCapacity());
+        // 孔数不能超过这个颜色全关卡实际还能供应的数量（getOutstandingFruitCount，含彩虹果兜底），
+        // 否则容量比供应量还大，篮子永远装不满就被 canClearBox 提前清空，体验上像是"没放满就被刷"。
+        // 调用处都是先清空 targetBox.fruits 再算容量，这里统计的就是这个新篮子理论上能拿到的上限。
+        const supply = this.getOutstandingFruitCount(color) + this.getOutstandingFruitCount(FruitColor.RAINBOW);
+        return Math.max(normalizedMinCapacity, Math.min(weighted, supply || weighted));
     }
 
     private checkAllBoxesForClear() {
@@ -4929,9 +5163,10 @@ export class GameManager extends Component {
         this.flyingFruitColors.forEach((color) => {
             if (color !== FruitColor.RAINBOW) colors.add(color);
         });
-        // 每日挑战：最深已加载层进入批 2 起，刷色池并入「当前批全色 + 下一批全色」
+        // 走了批次配置（daily_challenge_wave_plan 或 endless_challenge_wave_plan，两模式共用同一套字段）
+        // 的关卡：最深已加载层进入批 2 起，刷色池并入「当前批全色 + 下一批全色」
         // （跨批提前备篮：批3的果子挖出来时有篮可进；批1期间不提前剧透）
-        if (this.driver.mode === 'daily' && this.dailyLayerColors && this.dailyLayerBatchIndex) {
+        if (this.dailyLayerColors && this.dailyLayerBatchIndex) {
             const deepestWave = Math.min(this.loadedWave, this.dailyLayerBatchIndex.length - 1);
             const deepestBatch = this.dailyLayerBatchIndex[deepestWave] ?? 0;
             if (deepestBatch >= 1) {
@@ -5012,7 +5247,11 @@ export class GameManager extends Component {
         }
     }
 
-    /** 某颜色“玩家拿得到”的总数：篮内 + 暂存区 + 已加载层的板上。未加载的深层不算，果篮不许傻等它们 */
+    /**
+     * 某颜色“玩家拿得到”的总数：篮内 + 暂存区 + 全部板上（含未加载深层）。
+     * 无限模式和每日挑战统一按全局口径：深层还有该色果子就不提前清（等凑满），
+     * 到最后一批全局=已加载，自然「果篮不满也消除」防死局，避免篮子还没满就被误判换色。
+     */
     private getOutstandingFruitCount(color: FruitColor) {
         let count = 0;
         this.boxes.forEach((box) => {
@@ -5021,12 +5260,8 @@ export class GameManager extends Component {
         this.tempHoles.forEach((tempColor) => {
             if (tempColor === color) count++;
         });
-        // 每日挑战按全局口径（含未加载深层）：深层还有该色果子就不提前清（等凑满），
-        // 到最后一批全局=已加载，自然「果篮不满也消除」防死局；无限模式保持已加载层口径
-        const isDaily = this.driver.mode === 'daily';
         this.plates.forEach((plate) => {
             if (plate.removed) return;
-            if (!isDaily && (plate.wave ?? 0) > this.loadedWave) return;
             plate.fruits.forEach((fruit) => {
                 if (!fruit.removed && fruit.color === color) {
                     count++;
@@ -5046,10 +5281,16 @@ export class GameManager extends Component {
         const config = this.gameConfig;
         const interval = config?.challengeInterval || 5;
         const isChallenge = this.currentLevel % interval === 0;
+        const isDaily = this.driver.mode === 'daily';
         // 每日挑战：固定用 daily_challenge_challenge_weights（缺省退回 challengeWeights）
-        const wt = this.driver.mode === 'daily'
+        // 无限模式：优先用 endless_challenge_wave_plan 命中区间的 weights（按关卡区间，与每日挑战同口径）；
+        // 未命中任何区间才退回旧的「挑战关/普通关」权重切换逻辑作为兜底
+        const endlessRangeWeights = !isDaily
+            ? config?.endlessChallengeWavePlan?.find((r) => this.currentLevel <= r.max)?.weights
+            : undefined;
+        const wt = isDaily
                     ? (config?.dailyChallengeWeights ?? config?.challengeWeights)
-                    : (isChallenge ? (config?.challengeWeights) : (config?.normalWeights));
+                    : (endlessRangeWeights ?? (isChallenge ? (config?.challengeWeights) : (config?.normalWeights)));
         const tempWeight   = wt?.temp  || 20;
         const clickWeight  = wt?.click || 30;
         const blockWeight  = wt?.block || 60;
@@ -5303,7 +5544,13 @@ export class GameManager extends Component {
             : this.pickRefreshColor(targetBox);
 
         this.updateBoxColor(targetBox, nextColor);
-        targetBox.capacity = this.getNextCapacityForColor(nextColor, targetBox);
+        // 无限模式：看广告/免费道具/求助好友解锁的果篮（第3、第4篮位）出生固定 3 孔，
+        // 不受前10次刷新计数影响、也不占计数（解锁=获得新篮，与刷新是两个口径）；
+        // 每日挑战保持原口径（走 getNextCapacityForColor 的关1递增逻辑）。
+        // 解锁篮后续被清空换色时，重新走前10次/数据库权重逻辑。
+        targetBox.capacity = this.driver.mode === 'endless'
+            ? 3
+            : this.getNextCapacityForColor(nextColor, targetBox);
         targetBox.isNew = true;
         this.removeTempFullGuide();
         this.renderTopUI();
@@ -5904,28 +6151,104 @@ export class GameManager extends Component {
         tween(panelNode).to(0.25, { scale: new Vec3(1, 1, 1) }, { easing: 'backOut' }).start();
     }
 
-    private readonly FRUIT_BLOCK_COVERAGE = 0.1;
+    /** 果子可见面积被上层板盖掉多少算「点不动」。分母是可见像素面积（见 FRUIT_VISIBLE_MASK），不是几何圆盘 */
+    private readonly FRUIT_BLOCK_COVERAGE = 0.2;
 
-    private isFruitBlocked(plate: PlateData, fruit: FruitData) {
-        const fruitLocalX = fruit.x - plate.w / 2;
-        const fruitLocalY = plate.h / 2 - fruit.y;
-        const fruitWorld = this.plateLocalToWorld(plate, fruitLocalX, fruitLocalY);
+    /** 采样网格：贴图局部坐标，原点=贴图中心，y 向上，步长 2，覆盖 30x30 视觉范围 */
+    private static readonly FRUIT_SAMPLE_MIN = -15;
+    private static readonly FRUIT_SAMPLE_STEP = 2;
+    /** createFruitVisual 把贴图节点相对孔位上移了 2px，采样点换算回板局部坐标时要补回来 */
+    private static readonly FRUIT_SPRITE_Y_OFFSET = 2;
 
-        // 采样圈跟果子的视觉半径对齐（fruitVisualSize / 2）：圈画大了会伸到隔壁板底下，
-        // 果子明明露着却被当成遮挡变成不可点，白白造出死局
-        const fruitRadius = 10;
-        const sampleStep = 3;
-        const samplePoints: { x: number; y: number }[] = [];
+    /**
+     * 果子可见区域采样掩码（tools/gen_fruit_mask.py 从贴图 alpha 烘出，勿手改）。
+     * 16 行 x 16bit：行 = 贴图局部 y 升序 -15..15 步长 2，行内 bit15..bit0 = x 升序。
+     *
+     * 为什么要这张表：果子贴图是不规则的（月牙香蕉、带梗樱桃、细长胡萝卜），
+     * 旧判定固定按「半径 10 的圆盘」撒点，香蕉/樱桃只有约一半采样点落在实体像素上，
+     * 板子蹭到旁边空白就被算成遮挡，于是「果子明明露着却点不动」。
+     * 有了掩码，分母变成肉眼可见面积，FRUIT_BLOCK_COVERAGE 对 15 种果子才是同一个意思。
+     */
+    private static readonly FRUIT_VISIBLE_MASK: Record<string, string> = {
+        'red': '000007f00ff81ff83ffc3ffc3ffc7ffc77fc37fc3ffc0ff807e006e000e00020',
+        'blue': '000007c00fe00ff01ff01ff01ff81ff81fe017e007e007e007c002c003800100',
+        'yellow': '0000000003001fe03ff87ffcfffc7ffe7ffe37fe37fe1ffc07f801c000000000',
+        'pink': '000007e01ff81ff83ffc3ffc3ffc3ffc3e7c1e381e380ff00ff00ff800780018',
+        'orange': '000007e00ff01ff81ff83ff83ff81ff817f80ff007e001f003f003f800780018',
+        'green': '000007e00ff01ff81ff81ff817f80ff00fe007e007e007c003c001e003e00060',
+        'purple': '00001e007f807fc0ffe05ff07ff01ff801f800fc00fe007e003e003e001e0000',
+        'cyan': '00000180018003c003c003c003c007c007c007c003c002c003c0038000400000',
+        'crimson': '000007e01ff81ff83ffc3ffc3ffc3ffc3ffc37fc1ff80ff003c003c003c00000',
+        'brown': '000000000ff01ffc3ffe3ffe37fe7ffe7ffefffefff87ff07fc03f0000000000',
+        'grape': '000003c003c007e00ff00ff00ffc1ffc1ffc1ffc3ffc3ff03fe00f000f600040',
+        'banana': '000007001fe03ff07ff87ffc03fe007e003e001e001e000e0004000400040000',
+        'melon': '000000001ffe1ffc3ffe7ffe7ffefff6fff07fe07fe03fc01f80038001000000',
+        'cherry': '00007ffe3efc7ffe7ffe7ffe7ffe3e7c002004400440021e023e01fc00b80000',
+        'rainbow': '0000000000000fc03ff03ff03ff83ff83ff83ff81ff80ff807f8003800000000',
+    };
 
-        for (let sx = -fruitRadius; sx <= fruitRadius; sx += sampleStep) {
-            for (let sy = -fruitRadius; sy <= fruitRadius; sy += sampleStep) {
-                if (sx * sx + sy * sy <= fruitRadius * fruitRadius) {
-                    samplePoints.push({ x: fruitWorld.x + sx, y: fruitWorld.y + sy });
+    /** 掩码解出来的可见采样点偏移（贴图局部坐标），按颜色缓存，只解一次 */
+    private static fruitSampleCache: Map<string, { x: number; y: number }[]> = new Map();
+
+    /**
+     * 解出某颜色果子的可见采样点偏移（贴图局部坐标，y 向上）。按颜色缓存，每种只解一次。
+     * 没有掩码的颜色（贴图缺失/新增颜色忘了烘表）退回半径 10 的圆盘，行为与改造前一致。
+     */
+    private static getFruitSampleOffsets(color: FruitColor): { x: number; y: number }[] {
+        const cached = GameManager.fruitSampleCache.get(color);
+        if (cached) return cached;
+
+        const min = GameManager.FRUIT_SAMPLE_MIN;
+        const step = GameManager.FRUIT_SAMPLE_STEP;
+        const points: { x: number; y: number }[] = [];
+        const mask = GameManager.FRUIT_VISIBLE_MASK[color];
+
+        if (mask && mask.length === 64) {
+            for (let row = 0; row < 16; row++) {
+                const bits = parseInt(mask.substr(row * 4, 4), 16);
+                for (let col = 0; col < 16; col++) {
+                    if (bits & (1 << (15 - col))) {
+                        points.push({ x: min + col * step, y: min + row * step });
+                    }
+                }
+            }
+        } else {
+            console.warn(`[Fruit] 颜色 ${color} 缺可见区域掩码，退回圆盘采样`);
+            for (let x = -10; x <= 10; x += step) {
+                for (let y = -10; y <= 10; y += step) {
+                    if (x * x + y * y <= 100) points.push({ x, y });
                 }
             }
         }
 
-        const totalSamples = samplePoints.length;
+        GameManager.fruitSampleCache.set(color, points);
+        return points;
+    }
+
+    private isFruitBlocked(plate: PlateData, fruit: FruitData) {
+        const samples = GameManager.getFruitSampleOffsets(fruit.color);
+        const total = samples.length;
+        if (total === 0) return false;
+
+        // 采样点存的是贴图局部坐标，先挪到板局部坐标（补回贴图相对孔位上移的 2px），
+        // 再转世界坐标。旋转自己算而不逐点调 plateLocalToWorld：sin/cos 只求一次
+        const baseX = fruit.x - plate.w / 2;
+        const baseY = plate.h / 2 - fruit.y + GameManager.FRUIT_SPRITE_Y_OFFSET;
+        const offset = this.getPlatePivotOffset(plate);
+        const pivotX = plate.x + offset.x;
+        const pivotY = plate.y + offset.y;
+        const rad = (plate.rotation || 0) * Math.PI / 180;
+        const cos = Math.cos(rad);
+        const sin = Math.sin(rad);
+
+        const toWorldX = (lx: number, ly: number) => pivotX + (lx - offset.x) * cos - (ly - offset.y) * sin;
+        const toWorldY = (lx: number, ly: number) => pivotY + (lx - offset.x) * sin + (ly - offset.y) * cos;
+
+        const centerX = toWorldX(baseX, baseY);
+        const centerY = toWorldY(baseX, baseY);
+        // 板级粗筛：采样点离果心最远 22px（半宽 15 的对角），够不着的板不用进点循环。
+        // 清篮换色时 getActionableCount 会按颜色把全场果子反复扫一遍，这层粗筛挡住绝大多数板
+        const REACH = 22;
 
         for (const other of this.plates) {
             if (other.id === plate.id || other.removed) continue;
@@ -5935,16 +6258,18 @@ export class GameManager extends Component {
             // 避免卡住的板子无视层级去挡本该在它前面、露在外面的果子
             if (other.layer <= plate.layer) continue;
 
-            let coveredCount = 0;
-            for (const point of samplePoints) {
-                if (this.isPointInsidePlate(other, point.x, point.y)) {
-                    coveredCount++;
-                }
+            const bounds = this.getPlateWorldBounds(other);
+            if (centerX + REACH < bounds.minX || centerX - REACH > bounds.maxX
+                || centerY + REACH < bounds.minY || centerY - REACH > bounds.maxY) continue;
+
+            let covered = 0;
+            for (let i = 0; i < total; i++) {
+                const lx = baseX + samples[i].x;
+                const ly = baseY + samples[i].y;
+                if (this.isPointInsidePlate(other, toWorldX(lx, ly), toWorldY(lx, ly))) covered++;
             }
 
-            if (coveredCount / totalSamples >= this.FRUIT_BLOCK_COVERAGE) {
-                return true;
-            }
+            if (covered / total >= this.FRUIT_BLOCK_COVERAGE) return true;
         }
 
         return false;
@@ -5956,23 +6281,25 @@ export class GameManager extends Component {
         if (Math.abs(local.x) > plate.w / 2 + 1 || Math.abs(local.y) > plate.h / 2 + 1) return false;
 
         if (plate.colliders && plate.colliders.length > 0) {
-            // 碰撞体口径是原点左上、y 向下，换算到跟 local 一致的原点中心、y 向上
+            // 碰撞体口径是原点左上、y 向下，换算到跟 local 一致的原点中心、y 向上。
+            // 这里不再放宽 1px：精判要贴合图形，放宽会让每块板的判定轮廓都胖一圈，
+            // 边缘擦碰被算成实压，叠加起来就是「果子露着却点不动」
             return plate.colliders.some((collider) => {
                 const ccx = collider.cx - plate.w / 2;
                 const ccy = plate.h / 2 - collider.cy;
                 if (collider.kind === 'circle') {
                     const dx = local.x - ccx;
                     const dy = local.y - ccy;
-                    return dx * dx + dy * dy <= collider.r * collider.r + 1;
+                    return dx * dx + dy * dy <= collider.r * collider.r;
                 }
-                return Math.abs(local.x - ccx) <= collider.w / 2 + 1
-                    && Math.abs(local.y - ccy) <= collider.h / 2 + 1;
+                return Math.abs(local.x - ccx) <= collider.w / 2
+                    && Math.abs(local.y - ccy) <= collider.h / 2;
             });
         }
 
         if (plate.type === 'circle') {
             const radius = Math.min(plate.w, plate.h) / 2;
-            return local.x * local.x + local.y * local.y <= radius * radius + 1;
+            return local.x * local.x + local.y * local.y <= radius * radius;
         }
         return local.x >= -plate.w / 2 && local.x <= plate.w / 2
             && local.y >= -plate.h / 2 && local.y <= plate.h / 2;
@@ -7310,6 +7637,7 @@ export class GameManager extends Component {
         this.tempSlotViews = [];
         this.toolViews = [];
         this.setupLayout();
+        this.bubbleTip.start(this.driver.mode);
     }
 
     /** 确保游戏界面存在：从首页打开设置弹窗点重开时，需先重建游戏布局再 initGame */
@@ -7328,10 +7656,13 @@ export class GameManager extends Component {
         this.tempSlotViews = [];
         this.toolViews = [];
         this.setupLayout();
+        this.bubbleTip.start(this.driver.mode);
     }
 
     /** 整页（排行榜/首页）切换前：隐藏并置空游戏主界面引用，返回游戏时由 goBackToGame 重建 */
     public teardownGameView() {
+        // 气泡先停：定时器还在跑的话，回调会把气泡画到首页上（与 isGameViewAlive 那道守卫同一个坑）
+        this.bubbleTip.stop();
         if (this.topAreaNode) this.topAreaNode.active = false;
         if (this.boardAreaNode) this.boardAreaNode.active = false;
         if (this.bottomAreaNode) this.bottomAreaNode.active = false;

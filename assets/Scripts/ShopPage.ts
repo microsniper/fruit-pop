@@ -3,14 +3,15 @@ import { fetchShopList, ShopItem, ShopGroup, ShopPage as ShopPageData, ItemTypeE
 import { BundleManager } from './BundleManager';
 import { CollectStore } from './CollectStore';
 import { drawTitlePlate, drawSegmentedTabs } from './PageTabs';
+import { SoundManager } from './SoundManager';
 import type { GameManager } from './GameManager';
 
 /**
  * 商城页：整页切换（与仓库页同款架构），纯代码绘制、无底图素材。
  * 目录来自后端 game_shop（道具关联资源表、收集关联收集表，价格表内配置），道具/收集各自独立分页，
- * 底部「上一页/下一页」按钮点击翻页（不是滚动自动加载）；切主 tab / 子 tab 时回到第一页重新拉取。
- * 购买纯前端扣币入账（totalCoins/PropStore），与道具/金币存储边界一致。
- * 收集页按 group_code 分子 tab；收集表暂无数据时占位「敬请期待」。
+ * 底部「上一页/下一页」按钮点击翻页（不是滚动自动加载）；切主 tab 时回到第一页重新拉取。
+ * 赭买纯前端扣币入账（totalCoins/PropStore），与道具/金币存储边界一致。
+ * 收集页全量混排（不再分子 tab）；收集表暂无数据时占位「敬请期待」。
  */
 
 const BROWN = new Color(110, 75, 45, 255);
@@ -24,20 +25,11 @@ const DISABLED_GRAY = new Color(190, 190, 180, 255);
 /** 商城每页条数 */
 const PAGE_SIZE = 10;
 
-/** 收集分组占位（收集表暂无上架商品时展示，仅视觉，不代表真实分组） */
-const COLLECT_GROUP_FALLBACK = [
-    { key: 'animal', name: '动物' },
-    { key: 'car', name: '豪车' },
-    { key: 'house', name: '房子' },
-];
-
 export class ShopPage {
     private pageNode: Node | null = null;
     private contentNode: Node | null = null;
     private balanceLabel: Label | null = null;
     private mainTab: 'tools' | 'collect' = 'tools';
-    /** 收集页子 tab：按 group_code 分组，空串=还没拿到后端分组列表，首次请求不带 groupCode（返回全部） */
-    private subTab = '';
     /** 顶栏 tab 的 Y 坐标（render 里算好，内容层布局复用） */
     private tabY = 0;
 
@@ -67,6 +59,8 @@ export class ShopPage {
     constructor(private gm: GameManager) {}
 
     open() {
+        // 离开首页：销毁首页节点与微信原生授权按钮，避免悬浮按钮在商城页误弹授权
+        this.gm.homePage.close();
         this.render();
     }
 
@@ -143,7 +137,6 @@ export class ShopPage {
             this.mainTab, 'main',
             (key) => {
                 this.mainTab = key as 'tools' | 'collect';
-                this.subTab = '';
                 this.renderMainTabs();
                 this.renderContent(); // 内部会 resetPaging，回到第一页
             }
@@ -162,7 +155,7 @@ export class ShopPage {
         this.loadPage(1);
     }
 
-    /** 切主 tab / 子 tab / 重进商城页：清空条目回到第一页，节点引用由 renderContent 负责清 */
+    /** 切主 tab / 重进商城页：清空条目回到第一页，节点引用由 renderContent 负责清 */
     private resetPaging() {
         this.items = [];
         this.page = 0;
@@ -182,12 +175,11 @@ export class ShopPage {
         this.loading = true;
         const category = this.mainTab === 'tools' ? 1 : 2;
         const requestedMainTab = this.mainTab;
-        const requestedSubTab = this.subTab;
-        fetchShopList(category, this.mainTab === 'collect' ? (this.subTab || undefined) : undefined, targetPage, PAGE_SIZE).then((data) => {
+        fetchShopList(category, undefined, targetPage, PAGE_SIZE).then((data) => {
             this.loading = false;
             if (!this.contentNode || !this.contentNode.isValid) return;
-            // 请求飞行期间用户切了 tab：这批数据已经不属于当前筛选，丢弃
-            if (requestedMainTab !== this.mainTab || requestedSubTab !== this.subTab) return;
+            // 请求飞行期间用户切了主 tab：这批数据已经不属于当前筛选，丢弃
+            if (requestedMainTab !== this.mainTab) return;
 
             this.page = targetPage;
             this.groups = data.groups;
@@ -201,7 +193,7 @@ export class ShopPage {
         });
     }
 
-    /** 数据到位：先清空旧内容（翻页/切子 tab 都会走到这），道具直接铺网格；收集需先画子 tab 再铺网格 */
+    /** 数据到位：先清空旧内容（翻页/切主 tab 都会走到这），道具/收集都直接铺网格 */
     private buildContentView(data: ShopPageData) {
         if (!this.contentNode || !this.contentNode.isValid) return;
         this.contentNode.destroyAllChildren();
@@ -226,31 +218,9 @@ export class ShopPage {
         this.drawPager();
     }
 
-    /** 收集商城：按 groupCode 分子 tab；无上架分组时占位分组+敬请期待 */
+    /** 收集商城：不再分子 tab，全部收集品混排（与我的仓库弹窗同口径） */
     private buildCollectView(data: ShopPageData) {
-        const subY = this.tabY - 80;
-        const groups = this.groups.length > 0
-            ? this.groups.map((g) => ({ key: g.groupCode, name: g.groupName }))
-            : COLLECT_GROUP_FALLBACK;
-
-        // 首次进页 subTab 为空（不带 groupCode 拿第一个分组的数据），或当前分组已不存在：锁到第一个分组重来一次
-        if (this.groups.length > 0 && !groups.some((g) => g.key === this.subTab)) {
-            this.subTab = groups[0].key;
-            this.renderContent();
-            return;
-        }
-
-        // 子 tab 分段条（二级导航：小一号、米色容器、橙色选中段）
-        drawSegmentedTabs(
-            this.gm, this.contentNode!, 'SubSegBar', subY,
-            groups, this.subTab, 'sub',
-            (key) => {
-                this.subTab = key;
-                this.renderContent(); // 内部会 resetPaging，回到第一页
-            }
-        );
-
-        const topY = subY - 40;
+        const topY = this.tabY - 40;
         if (data.items.length === 0) {
             this.gm.createLabel(this.contentNode!, '敬请期待', 0, topY - 40, 15, new Color(150, 160, 140, 255), true);
             return;
@@ -331,7 +301,10 @@ export class ShopPage {
         g.stroke();
         this.gm.createLabel(btn, text, 0, 0, 14, enabled ? BROWN : DISABLED_GRAY, true);
         if (enabled) {
-            btn.on(Node.EventType.TOUCH_END, onTap, this);
+            btn.on(Node.EventType.TOUCH_END, () => {
+                SoundManager.getInstance()?.playSystemClick();
+                onTap();
+            }, this);
         }
         return btn;
     }

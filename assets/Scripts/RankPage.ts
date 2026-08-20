@@ -30,6 +30,8 @@ export class RankPage {
     open(fromHome: boolean) {
         this.fromHome = fromHome;
         if (typeof wx === 'undefined' || hasUserProfile()) {
+            // 离开首页：销毁首页节点与微信原生授权按钮，避免悬浮按钮在排行榜页误弹授权
+            this.gm.homePage.close();
             this.loadAndShowRank();
             return;
         }
